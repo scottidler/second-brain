@@ -47,8 +47,12 @@ impl BorgCli {
                 file,
                 tags,
                 force,
+                note,
             }) => {
                 let outcome = if let Some(file_path) = file {
+                    if note.is_some() {
+                        eyre::bail!("--note applies to URL ingest, not --file");
+                    }
                     borg::ingest_file(config, file_path, tags, force).await?
                 } else {
                     let resolved_url = borg::resolve_ingest_url(url, clipboard)?;
@@ -57,7 +61,7 @@ impl BorgCli {
                     } else {
                         borg::types::IngestMethod::Cli
                     };
-                    borg::ingest(config, resolved_url, tags, force, method).await?
+                    borg::ingest(config, resolved_url, tags, force, method, note).await?
                 };
                 print_ingest_outcome(&outcome)
             }

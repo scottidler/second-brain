@@ -408,22 +408,40 @@ pub async fn reingest(
     Ok(report)
 }
 
+/// The `/ingest` body `sb borg ingest` POSTs. `note` is the existing
+/// `IngestRequest.note`; it is omitted when absent or blank so a bare capture
+/// sends exactly what it always did.
+pub(crate) fn ingest_body(
+    url: &str,
+    tags: Option<Vec<String>>,
+    force: bool,
+    method: types::IngestMethod,
+    note: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "url": url,
+        "tags": tags.unwrap_or_default(),
+        "force": force,
+        "method": method,
+    });
+    if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        body["note"] = serde_json::Value::String(note.to_string());
+    }
+    body
+}
+
 pub async fn ingest(
     config: Config,
     url: String,
     tags: Option<Vec<String>>,
     force: bool,
     method: types::IngestMethod,
+    note: Option<String>,
 ) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
 
-    let body = serde_json::json!({
-        "url": url,
-        "tags": tags.unwrap_or_default(),
-        "force": force,
-        "method": method,
-    });
+    let body = ingest_body(&url, tags, force, method, note.as_deref());
 
     // The client sends the write-route Bearer token when one is configured, so
     // enabling server.auth-token doesn't 401 this first-party CLI path.

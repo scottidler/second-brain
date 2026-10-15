@@ -18,6 +18,7 @@ async fn test_ingest_connection_refused() {
         None,
         false,
         types::IngestMethod::Cli,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -53,6 +54,7 @@ async fn ingest_against(behavior: crate::stub::Behavior) -> (Result<IngestOutcom
         None,
         false,
         types::IngestMethod::Cli,
+        None,
     )
     .await;
     (result, started.elapsed())
@@ -159,4 +161,32 @@ fn note_has_type_warns_with_the_path_when_the_note_is_unreadable() {
     ));
 
     assert_eq!(vault::capture::warns_containing("reingest-unreadable.md").len(), 1);
+}
+
+#[test]
+fn ingest_body_carries_the_note() {
+    let body = ingest_body(
+        "https://example.com",
+        None,
+        false,
+        types::IngestMethod::Cli,
+        Some("  why I saved it  "),
+    );
+    assert_eq!(body["note"], "why I saved it");
+    assert_eq!(body["url"], "https://example.com");
+}
+
+#[test]
+fn ingest_body_omits_a_blank_or_absent_note() {
+    for note in [None, Some(""), Some("   ")] {
+        let body = ingest_body("https://example.com", None, false, types::IngestMethod::Cli, note);
+        assert!(body.get("note").is_none(), "{body}");
+    }
+}
+
+#[test]
+fn ingest_body_deserializes_as_an_ingest_request() {
+    let body = ingest_body("https://example.com", None, true, types::IngestMethod::Cli, Some("n"));
+    let req: types::IngestRequest = serde_json::from_value(body).unwrap();
+    assert_eq!(req.note.as_deref(), Some("n"));
 }

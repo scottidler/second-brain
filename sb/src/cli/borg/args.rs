@@ -46,6 +46,11 @@ pub enum Command {
         /// which preserves the existing note's location and cortex fields)
         #[arg(long)]
         force: bool,
+        /// Why you are capturing this URL. Rendered into the note's
+        /// `## Why Captured` section and given to the distiller as the stated
+        /// interest. Applies to URL ingest only
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Quick text capture - create a note from text
     Note {

@@ -420,3 +420,33 @@ fn gate_0_with_a_missing_blocklist_lets_the_url_capture_through() {
     assert!(store.read_envelope(trace).is_ok(), "the capture was staged");
     assert_eq!(crate::stages::alert::fired_count(trace), 0, "no alert fired");
 }
+
+#[test]
+fn capture_extra_records_a_url_note_and_round_trips_through_the_envelope() {
+    let content = ContentKind::Url {
+        url: "https://example.com".to_string(),
+        note: Some("why".to_string()),
+    };
+    let store = MemArtifactStore::new();
+    let env = write_capture(&store, "t", &content, IngestMethod::Cli, None, capture_extra(&content)).unwrap();
+    assert_eq!(envelope_capture_note(&env).as_deref(), Some("why"));
+    assert_eq!(
+        envelope_capture_note(&store.read_envelope("t").unwrap()).as_deref(),
+        Some("why")
+    );
+}
+
+#[test]
+fn capture_extra_is_empty_without_a_note() {
+    let bare = ContentKind::Url {
+        url: "https://example.com".to_string(),
+        note: None,
+    };
+    let blank = ContentKind::Url {
+        url: "https://example.com".to_string(),
+        note: Some("  ".to_string()),
+    };
+    assert!(capture_extra(&bare).is_empty());
+    assert!(capture_extra(&blank).is_empty());
+    assert!(capture_extra(&ContentKind::Text("x".to_string())).is_empty());
+}

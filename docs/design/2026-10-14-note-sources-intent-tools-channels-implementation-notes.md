@@ -83,3 +83,16 @@
 - Fresh-wins vs. preserved-wins for `capture-note`: cortex scalars are preserved-wins because cortex's work is newer than a refetch; for a borg key the refetch IS the operator's newer statement.
 ### Open questions
 - None. (Resolved: whether the preserve path filters share boilerplate. The orchestrator answered yes; see Design decisions.)
+
+## Phase 6: --note through CLI, client, intake, replay
+### Design decisions
+- `sb borg ingest --note <TEXT>` (sb/src/cli/borg/args.rs, borg.rs) feeds `borg::ingest(.., note)`, whose body comes from the pure `client::ingest_body`: the note is trimmed and omitted when blank, so a bare capture sends the same bytes as before. The daemon's existing `IngestRequest.note` path does the rest; the field is additive, `extension_body_matches_ingest_request` still passes.
+- Intake record: the note is stored in the Stage-0 envelope's `extra` map (borg/src/stages/raw.rs `capture_extra`, read back by `envelope_capture_note`), keyed by `markdown::CAPTURE_NOTE_KEY` so the "capture-note" string is not hardcoded again. Staging is what `sb borg replay` already reads, and Stage 0 runs before any gate or fetch, so a failed trace holds the note.
+- Replay: pure `replay::replay_body(url, method, note)` builds the POST body (note only when present). `replay_note` prefers the envelope note (failed traces), else the published note's `capture-note:` found through `vault::identity::NoteIndex::resolve_trace` and read with Phase 5's `read_preserved_fields` (so block scalars and the boilerplate rule apply). `--bootstrap-from-vault` reads `capture-note:` straight from the note it was given.
+- `--note` with `--file` is a loud error (a file capture has no URL note seam).
+### Deviations
+- The design says "Intake records the note with the URL". The raw-input sidecar and receipts `raw_input` stay the bare URL (other readers treat them as the URL); the note is recorded in the staged envelope instead, which is the store replay reads. Same effect, correct seam.
+### Tradeoffs
+- Published-trace replay does a vault scan per replayed trace that has no envelope note, vs. trusting the receipts `note_path`: that path is a location snapshot, stale once `cortex classify` moves a note. Phase 5's fresh-vs-preserved rule means a force reingest keeps `capture-note` even without this lookup; the lookup makes the POST body honest.
+### Open questions
+- None.

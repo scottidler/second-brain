@@ -236,6 +236,64 @@ async fn url_trace_replay_never_takes_the_harvest_lock() {
     }
 }
 
+#[test]
+fn replay_of_a_failed_trace_ingested_with_a_note_sends_the_note() {
+    let dir = TempDir::new().unwrap();
+    let mut config = Config::default();
+    config.staging.enabled = true;
+    config.staging.root = dir.path().to_path_buf();
+    let store = FsArtifactStore::from_config(&config.staging);
+
+    // The capture as `--note` delivered it to the daemon; Stage 0 stages it
+    // before any gate or fetch, so a trace that then failed still holds it.
+    let content = crate::types::ContentKind::Url {
+        url: "https://example.com/article".to_string(),
+        note: Some("for the retry-budget idea\non page 3".to_string()),
+    };
+    crate::stages::raw::write_capture(
+        &store,
+        "trace-failed",
+        &content,
+        IngestMethod::Cli,
+        None,
+        crate::stages::raw::capture_extra(&content),
+    )
+    .unwrap();
+
+    let envelope = store.read_envelope("trace-failed").unwrap();
+    let note = replay_note(&config, &envelope, "trace-failed").unwrap();
+    let body = replay_body("https://example.com/article", "cli", note.as_deref());
+    assert_eq!(body["note"], "for the retry-budget idea\non page 3");
+    assert_eq!(body["force"], true);
+}
+
+#[test]
+fn replay_body_omits_note_when_there_is_none() {
+    let body = replay_body("https://example.com", "cli", None);
+    assert!(body.get("note").is_none(), "{body}");
+}
+
+#[test]
+fn capture_note_from_a_published_note_is_read_from_frontmatter() {
+    let mut file = NamedTempFile::new().unwrap();
+    write!(
+        file,
+        "---\ntitle: T\nsource: https://example.com\ncapture-note: |-\n  line one\n  line two\n---\nbody"
+    )
+    .unwrap();
+    assert_eq!(
+        capture_note_from_note(file.path()).unwrap().as_deref(),
+        Some("line one\nline two")
+    );
+}
+
+#[test]
+fn capture_note_from_a_note_without_one_is_none() {
+    let mut file = NamedTempFile::new().unwrap();
+    write!(file, "---\ntitle: T\nsource: https://example.com\n---\nbody").unwrap();
+    assert_eq!(capture_note_from_note(file.path()).unwrap(), None);
+}
+
 mod daemon_timeouts {
     use super::*;
     use crate::stub::{Behavior, serve};
@@ -255,7 +313,7 @@ mod daemon_timeouts {
     async fn reingest_via_a_silent_daemon_errs_within_twice_the_timeout() {
         let (port, _) = serve(Behavior::Silent).await;
         let started = Instant::now();
-        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli").await;
+        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli", None).await;
         assert!(result.is_err());
         assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
     }
@@ -264,7 +322,7 @@ mod daemon_timeouts {
     async fn reingest_via_a_stalled_body_errs_within_twice_the_timeout() {
         let (port, _) = serve(Behavior::HeadersThenStall).await;
         let started = Instant::now();
-        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli").await;
+        let result = reingest_via_daemon(&config_for(port), "https://example.com", "cli", None).await;
         assert!(result.is_err());
         assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
     }
@@ -272,7 +330,7 @@ mod daemon_timeouts {
     #[tokio::test]
     async fn reingest_401_with_a_non_json_body_names_the_401() {
         let (port, _) = serve(Behavior::Unauthorized).await;
-        let err = reingest_via_daemon(&config_for(port), "https://example.com", "cli")
+        let err = reingest_via_daemon(&config_for(port), "https://example.com", "cli", None)
             .await
             .expect_err("401");
         let msg = format!("{err:#}");

@@ -137,6 +137,32 @@ pub fn write_capture<S: ArtifactStore>(
     Ok(envelope)
 }
 
+/// Envelope `extra` carrying the operator's capture note for a URL capture, so
+/// `sb borg replay` of a failed trace re-sends it. Keyed by
+/// `markdown::CAPTURE_NOTE_KEY`, the same name the published note uses. Empty
+/// for every other kind and for a bare URL.
+pub fn capture_extra(content: &ContentKind) -> HashMap<String, serde_yaml::Value> {
+    let mut extra = HashMap::new();
+    if let ContentKind::Url { note: Some(note), .. } = content
+        && !note.trim().is_empty()
+    {
+        extra.insert(
+            crate::markdown::CAPTURE_NOTE_KEY.to_string(),
+            serde_yaml::Value::String(note.clone()),
+        );
+    }
+    extra
+}
+
+/// The capture note an envelope recorded at Stage 0, if any.
+pub fn envelope_capture_note(envelope: &Envelope) -> Option<String> {
+    envelope
+        .extra
+        .get(crate::markdown::CAPTURE_NOTE_KEY)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Stage-0 entry hook called at the top of `pipeline::process_content`.
 ///
 /// When `staging.enabled` is true: writes envelope/body/attachments to the
@@ -150,7 +176,7 @@ pub fn stage_0_init(config: &Config, content: &ContentKind, method: IngestMethod
         return Ok(());
     }
     let store = FsArtifactStore::from_config(&config.staging);
-    write_capture(&store, trace_id, content, method, None, HashMap::new())
+    write_capture(&store, trace_id, content, method, None, capture_extra(content))
         .with_context(|| format!("stage_0_init: write_capture for trace {trace_id}"))?;
 
     if let ContentKind::Url { url, .. } = content {

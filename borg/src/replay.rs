@@ -201,7 +201,8 @@ async fn bootstrap_note(
             failed: 0,
         });
     }
-    let result = reingest_via_daemon(config, &source, &method).await?;
+    let note = capture_note_from_note(note_path)?;
+    let result = reingest_via_daemon(config, &source, &method, note.as_deref()).await?;
     let (succeeded, failed) = emit_result_event(progress, &result.status, &result.title);
     Ok(ReplayReport {
         mode: ReplayMode::Bootstrap,
@@ -247,14 +248,55 @@ const POLL_GRACE_SECS: u64 = 90;
 /// Interval between `/trace/{id}` polls.
 const POLL_INTERVAL_SECS: u64 = 2;
 
-async fn reingest_via_daemon(config: &Config, url: &str, method: &str) -> Result<IngestResult> {
-    let daemon = DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
-    let body = serde_json::json!({
+/// The `/ingest` body a replay POSTs. `note` rides only when there is one, so a
+/// bare-URL replay is byte-identical to what it was before `--note` existed.
+fn replay_body(url: &str, method: &str, note: Option<&str>) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "url": url,
         "tags": [],
         "force": true,
         "method": method,
     });
+    if let Some(note) = note {
+        body["note"] = serde_json::Value::String(note.to_string());
+    }
+    body
+}
+
+/// The capture note a replay of `trace_id` must re-send: the note Stage 0
+/// recorded in the envelope (a failed trace never published, so intake is the
+/// only record), else the `capture-note:` of the note the trace published.
+fn replay_note(config: &Config, envelope: &crate::types::Envelope, trace_id: &str) -> Result<Option<String>> {
+    if let Some(note) = crate::stages::raw::envelope_capture_note(envelope) {
+        return Ok(Some(note));
+    }
+    published_capture_note(config, trace_id)
+}
+
+/// `capture-note:` of the vault note `trace_id` published, if one exists.
+fn published_capture_note(config: &Config, trace_id: &str) -> Result<Option<String>> {
+    let vault_root = config.vault_root()?;
+    let notes = vault::note::scan_vault(&vault_root, &vault::config::ScanConfig::default())
+        .with_context(|| format!("replay: scan vault {} for trace {trace_id}", vault_root.display()))?;
+    let index = vault::identity::NoteIndex::build(&notes);
+    let Some(note) = index.resolve_trace(trace_id) else {
+        return Ok(None);
+    };
+    capture_note_from_note(&vault_root.join(&note.path))
+}
+
+/// Read the `capture-note:` frontmatter value of a published note.
+fn capture_note_from_note(note_path: &Path) -> Result<Option<String>> {
+    let fields = crate::pipeline::read_preserved_fields(note_path)?;
+    Ok(fields.into_iter().find_map(|(key, value)| match value {
+        crate::pipeline::FieldValue::Scalar(s) if key == crate::markdown::CAPTURE_NOTE_KEY => Some(s),
+        _ => None,
+    }))
+}
+
+async fn reingest_via_daemon(config: &Config, url: &str, method: &str, note: Option<&str>) -> Result<IngestResult> {
+    let daemon = DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
+    let body = replay_body(url, method, note);
     let response = daemon
         .post_json("/ingest", &body)
         .await
@@ -393,7 +435,8 @@ async fn replay_one(
         return Ok((0, 0));
     }
     let method = envelope.method.to_string();
-    let result = reingest_via_daemon(config, &source, &method).await?;
+    let note = replay_note(config, &envelope, trace_id)?;
+    let result = reingest_via_daemon(config, &source, &method, note.as_deref()).await?;
     Ok(emit_result_event(progress, &result.status, &result.title))
 }
 
