@@ -356,3 +356,16 @@ mod timeout {
         assert_eq!(fetched.metadata.stars, Some(7));
     }
 }
+
+#[test]
+fn readme_from_stage0_decodes_the_envelope_readme() {
+    // "# Hi\n" base64, wrapped the way the API wraps it.
+    let envelope = br#"{"repo":{"stargazers_count":1},"readme":{"content":"IyBI\naQo=\n","encoding":"base64"}}"#;
+    assert_eq!(readme_from_stage0(envelope).expect("decode"), "# Hi\n");
+}
+
+#[test]
+fn readme_from_stage0_errors_without_a_readme() {
+    assert!(readme_from_stage0(br#"{"repo":{},"readme":null}"#).is_err());
+    assert!(readme_from_stage0(b"not json").is_err());
+}

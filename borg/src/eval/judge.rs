@@ -197,5 +197,181 @@ fn extract_axis(reply: &str, axis: &str) -> Result<u8> {
     }
 }
 
+/// Per-claim verdict from the claim judge: is this one claim backed by the
+/// source? Finer-grained than the 0-3 `summary-faithfulness` axis, which never
+/// looks at claim truth at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimVerdict {
+    /// The source states or directly implies the claim.
+    Supported,
+    /// The source does not address the claim (invented or over-reached).
+    Unsupported,
+    /// The source says the opposite, or a different number/name.
+    Contradicted,
+}
+
+impl ClaimVerdict {
+    /// One-char code used by the judgment cache.
+    pub fn code(self) -> char {
+        match self {
+            Self::Supported => 'S',
+            Self::Unsupported => 'U',
+            Self::Contradicted => 'C',
+        }
+    }
+
+    /// Inverse of [`ClaimVerdict::code`].
+    pub fn from_code(c: char) -> Option<Self> {
+        match c {
+            'S' => Some(Self::Supported),
+            'U' => Some(Self::Unsupported),
+            'C' => Some(Self::Contradicted),
+            _ => None,
+        }
+    }
+}
+
+/// Grades every claim of a note against the source, one verdict per claim.
+pub trait ClaimJudge {
+    /// Return exactly one verdict per entry of `claims`, in order.
+    fn judge_claims(&self, kind: &str, source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>>;
+}
+
+#[cfg(test)]
+/// Deterministic claim judge for tests: every claim gets `verdict`, except
+/// claims containing an `overrides` key, which get that key's verdict.
+#[derive(Debug)]
+pub struct MockClaimJudge {
+    verdict: ClaimVerdict,
+    overrides: Vec<(String, ClaimVerdict)>,
+    calls: AtomicUsize,
+}
+
+#[cfg(test)]
+impl MockClaimJudge {
+    pub fn new(verdict: ClaimVerdict) -> Self {
+        Self {
+            verdict,
+            overrides: Vec::new(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Claims whose text contains `needle` get `verdict` (builder style).
+    pub fn with(mut self, needle: &str, verdict: ClaimVerdict) -> Self {
+        self.overrides.push((needle.to_string(), verdict));
+        self
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl ClaimJudge for MockClaimJudge {
+    fn judge_claims(&self, _kind: &str, _source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(claims
+            .iter()
+            .map(|c| {
+                self.overrides
+                    .iter()
+                    .find(|(needle, _)| c.contains(needle.as_str()))
+                    .map(|(_, v)| *v)
+                    .unwrap_or(self.verdict)
+            })
+            .collect())
+    }
+}
+
+/// Production claim judge: runs the `judge-claims` Fabric pattern over the
+/// source and a numbered claim list, and parses one verdict per claim.
+#[derive(Debug, Clone)]
+pub struct FabricClaimJudge {
+    pub binary: String,
+    pub model: String,
+    pub pattern: String,
+    pub max_chars: usize,
+    pub timeout_secs: u64,
+}
+
+impl FabricClaimJudge {
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            binary: "fabric".to_string(),
+            model: model.into(),
+            pattern: "judge-claims".to_string(),
+            max_chars: DEFAULT_JUDGE_MAX_CHARS,
+            timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl ClaimJudge for FabricClaimJudge {
+    fn judge_claims(&self, kind: &str, source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        log::debug!(
+            "FabricClaimJudge::judge_claims: kind={} pattern={} model={} source_len={} claims={}",
+            kind,
+            self.pattern,
+            self.model,
+            source.len(),
+            claims.len()
+        );
+        if claims.is_empty() {
+            return Ok(Vec::new());
+        }
+        let numbered: String = claims
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{}. {}\n", i + 1, c.trim()))
+            .collect();
+        // fabric keeps the head of the input at max_chars, so the source goes
+        // last: truncation clips the source tail, never the claim list.
+        let input = format!("# KIND\n{kind}\n\n# CLAIMS\n{numbered}\n# SOURCE\n{source}\n");
+        let reply = vault::fabric::run_pattern(
+            &self.pattern,
+            &input,
+            &self.binary,
+            "",
+            &self.model,
+            self.max_chars,
+            self.timeout_secs,
+        )?;
+        parse_claim_verdicts(&reply, claims.len())
+    }
+}
+
+/// Parse `N: supported|unsupported|contradicted` lines into exactly `n`
+/// verdicts. Lenient on decoration (fences, bullets, bold, `N.` or `N)`), strict
+/// on coverage: a missing claim number is an error, never a silent default.
+pub fn parse_claim_verdicts(reply: &str, n: usize) -> Result<Vec<ClaimVerdict>> {
+    let re = Regex::new(r"(?im)^[\s>*\-`]*(\d+)\s*[:.)\-]+[\s*`]*(supported|unsupported|contradicted)\b")
+        .expect("static verdict regex compiles");
+    let mut verdicts: Vec<Option<ClaimVerdict>> = vec![None; n];
+    for cap in re.captures_iter(reply) {
+        let Ok(idx) = cap[1].parse::<usize>() else {
+            continue;
+        };
+        if idx == 0 || idx > n || verdicts[idx - 1].is_some() {
+            continue;
+        }
+        verdicts[idx - 1] = Some(match cap[2].to_lowercase().as_str() {
+            "supported" => ClaimVerdict::Supported,
+            "unsupported" => ClaimVerdict::Unsupported,
+            _ => ClaimVerdict::Contradicted,
+        });
+    }
+    let missing: Vec<usize> = (1..=n).filter(|i| verdicts[i - 1].is_none()).collect();
+    if !missing.is_empty() {
+        bail!(
+            "claim judge reply missing verdicts for claims {:?}: {:?}",
+            missing,
+            reply.chars().take(160).collect::<String>()
+        );
+    }
+    Ok(verdicts.into_iter().flatten().collect())
+}
+
 #[cfg(test)]
 mod tests;

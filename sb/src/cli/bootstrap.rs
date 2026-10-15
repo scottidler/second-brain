@@ -164,6 +164,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/extract-repos-touched.md"),
     ),
     (
+        "judge-claims.md",
+        include_str!("../../../borg/patterns/judge-claims.md"),
+    ),
+    (
         "judge-distillation.md",
         include_str!("../../../borg/patterns/judge-distillation.md"),
     ),

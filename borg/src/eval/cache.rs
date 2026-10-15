@@ -11,11 +11,14 @@ use std::path::Path;
 use eyre::{Context, Result};
 use rusqlite::{Connection, params};
 
-use crate::eval::judge::AxisScores;
+use crate::eval::judge::{AxisScores, ClaimVerdict};
 
 /// Rubric version embedded in the cache key. Bump when `judge-distillation.md`
 /// or the score semantics change, to invalidate all prior judgments.
 pub const RUBRIC_VERSION: &str = "v1";
+/// Rubric version for per-claim verdicts. Bump when `judge-claims.md` or the
+/// verdict semantics change.
+pub const CLAIMS_RUBRIC_VERSION: &str = "v1";
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -64,6 +67,14 @@ const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS distill_judgments (
     summary_faithfulness  INTEGER NOT NULL,
     truncated             INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (fixture_id, content_hash, judge_model, rubric_version)
+);
+CREATE TABLE IF NOT EXISTS claim_judgments (
+    fixture_id      TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    judge_model     TEXT NOT NULL,
+    rubric_version  TEXT NOT NULL,
+    verdicts        TEXT NOT NULL,
+    PRIMARY KEY (fixture_id, content_hash, judge_model, rubric_version)
 );";
 
 impl JudgmentCache {
@@ -74,16 +85,14 @@ impl JudgmentCache {
             std::fs::create_dir_all(parent).with_context(|| format!("creating eval cache dir {}", parent.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening eval cache {}", path.display()))?;
-        conn.execute_batch(CREATE_TABLE)
-            .context("creating distill_judgments table")?;
+        conn.execute_batch(CREATE_TABLE).context("creating eval cache tables")?;
         Ok(Self { conn })
     }
 
     /// Open an in-memory cache (tests).
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("opening in-memory eval cache")?;
-        conn.execute_batch(CREATE_TABLE)
-            .context("creating distill_judgments table")?;
+        conn.execute_batch(CREATE_TABLE).context("creating eval cache tables")?;
         Ok(Self { conn })
     }
 
@@ -138,6 +147,47 @@ impl JudgmentCache {
                 ],
             )
             .context("inserting distill judgment")?;
+        Ok(())
+    }
+
+    /// Fetch cached per-claim verdicts. A stored code that no longer parses is
+    /// an error, not a miss, for the same reason as [`JudgmentCache::get`].
+    pub fn get_claims(&self, k: &CacheKey) -> Result<Option<Vec<ClaimVerdict>>> {
+        let result = self.conn.query_row(
+            "SELECT verdicts FROM claim_judgments
+                 WHERE fixture_id=?1 AND content_hash=?2 AND judge_model=?3 AND rubric_version=?4",
+            params![k.fixture_id, k.content_hash, k.judge_model, CLAIMS_RUBRIC_VERSION],
+            |r| r.get::<_, String>(0),
+        );
+        let codes = match result {
+            Ok(codes) => codes,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e).context("claim judgment cache lookup failed"),
+        };
+        codes
+            .chars()
+            .map(|c| ClaimVerdict::from_code(c).ok_or_else(|| eyre::eyre!("corrupt claim verdict code {c:?}")))
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
+    }
+
+    /// Insert or replace per-claim verdicts.
+    pub fn put_claims(&self, k: &CacheKey, verdicts: &[ClaimVerdict]) -> Result<()> {
+        let codes: String = verdicts.iter().map(|v| v.code()).collect();
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO claim_judgments
+                 (fixture_id, content_hash, judge_model, rubric_version, verdicts)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    k.fixture_id,
+                    k.content_hash,
+                    k.judge_model,
+                    CLAIMS_RUBRIC_VERSION,
+                    codes
+                ],
+            )
+            .context("inserting claim judgment")?;
         Ok(())
     }
 }

@@ -231,6 +231,19 @@ pub struct EvalArgs {
     /// Also write the rendered report to this path
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Score live distillations from borg's staging root instead of the
+    /// golden fixtures
+    #[arg(long)]
+    pub staged: bool,
+    /// With --staged, read this staging root instead of borg's default
+    #[arg(long, value_name = "DIR", requires = "staged")]
+    pub staging_root: Option<PathBuf>,
+    /// With --staged, score at most N traces (deterministic, stratified by kind)
+    #[arg(long, value_name = "N", requires = "staged")]
+    pub sample: Option<usize>,
+    /// Skip both LLM judges; report only the deterministic metrics
+    #[arg(long, conflicts_with = "emit_calibration")]
+    pub no_judge: bool,
 }
 
 impl From<&EvalArgs> for borg::eval::EvalOpts {
@@ -241,6 +254,14 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
             judge_model: a.judge_model.clone(),
             rebuild_cache: a.rebuild_cache,
             emit_calibration: a.emit_calibration.as_ref().map(vault::paths::expand_tilde),
+            staged_root: a.staged.then(|| {
+                a.staging_root
+                    .as_ref()
+                    .map(vault::paths::expand_tilde)
+                    .unwrap_or_else(vault::paths::borg_stages_dir)
+            }),
+            sample: a.sample,
+            no_judge: a.no_judge,
         }
     }
 }

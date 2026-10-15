@@ -65,3 +65,49 @@ fn mock_judge_returns_per_kind_and_counts_calls() {
     assert_eq!(a.claim_coverage, 1); // falls back to default
     assert_eq!(judge.calls(), 2);
 }
+
+#[test]
+fn parse_claim_verdicts_clean_reply() {
+    let reply = "1: supported\n2: contradicted\n3: unsupported\n";
+    let v = parse_claim_verdicts(reply, 3).expect("parse");
+    assert_eq!(
+        v,
+        vec![
+            ClaimVerdict::Supported,
+            ClaimVerdict::Contradicted,
+            ClaimVerdict::Unsupported
+        ]
+    );
+}
+
+#[test]
+fn parse_claim_verdicts_tolerates_decoration() {
+    let reply = "Verdicts:\n```\n- 1. **Supported**\n* 2) unsupported\n```";
+    let v = parse_claim_verdicts(reply, 2).expect("parse");
+    assert_eq!(v, vec![ClaimVerdict::Supported, ClaimVerdict::Unsupported]);
+}
+
+#[test]
+fn parse_claim_verdicts_errors_on_missing_claim() {
+    let err = parse_claim_verdicts("1: supported\n3: supported\n", 3).unwrap_err();
+    assert!(err.to_string().contains("[2]"), "{err}");
+}
+
+#[test]
+fn parse_claim_verdicts_ignores_out_of_range_and_duplicates() {
+    let reply = "1: contradicted\n1: supported\n9: supported\n0: supported\n";
+    let v = parse_claim_verdicts(reply, 1).expect("parse");
+    assert_eq!(v, vec![ClaimVerdict::Contradicted]);
+}
+
+#[test]
+fn claim_verdict_code_round_trips() {
+    for v in [
+        ClaimVerdict::Supported,
+        ClaimVerdict::Unsupported,
+        ClaimVerdict::Contradicted,
+    ] {
+        assert_eq!(ClaimVerdict::from_code(v.code()), Some(v));
+    }
+    assert_eq!(ClaimVerdict::from_code('x'), None);
+}

@@ -74,8 +74,17 @@ fn evaluate_produces_per_kind_and_overall_rows() {
     let judge = MockJudge::new(scores(1, 1, 1))
         .with("video", scores(3, 3, 2))
         .with("article", scores(2, 3, 3));
-    let report =
-        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
 
     assert_eq!(report.total_fixtures, 2);
     assert_eq!(report.total_judgments, 2);
@@ -98,13 +107,33 @@ fn rerun_is_cache_hit_stable_zero_new_judge_calls() {
     let cache = cache::JudgmentCache::open_memory().expect("cache");
 
     let judge1 = MockJudge::new(scores(2, 2, 2));
-    let r1 = unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge1, &EvalOpts::default()).expect("run1"));
+    let r1 = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge1,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("run1"),
+    );
     assert_eq!(judge1.calls(), 2, "first run judges every fixture");
     assert_eq!(r1.new_judgments, 2);
 
     // Second run over the same cache with a judge that would score differently.
     let judge2 = MockJudge::new(scores(0, 0, 0));
-    let r2 = unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge2, &EvalOpts::default()).expect("run2"));
+    let r2 = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge2,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("run2"),
+    );
     assert_eq!(judge2.calls(), 0, "cache-hit re-run makes zero judge calls");
     assert_eq!(r2.new_judgments, 0);
     // Cached scores win: composites match the first run, not the zero judge.
@@ -117,14 +146,32 @@ fn rebuild_cache_forces_fresh_judgments() {
     let fixtures = two_kinds();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let judge1 = MockJudge::new(scores(2, 2, 2));
-    let _ = evaluate(&fixtures, &BTreeMap::new(), &cache, &judge1, &EvalOpts::default()).expect("run1");
+    let _ = evaluate(
+        &fixtures,
+        &BTreeMap::new(),
+        &cache,
+        &judge1,
+        &MockClaimJudge::new(ClaimVerdict::Supported),
+        &EvalOpts::default(),
+    )
+    .expect("run1");
 
     let judge2 = MockJudge::new(scores(1, 1, 1));
     let opts = EvalOpts {
         rebuild_cache: true,
         ..EvalOpts::default()
     };
-    let r2 = unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge2, &opts).expect("run2"));
+    let r2 = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge2,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &opts,
+        )
+        .expect("run2"),
+    );
     assert_eq!(judge2.calls(), 2, "rebuild ignores the cache and re-judges");
     assert_eq!(r2.new_judgments, 2);
     assert!((r2.overall.composite - 1.0).abs() < 1e-9);
@@ -136,8 +183,17 @@ fn truncation_flag_set_for_oversized_source() {
     let fixtures = vec![fixture("article", "big", &big, distilled("s", &[("c", None)], None))];
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let judge = MockJudge::new(scores(2, 2, 2));
-    let report =
-        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
     assert_eq!(report.truncated_judgments, 1);
 }
 
@@ -148,8 +204,17 @@ fn calibration_panel_present_when_labels_given() {
     let judge = MockJudge::new(scores(2, 2, 2));
     let mut calibration = BTreeMap::new();
     calibration.insert("video/vid-a".to_string(), scores(2, 2, 2)); // exact agreement
-    let report =
-        unwrap_report(evaluate(&fixtures, &calibration, &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &calibration,
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
     let c = report.calibration.expect("calibration present");
     assert_eq!(c.pairs, 3); // one fixture x three axes
     assert!((c.exact_pct - 1.0).abs() < 1e-9);
@@ -166,7 +231,16 @@ fn emit_calibration_writes_sheet_and_short_circuits() {
         emit_calibration: Some(tmp.path().to_path_buf()),
         ..EvalOpts::default()
     };
-    match evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &opts).expect("evaluate") {
+    match evaluate(
+        &fixtures,
+        &BTreeMap::new(),
+        &cache,
+        &judge,
+        &MockClaimJudge::new(ClaimVerdict::Supported),
+        &opts,
+    )
+    .expect("evaluate")
+    {
         EvalOutcome::CalibrationSheet(p) => assert_eq!(p, tmp.path()),
         EvalOutcome::Report(_) => panic!("expected a calibration sheet"),
     }
@@ -188,8 +262,17 @@ fn evaluate_gates_listicle_to_declared_count_fixtures_on_real_fixture_set() {
     let fixtures = load(&dir).expect("load committed fixtures");
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let judge = MockJudge::new(scores(2, 2, 2));
-    let report =
-        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
 
     // Exactly one committed fixture declares a declared-count today: the
     // April-shape fixture. It is the only row in the listicle aggregate.
@@ -258,8 +341,17 @@ fn evaluate_scores_zero_and_drags_aggregate_when_enumeration_items_are_lost() {
     ];
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let judge = MockJudge::new(scores(2, 2, 2));
-    let report =
-        unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &EvalOpts::default()).expect("evaluate"));
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
 
     assert_eq!(report.listicle.len(), 2, "both fixtures declare a declared-count");
     let regressed_score = report
@@ -292,4 +384,94 @@ fn committed_fixtures_meet_minimum_and_span_kinds() {
     for expected in ["article", "video", "thread", "repo", "image", "voicenote", "idea"] {
         assert!(kinds.contains(expected), "missing fixture kind: {expected}");
     }
+}
+
+#[test]
+fn claim_verdicts_tally_per_kind_and_flag_non_supported() {
+    let fixtures = two_kinds();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let claims = MockClaimJudge::new(ClaimVerdict::Supported).with("rust is fast", ClaimVerdict::Contradicted);
+    let r = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &claims,
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(r.claim_support_overall.supported, 1);
+    assert_eq!(r.claim_support_overall.contradicted, 1);
+    assert_eq!(r.flagged_claims.len(), 1);
+    assert_eq!(r.flagged_claims[0].fixture, "article/art-a");
+    assert_eq!(r.new_claim_judgments, 2);
+}
+
+#[test]
+fn claim_verdicts_are_cache_hit_stable() {
+    let fixtures = two_kinds();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let first = MockClaimJudge::new(ClaimVerdict::Supported);
+    let _ = evaluate(
+        &fixtures,
+        &BTreeMap::new(),
+        &cache,
+        &judge,
+        &first,
+        &EvalOpts::default(),
+    )
+    .expect("run1");
+    let second = MockClaimJudge::new(ClaimVerdict::Contradicted);
+    let r = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &second,
+            &EvalOpts::default(),
+        )
+        .expect("run2"),
+    );
+    assert_eq!(second.calls(), 0);
+    assert_eq!(r.new_claim_judgments, 0);
+    assert_eq!(r.claim_support_overall.supported, 2);
+}
+
+#[test]
+fn no_judge_makes_zero_judge_calls_and_still_grounds_quotes() {
+    let mut fixtures = two_kinds();
+    fixtures[0].source = "Agents beat autonomy, said nobody.".to_string();
+    fixtures[0].distilled.claims[0].quote = Some("agents beat autonomy".to_string());
+    fixtures[1].distilled.claims[0].quote = Some("a quote that is not there".to_string());
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let claims = MockClaimJudge::new(ClaimVerdict::Supported);
+    let opts = EvalOpts {
+        no_judge: true,
+        ..EvalOpts::default()
+    };
+    let r = unwrap_report(evaluate(&fixtures, &BTreeMap::new(), &cache, &judge, &claims, &opts).expect("evaluate"));
+    assert_eq!(judge.calls(), 0);
+    assert_eq!(claims.calls(), 0);
+    assert!(!r.judged);
+    let g: Vec<(usize, usize)> = r.grounding.iter().map(|g| (g.grounded, g.quoted)).collect();
+    assert_eq!(g, vec![(1, 1), (0, 1)]);
+}
+
+#[test]
+fn no_judge_refuses_emit_calibration() {
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let opts = EvalOpts {
+        no_judge: true,
+        emit_calibration: Some(std::path::PathBuf::from("/nonexistent/sheet.yml")),
+        ..EvalOpts::default()
+    };
+    let judge = MockJudge::new(scores(2, 2, 2));
+    let claims = MockClaimJudge::new(ClaimVerdict::Supported);
+    assert!(evaluate(&two_kinds(), &BTreeMap::new(), &cache, &judge, &claims, &opts).is_err());
 }

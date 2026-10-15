@@ -59,6 +59,13 @@ fn stub_report(
         listicle,
         listicle_aggregate,
         note_size,
+        judged: true,
+        new_claim_judgments: 0,
+        grounding: vec![],
+        artifacts: vec![],
+        claim_support: vec![],
+        claim_support_overall: ClaimSupport::empty(crate::eval::OVERALL_LABEL),
+        flagged_claims: vec![],
     }
 }
 
@@ -187,4 +194,91 @@ fn render_widens_the_kind_column_for_a_kind_past_twelve_chars() {
     assert_eq!(header.len(), row.len());
     assert_eq!(row.len(), overall.len());
     assert!(row.starts_with(&format!("{long} ")));
+}
+
+#[test]
+fn render_reports_quote_grounding_per_kind_and_low_fixtures() {
+    let mut r = stub_report(vec![], None, vec![]);
+    r.grounding = vec![
+        GroundingMetric {
+            fixture: "video/a".into(),
+            kind: "video".into(),
+            grounded: 3,
+            quoted: 4,
+        },
+        GroundingMetric {
+            fixture: "article/b".into(),
+            kind: "article".into(),
+            grounded: 2,
+            quoted: 2,
+        },
+    ];
+    let text = r.render();
+    assert!(text.contains("quote-grounding: 5/6"), "{text}");
+    assert!(text.contains("video      3/4 (75.0%)"), "{text}");
+    assert!(text.contains("LOW video/a 3/4"), "{text}");
+    assert!(!text.contains("LOW article/b"), "{text}");
+}
+
+#[test]
+fn render_reports_claim_support_and_puts_contradicted_first() {
+    let mut r = stub_report(vec![], None, vec![]);
+    let mut video = ClaimSupport::empty("video");
+    video.add(ClaimVerdict::Supported);
+    video.add(ClaimVerdict::Unsupported);
+    video.add(ClaimVerdict::Contradicted);
+    video.add(ClaimVerdict::Supported);
+    r.claim_support_overall = ClaimSupport::sum(crate::eval::OVERALL_LABEL, std::slice::from_ref(&video));
+    r.claim_support = vec![video];
+    r.flagged_claims = vec![
+        FlaggedClaim {
+            fixture: "video/a".into(),
+            verdict: ClaimVerdict::Unsupported,
+            text: "an over-reach".into(),
+        },
+        FlaggedClaim {
+            fixture: "video/z".into(),
+            verdict: ClaimVerdict::Contradicted,
+            text: "wrong number".into(),
+        },
+    ];
+    let text = r.render();
+    assert!(text.contains("50.0%"), "{text}");
+    let contradicted = text.find("CONTRADICTED video/z").expect("contradicted row");
+    let unsupported = text.find("unsupported  video/a").expect("unsupported row");
+    assert!(contradicted < unsupported, "{text}");
+}
+
+#[test]
+fn no_judge_render_omits_axis_tables_and_keeps_deterministic() {
+    let mut r = stub_report(vec![], None, vec![]);
+    r.judged = false;
+    r.artifacts = vec![ArtifactMetric {
+        fixture: "article/x".into(),
+        reasons: vec!["tldr: placeholder".into()],
+    }];
+    let text = r.render();
+    assert!(text.contains("judges skipped"), "{text}");
+    assert!(!text.contains("composite"), "{text}");
+    assert!(!text.contains("claim support"), "{text}");
+    assert!(text.contains("placeholder-artifacts: 1 fixture"), "{text}");
+    assert!(text.contains("quote-grounding: N/A"), "{text}");
+}
+
+#[test]
+fn claim_support_rate_is_none_without_claims() {
+    assert_eq!(ClaimSupport::empty("x").support_rate(), None);
+}
+
+#[test]
+fn render_lists_only_listicle_shortfalls_past_the_list_limit() {
+    let listicle: Vec<ListicleMetric> = (0..=LIST_LIMIT)
+        .map(|i| ListicleMetric {
+            fixture: format!("video/v{i:02}"),
+            score: if i == 3 { 0.5 } else { 1.0 },
+        })
+        .collect();
+    let text = stub_report(listicle, Some(0.97), vec![]).render();
+    assert!(text.contains("video/v03 0.500"), "{text}");
+    assert!(!text.contains("video/v04"), "{text}");
 }

@@ -221,3 +221,100 @@ fn listicle_aggregate_is_the_mean_of_applicable_scores() {
 fn listicle_aggregate_single_fixture_at_one() {
     assert_eq!(listicle_aggregate(&[1.0]), Some(1.0));
 }
+
+fn quoted(claims: &[(&str, Option<&str>)]) -> vault::distilled::Distilled {
+    vault::distilled::Distilled {
+        claims: claims
+            .iter()
+            .map(|(text, quote)| vault::distilled::Claim {
+                text: text.to_string(),
+                quote: quote.map(str::to_string),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn grounding_words_drop_timestamps_punctuation_and_case() {
+    assert_eq!(
+        grounding_words("  Don’t 00:04:26 /stats\\` — it's FAST! 4:05"),
+        vec!["don", "t", "stats", "it", "s", "fast"]
+    );
+    assert!(grounding_words("... 12:30").is_empty());
+    assert_eq!(grounding_words("v1.2 at 3pm"), vec!["v1", "2", "at", "3pm"]);
+}
+
+#[test]
+fn quote_grounding_survives_rolling_auto_captions() {
+    // Real shape of a staged YouTube transcript (trace ht-031facd4).
+    let source = "i would say it's a powerhouse tool and 00:04:26 would say it's a powerhouse tool and \
+                  it's open source and it has tons of cool 00:04:28 it's open source and it has tons of cool features";
+    let d = quoted(&[(
+        "a",
+        Some("I would say it's a powerhouse tool and it's open source and it has tons of cool features."),
+    )]);
+    assert_eq!(quote_grounding(source, &d), (1, 1));
+}
+
+#[test]
+fn quote_grounding_handles_short_quotes_as_word_runs() {
+    let d = quoted(&[("a", Some("ship it")), ("b", Some("it ship"))]);
+    assert_eq!(quote_grounding("we said ship it today", &d), (1, 2));
+}
+
+#[test]
+fn quote_grounding_counts_verbatim_quotes_despite_formatting() {
+    let source = "The JSONL lives at `~/.claude/projects`.\nEach line is a JSON object.";
+    let d = quoted(&[
+        ("a", Some("each line is a json   object")),
+        ("b", Some("The JSONL lives at ~/.claude/projects")),
+        ("c", None),
+    ]);
+    assert_eq!(quote_grounding(source, &d), (2, 2));
+}
+
+#[test]
+fn quote_grounding_rejects_paraphrase_and_skips_empty_quotes() {
+    let source = "Each line is a JSON object.";
+    let d = quoted(&[("a", Some("every line holds one JSON object")), ("b", Some("  ...  "))]);
+    assert_eq!(quote_grounding(source, &d), (0, 1));
+}
+
+#[test]
+fn quote_grounding_is_na_without_quotes() {
+    assert_eq!(quote_grounding("anything", &quoted(&[("a", None)])), (0, 0));
+}
+
+#[test]
+fn placeholder_artifacts_flags_each_offending_field() {
+    let mut d = quoted(&[("speed [Not detailed in provided content]", None), ("fine claim", None)]);
+    d.summary = "clean summary".to_string();
+    d.tldr = Some("[information not available]".to_string());
+    let hits = placeholder_artifacts(&d);
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert!(hits[0].starts_with("tldr:"));
+    assert!(hits[1].starts_with("claim:"));
+}
+
+#[test]
+fn placeholder_artifacts_empty_for_clean_note() {
+    let mut d = quoted(&[("clean", None)]);
+    d.summary = "clean".to_string();
+    assert!(placeholder_artifacts(&d).is_empty());
+}
+
+#[test]
+fn quote_grounding_grounds_elided_quotes_piece_by_piece() {
+    let source = "Flat filenames only, please. Then: ASCII names only. Also note that case is significant here.";
+    let d = quoted(&[
+        (
+            "a",
+            Some("Flat filenames only... ASCII names only… Case is significant."),
+        ),
+        ("b", Some("Flat filenames only ... names are case-insensitive")),
+        ("c", Some(" ... ")),
+    ]);
+    assert_eq!(quote_grounding(source, &d), (1, 2));
+}

@@ -4,7 +4,11 @@
 //! The kind is the first path component; the slug is the second. `distilled.yml`
 //! deserializes into the canonical [`vault::distilled::Distilled`] contract, so
 //! the harness scores exactly the artifact the pipeline produces.
+//!
+//! [`load_staged`] builds the same `Fixture` shape from borg's live staging
+//! root instead, so the eval can score what the pipeline publishes today.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use distillers::RenderOptions;
@@ -84,6 +88,147 @@ pub fn load(dir: &Path) -> Result<Vec<Fixture>> {
     }
     log::debug!("eval::fixtures::load: loaded {} fixtures", fixtures.len());
     Ok(fixtures)
+}
+
+/// Per-trace files [`load_staged`] reads.
+const ENVELOPE_FILE: &str = "envelope.yml";
+const TRANSCRIPT_FILE: &str = "transcript.md";
+const FETCHED_FILE: &str = "fetched.html";
+const BODY_FILE: &str = "body.txt";
+
+#[derive(serde::Deserialize)]
+struct StagedEnvelope {
+    kind: crate::types::IngestKind,
+}
+
+/// Map a staged ingest kind onto the fixture kind labels (the golden tree's
+/// directory names), so staged and golden runs aggregate under one vocabulary.
+/// `None` for kinds the eval does not score (vocabulary cards).
+fn fixture_kind(kind: crate::types::IngestKind) -> Option<&'static str> {
+    use crate::types::IngestKind as K;
+    match kind {
+        K::ArticleUrl => Some("article"),
+        K::GitHubUrl => Some("repo"),
+        K::YoutubeUrl => Some("video"),
+        K::ThreadUrl => Some("thread"),
+        K::Image => Some("image"),
+        K::VoiceNote => Some("voicenote"),
+        K::Idea => Some("idea"),
+        K::Session => Some("session"),
+        K::VocabularyEn | K::VocabularyEs => None,
+    }
+}
+
+/// The source text a staged trace's distiller saw, best evidence first: the
+/// `transcript` the distiller persisted, the Stage-1 `transcript.md`, the
+/// README decoded from a GitHub Stage-0 envelope, the fetched page, the raw
+/// body. A body that is only the captured URL is not a source.
+fn staged_source(trace_dir: &Path, distilled: &Distilled) -> Result<Option<String>> {
+    if let Some(t) = distilled.transcript.as_deref().filter(|t| !t.trim().is_empty()) {
+        return Ok(Some(t.to_string()));
+    }
+    let fetched = trace_dir.join(FETCHED_FILE);
+    if !trace_dir.join(TRANSCRIPT_FILE).is_file() && fetched.is_file() {
+        let bytes = std::fs::read(&fetched).with_context(|| format!("reading {}", fetched.display()))?;
+        if bytes.first() == Some(&b'{')
+            && let Ok(readme) = crate::github::readme_from_stage0(&bytes)
+        {
+            return Ok(Some(readme));
+        }
+    }
+    for name in [TRANSCRIPT_FILE, FETCHED_FILE, BODY_FILE] {
+        let path = trace_dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || (!trimmed.contains(char::is_whitespace) && trimmed.starts_with("http")) {
+            continue;
+        }
+        return Ok(Some(text));
+    }
+    Ok(None)
+}
+
+/// Load live distillations from borg's staging root as fixtures: every trace
+/// directory holding `envelope.yml` + `distilled.yml` + a recoverable source.
+/// Ids are `<kind>/<trace>`. With `sample`, take a deterministic stratified
+/// sample: round-robin across kinds, each kind ordered by a stable hash of its
+/// trace id, so reruns pick the same traces and every kind is represented.
+pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
+    log::debug!(
+        "eval::fixtures::load_staged: root={} sample={:?}",
+        root.display(),
+        sample
+    );
+    if !root.is_dir() {
+        bail!("staging root not found: {}", root.display());
+    }
+    let mut by_kind: BTreeMap<&'static str, Vec<Fixture>> = BTreeMap::new();
+    let mut skipped = 0usize;
+    for entry in read_sorted(root)? {
+        let dir = entry.path();
+        let distilled_path = dir.join(DISTILLED_FILE);
+        let envelope_path = dir.join(ENVELOPE_FILE);
+        if !distilled_path.is_file() || !envelope_path.is_file() {
+            continue;
+        }
+        let trace = entry.file_name().to_string_lossy().to_string();
+        let envelope_raw =
+            std::fs::read_to_string(&envelope_path).with_context(|| format!("reading {}", envelope_path.display()))?;
+        let envelope: StagedEnvelope =
+            serde_yaml::from_str(&envelope_raw).with_context(|| format!("parsing {}", envelope_path.display()))?;
+        let Some(kind) = fixture_kind(envelope.kind) else {
+            skipped += 1;
+            continue;
+        };
+        let raw = std::fs::read_to_string(&distilled_path)
+            .with_context(|| format!("reading {}", distilled_path.display()))?;
+        let distilled: Distilled =
+            serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", distilled_path.display()))?;
+        let Some(source) = staged_source(&dir, &distilled)? else {
+            log::debug!("eval::fixtures::load_staged: no source for trace={trace}");
+            skipped += 1;
+            continue;
+        };
+        by_kind.entry(kind).or_default().push(Fixture {
+            id: format!("{kind}/{trace}"),
+            kind: kind.to_string(),
+            slug: trace,
+            source,
+            distilled,
+        });
+    }
+
+    for fixtures in by_kind.values_mut() {
+        fixtures.sort_by_key(|f| crate::eval::cache::stable_hash(&f.slug));
+    }
+    let total: usize = by_kind.values().map(Vec::len).sum();
+    let take = sample.unwrap_or(total).min(total);
+    let mut queues: Vec<std::vec::IntoIter<Fixture>> = by_kind.into_values().map(Vec::into_iter).collect();
+    let mut picked = Vec::with_capacity(take);
+    while picked.len() < take {
+        for q in queues.iter_mut() {
+            if picked.len() == take {
+                break;
+            }
+            if let Some(f) = q.next() {
+                picked.push(f);
+            }
+        }
+    }
+    picked.sort_by(|a, b| a.id.cmp(&b.id));
+    if picked.is_empty() {
+        bail!("no staged distillations found under {}", root.display());
+    }
+    log::debug!(
+        "eval::fixtures::load_staged: loaded={} of {} skipped={}",
+        picked.len(),
+        total,
+        skipped
+    );
+    Ok(picked)
 }
 
 /// Directory entries sorted by file name (deterministic traversal).

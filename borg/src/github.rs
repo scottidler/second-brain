@@ -403,6 +403,19 @@ fn decode_readme_from_bytes(bytes: &[u8]) -> Result<String> {
     }
 }
 
+/// Decode the README markdown out of a staged Stage-0 `fetched.html` envelope
+/// (`{"repo": ..., "readme": <the /readme response>}`, written by
+/// `persist_github_stage_0_1_if_staging`). For traces staged before Stage-1
+/// `transcript.md` existed, this is the closest recoverable distiller input.
+pub fn readme_from_stage0(envelope: &[u8]) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_slice(envelope).context("github: stage-0 envelope parse failed")?;
+    let readme = value
+        .get("readme")
+        .filter(|r| !r.is_null())
+        .ok_or_else(|| eyre::eyre!("github: stage-0 envelope has no readme"))?;
+    decode_readme_from_bytes(&serde_json::to_vec(readme).context("github: readme re-serialize failed")?)
+}
+
 fn decode_base64_readme(content: &str) -> Result<String> {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;

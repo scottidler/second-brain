@@ -23,11 +23,14 @@ use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
 
-pub use fixtures::{Fixture, judge_note_text, load, render_options_for_kind};
+pub use fixtures::{Fixture, judge_note_text, load, load_staged, render_options_for_kind};
+pub use judge::{AxisScores, ClaimJudge, ClaimVerdict, DistillationJudge, FabricClaimJudge, FabricJudge};
 #[cfg(test)]
-pub use judge::MockJudge;
-pub use judge::{AxisScores, DistillationJudge, FabricJudge};
-pub use report::{CalibrationPanel, EvalReport, KindReport, ListicleMetric, NoteSizeMetric};
+pub use judge::{MockClaimJudge, MockJudge};
+pub use report::{
+    ArtifactMetric, CalibrationPanel, ClaimSupport, EvalReport, FlaggedClaim, GroundingMetric, KindReport,
+    ListicleMetric, NoteSizeMetric,
+};
 
 /// Char budget for the source text shown to the judge. Larger than the oracle
 /// eval's note budget (8K) because claim coverage requires the judge to see the
@@ -50,6 +53,13 @@ pub struct EvalOpts {
     pub rebuild_cache: bool,
     /// When set, write a fillable calibration sheet to this path and skip metrics.
     pub emit_calibration: Option<PathBuf>,
+    /// Score live distillations from this staging root instead of the golden
+    /// fixtures (`fixtures::load_staged`).
+    pub staged_root: Option<PathBuf>,
+    /// Cap a staged run at this many traces (stratified across kinds).
+    pub sample: Option<usize>,
+    /// Skip both LLM judges; report only the deterministic metrics.
+    pub no_judge: bool,
 }
 
 impl Default for EvalOpts {
@@ -60,6 +70,9 @@ impl Default for EvalOpts {
             judge_model: String::new(),
             rebuild_cache: false,
             emit_calibration: None,
+            staged_root: None,
+            sample: None,
+            no_judge: false,
         }
     }
 }
@@ -127,39 +140,54 @@ fn load_calibration(path: &Path) -> Result<BTreeMap<String, AxisScores>> {
 /// evaluate with the production [`FabricJudge`].
 pub fn run(opts: &EvalOpts) -> Result<EvalOutcome> {
     log::debug!(
-        "eval::run: fixtures_dir={} judge_model={} rebuild_cache={} emit={}",
+        "eval::run: fixtures_dir={} staged_root={:?} sample={:?} no_judge={} judge_model={} rebuild_cache={} emit={}",
         opts.fixtures_dir.display(),
+        opts.staged_root,
+        opts.sample,
+        opts.no_judge,
         opts.judge_model,
         opts.rebuild_cache,
         opts.emit_calibration.is_some()
     );
-    let fixtures = load(&opts.fixtures_dir)?;
+    let fixtures = match &opts.staged_root {
+        Some(root) => load_staged(root, opts.sample)?,
+        None => load(&opts.fixtures_dir)?,
+    };
     let calibration = load_calibration(&opts.calibration_path)?;
     let cache = cache::JudgmentCache::open(&vault::paths::borg_eval_cache_path())?;
     let judge = FabricJudge::new(opts.judge_model.clone());
-    evaluate(&fixtures, &calibration, &cache, &judge, opts)
+    let claim_judge = FabricClaimJudge::new(opts.judge_model.clone());
+    evaluate(&fixtures, &calibration, &cache, &judge, &claim_judge, opts)
 }
 
 /// Judge each fixture (cache-first), aggregate per kind + overall, and build the
 /// calibration panel. `judge` is a trait object so tests inject a deterministic
 /// [`MockJudge`]. In `--emit-calibration` mode, write the sheet and short-circuit.
+/// With `opts.no_judge`, neither judge is called and only the deterministic
+/// metrics are reported.
 pub fn evaluate(
     fixtures: &[Fixture],
     calibration: &BTreeMap<String, AxisScores>,
     cache: &cache::JudgmentCache,
     judge: &dyn DistillationJudge,
+    claim_judge: &dyn ClaimJudge,
     opts: &EvalOpts,
 ) -> Result<EvalOutcome> {
     log::debug!(
-        "eval::evaluate: fixtures={} rebuild_cache={}",
+        "eval::evaluate: fixtures={} rebuild_cache={} no_judge={}",
         fixtures.len(),
-        opts.rebuild_cache
+        opts.rebuild_cache,
+        opts.no_judge
     );
+    if opts.no_judge && opts.emit_calibration.is_some() {
+        eyre::bail!("--emit-calibration needs judge scores; drop --no-judge");
+    }
 
     // Per-kind accumulators (insertion order does not matter; sorted at report time).
     let mut per_kind: BTreeMap<String, Vec<AxisScores>> = BTreeMap::new();
     let mut all: Vec<AxisScores> = Vec::new();
     let mut new_judgments = 0usize;
+    let mut new_claim_judgments = 0usize;
     let mut truncated_judgments = 0usize;
     let mut fallback_fixtures = 0usize;
     let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
@@ -168,6 +196,10 @@ pub fn evaluate(
     // fixture alongside the judge axes, never gated by cache/judge failure.
     let mut listicle: Vec<report::ListicleMetric> = Vec::new();
     let mut note_size: Vec<report::NoteSizeMetric> = Vec::new();
+    let mut grounding: Vec<GroundingMetric> = Vec::new();
+    let mut artifacts: Vec<ArtifactMetric> = Vec::new();
+    let mut claim_support: BTreeMap<String, ClaimSupport> = BTreeMap::new();
+    let mut flagged_claims: Vec<FlaggedClaim> = Vec::new();
 
     for fx in fixtures {
         if fx.distilled.meta.validation.fallback_reason.is_some() {
@@ -200,6 +232,27 @@ pub fn evaluate(
             within_ceiling: calc::note_size_within_ceiling(rendered_bytes),
         });
 
+        let (grounded, quoted) = calc::quote_grounding(&fx.source, &fx.distilled);
+        if quoted > 0 {
+            grounding.push(GroundingMetric {
+                fixture: fx.id.clone(),
+                kind: fx.kind.clone(),
+                grounded,
+                quoted,
+            });
+        }
+        let reasons = calc::placeholder_artifacts(&fx.distilled);
+        if !reasons.is_empty() {
+            artifacts.push(ArtifactMetric {
+                fixture: fx.id.clone(),
+                reasons,
+            });
+        }
+
+        if opts.no_judge {
+            continue;
+        }
+
         let note = judge_note_text(&fx.distilled);
         let (source, truncated) = truncate_source(&fx.source, JUDGE_SOURCE_MAX_CHARS);
         // The content hash covers exactly what the judge sees.
@@ -226,6 +279,47 @@ pub fn evaluate(
         };
         if cj.truncated {
             truncated_judgments += 1;
+        }
+
+        let claims: Vec<String> = fx.distilled.claims.iter().map(|c| c.text.trim().to_string()).collect();
+        let claims_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, claims.join("\n")));
+        let claims_key = cache::CacheKey {
+            fixture_id: &fx.id,
+            content_hash: &claims_hash,
+            judge_model: &opts.judge_model,
+        };
+        let cached_verdicts = if opts.rebuild_cache { None } else { cache.get_claims(&claims_key)? };
+        let verdicts = match cached_verdicts {
+            Some(v) if v.len() == claims.len() => v,
+            _ => {
+                let v = claim_judge
+                    .judge_claims(&fx.kind, &source, &claims)
+                    .with_context(|| format!("judging claims of fixture {}", fx.id))?;
+                if v.len() != claims.len() {
+                    eyre::bail!(
+                        "claim judge returned {} verdicts for {} claims of fixture {}",
+                        v.len(),
+                        claims.len(),
+                        fx.id
+                    );
+                }
+                cache.put_claims(&claims_key, &v)?;
+                new_claim_judgments += 1;
+                v
+            }
+        };
+        let support = claim_support
+            .entry(fx.kind.clone())
+            .or_insert_with(|| ClaimSupport::empty(&fx.kind));
+        for (claim, verdict) in claims.iter().zip(&verdicts) {
+            support.add(*verdict);
+            if *verdict != ClaimVerdict::Supported {
+                flagged_claims.push(FlaggedClaim {
+                    fixture: fx.id.clone(),
+                    verdict: *verdict,
+                    text: claim.clone(),
+                });
+            }
         }
 
         per_kind.entry(fx.kind.clone()).or_default().push(cj.scores);
@@ -271,6 +365,8 @@ pub fn evaluate(
     let calibration_panel = report::calibration_panel(&calib_pairs);
     let listicle_scores: Vec<f64> = listicle.iter().map(|m| m.score).collect();
     let listicle_aggregate = calc::listicle_aggregate(&listicle_scores);
+    let claim_support: Vec<ClaimSupport> = claim_support.into_values().collect();
+    let claim_support_overall = ClaimSupport::sum(OVERALL_LABEL, &claim_support);
 
     let report = EvalReport {
         judge_model: opts.judge_model.clone(),
@@ -285,6 +381,13 @@ pub fn evaluate(
         listicle,
         listicle_aggregate,
         note_size,
+        judged: !opts.no_judge,
+        new_claim_judgments,
+        grounding,
+        artifacts,
+        claim_support,
+        claim_support_overall,
+        flagged_claims,
     };
     log::debug!(
         "eval::evaluate: done fixtures={} new_judgments={} composite={:.4} listicle_aggregate={:?}",

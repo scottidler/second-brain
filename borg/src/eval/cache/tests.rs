@@ -56,3 +56,27 @@ fn put_replaces_existing_row() {
     c.put(&k, cj(2, 2, 2, false)).expect("put2");
     assert_eq!(c.get(&k).expect("get"), Some(cj(2, 2, 2, false)));
 }
+
+#[test]
+fn claim_verdicts_round_trip_and_miss_on_other_key() {
+    use crate::eval::judge::ClaimVerdict::{Contradicted, Supported, Unsupported};
+    let cache = JudgmentCache::open_memory().expect("open");
+    let k = key("video/a", "h1", "m");
+    assert_eq!(cache.get_claims(&k).expect("get"), None);
+    cache
+        .put_claims(&k, &[Supported, Contradicted, Unsupported])
+        .expect("put");
+    assert_eq!(
+        cache.get_claims(&k).expect("get"),
+        Some(vec![Supported, Contradicted, Unsupported])
+    );
+    assert_eq!(cache.get_claims(&key("video/a", "h2", "m")).expect("get"), None);
+}
+
+#[test]
+fn empty_claim_verdicts_are_a_hit_not_a_miss() {
+    let cache = JudgmentCache::open_memory().expect("open");
+    let k = key("idea/a", "h", "m");
+    cache.put_claims(&k, &[]).expect("put");
+    assert_eq!(cache.get_claims(&k).expect("get"), Some(vec![]));
+}

@@ -8,7 +8,9 @@
 
 use crate::config::MAX_NOTE_BYTES;
 use crate::eval::judge::MAX_SCORE;
-use vault::distilled::Enumeration;
+use std::collections::HashSet;
+
+use vault::distilled::{Distilled, Enumeration};
 
 /// Cohen's kappa over graded `(human, judge)` pairs on the `0..=MAX_SCORE`
 /// scale. Returns 0.0 for fewer than 2 pairs or when agreement equals chance.
@@ -107,6 +109,111 @@ pub fn listicle_aggregate(scores: &[f64]) -> Option<f64> {
         return None;
     }
     Some(scores.iter().sum::<f64>() / scores.len() as f64)
+}
+
+/// Word length of the shingles quote grounding matches on.
+const GROUNDING_SHINGLE: usize = 3;
+
+/// Lowercased alphanumeric words of `s`, with `H:MM`/`HH:MM:SS` timestamps
+/// dropped. Smart quotes, markdown escapes, and reflowed whitespace all
+/// collapse away, so only the words have to match.
+pub fn grounding_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for raw in s.split_whitespace() {
+        let is_timestamp = {
+            let parts: Vec<&str> = raw.trim_matches(|c: char| !c.is_ascii_digit()).split(':').collect();
+            (2..=3).contains(&parts.len())
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
+        };
+        if is_timestamp {
+            continue;
+        }
+        for w in raw.split(|c: char| !c.is_alphanumeric()) {
+            if !w.is_empty() {
+                words.push(w.to_lowercase());
+            }
+        }
+    }
+    words
+}
+
+/// One quote piece is grounded when every 3-word shingle occurs in the source;
+/// a piece under 3 words must occur as a contiguous word run.
+fn piece_grounded(piece: &[String], source_words: &[String], source_shingles: &HashSet<&[String]>) -> bool {
+    if piece.len() < GROUNDING_SHINGLE {
+        return source_words.windows(piece.len()).any(|w| w == piece);
+    }
+    piece.windows(GROUNDING_SHINGLE).all(|s| source_shingles.contains(s))
+}
+
+fn shingles(words: &[String]) -> HashSet<&[String]> {
+    words.windows(GROUNDING_SHINGLE).collect()
+}
+
+/// Quote grounding: of the claims carrying a verbatim `quote`, how many are
+/// found in the source. A quote is grounded when every 3-word shingle of it
+/// occurs in the source (a quote under 3 words must occur as a word run), and
+/// an elided quote (`A ... B`) when each piece is.
+/// Shingles, not one substring, because YouTube auto-captions repeat each
+/// line's words in rolling windows with timestamps interleaved: an exact
+/// quote never survives as one run there. Measured on 1,562 staged quotes, a
+/// quote scored against the wrong source passes 0-2% (6% on short image
+/// quotes), so the shingle rule does not pass paraphrase. Deterministic, zero
+/// judge calls. Returns `(grounded, quoted)`; `quoted == 0` means N/A.
+pub fn quote_grounding(source: &str, distilled: &Distilled) -> (usize, usize) {
+    let source_words = grounding_words(source);
+    let source_shingles = shingles(&source_words);
+    let mut grounded = 0usize;
+    let mut quoted = 0usize;
+    for claim in &distilled.claims {
+        let Some(quote) = claim.quote.as_deref() else {
+            continue;
+        };
+        // An elided quote ("A ... B") is grounded piece by piece: a shingle
+        // spanning the elision never occurs in the source by design.
+        let pieces: Vec<Vec<String>> = quote
+            .split("...")
+            .flat_map(|p| p.split('…'))
+            .map(grounding_words)
+            .filter(|w| !w.is_empty())
+            .collect();
+        if pieces.is_empty() {
+            continue;
+        }
+        quoted += 1;
+        if pieces
+            .iter()
+            .all(|w| piece_grounded(w, &source_words, &source_shingles))
+        {
+            grounded += 1;
+        }
+    }
+    (grounded, quoted)
+}
+
+/// Placeholder artifacts: LLM filler like `[not detailed in provided content]`
+/// anywhere in the summary, tldr, key ideas, or claims. Reuses the ingest
+/// gate's indicator list (`quality::detect_truncation_artifacts`). Returns one
+/// reason per offending field.
+pub fn placeholder_artifacts(distilled: &Distilled) -> Vec<String> {
+    let mut fields: Vec<(&str, &str)> = vec![("summary", distilled.summary.as_str())];
+    if let Some(tldr) = distilled.tldr.as_deref() {
+        fields.push(("tldr", tldr));
+    }
+    for idea in &distilled.key_ideas {
+        fields.push(("key-idea", idea.as_str()));
+    }
+    for claim in &distilled.claims {
+        fields.push(("claim", claim.text.as_str()));
+    }
+    fields
+        .into_iter()
+        .filter_map(|(field, text)| {
+            crate::quality::detect_truncation_artifacts(text).map(|reason| format!("{field}: {reason}"))
+        })
+        .collect()
 }
 
 #[cfg(test)]

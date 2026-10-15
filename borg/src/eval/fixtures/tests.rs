@@ -154,3 +154,98 @@ fn real_repo_fixtures_load_and_include_session() {
         "the checked-in fixture tree includes a session fixture"
     );
 }
+
+fn write_trace(root: &std::path::Path, trace: &str, kind: &str, distilled: &str, files: &[(&str, &str)]) {
+    let dir = root.join(trace);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join(ENVELOPE_FILE), format!("trace: {trace}\nkind: {kind}\n")).expect("write envelope");
+    std::fs::write(dir.join(DISTILLED_FILE), distilled).expect("write distilled");
+    for (name, body) in files {
+        std::fs::write(dir.join(name), body).expect("write file");
+    }
+}
+
+fn with_transcript(transcript: &str) -> String {
+    format!("{MINIMAL_DISTILLED}transcript: \"{transcript}\"\n")
+}
+
+#[test]
+fn load_staged_picks_source_by_precedence_and_skips_unsourced() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    write_trace(root, "ht-1", "youtube-url", &with_transcript("the transcript"), &[]);
+    write_trace(
+        root,
+        "cl-2",
+        "git-hub-url",
+        MINIMAL_DISTILLED,
+        &[
+            ("fetched.html", "# readme body"),
+            ("body.txt", "https://github.com/x/y"),
+        ],
+    );
+    write_trace(
+        root,
+        "hv-3",
+        "session",
+        MINIMAL_DISTILLED,
+        &[("body.txt", "user: hi\nassistant: hello")],
+    );
+    write_trace(
+        root,
+        "cl-4",
+        "article-url",
+        MINIMAL_DISTILLED,
+        &[("body.txt", "https://example.com/a")],
+    );
+    write_trace(
+        root,
+        "cl-5",
+        "vocabulary-en",
+        MINIMAL_DISTILLED,
+        &[("body.txt", "word list")],
+    );
+    std::fs::create_dir_all(root.join("cl-6")).expect("mkdir stray");
+
+    let fx = load_staged(root, None).expect("load");
+    let got: Vec<(&str, &str)> = fx.iter().map(|f| (f.id.as_str(), f.source.as_str())).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("repo/cl-2", "# readme body"),
+            ("session/hv-3", "user: hi\nassistant: hello"),
+            ("video/ht-1", "the transcript"),
+        ]
+    );
+}
+
+#[test]
+fn load_staged_sample_is_stratified_and_deterministic() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    for i in 0..6 {
+        write_trace(root, &format!("ht-{i}"), "youtube-url", &with_transcript("t"), &[]);
+    }
+    write_trace(
+        root,
+        "hv-0",
+        "session",
+        MINIMAL_DISTILLED,
+        &[("body.txt", "a session body")],
+    );
+
+    let a = load_staged(root, Some(3)).expect("load");
+    let b = load_staged(root, Some(3)).expect("load");
+    let ids = |v: &[Fixture]| v.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&a), ids(&b));
+    assert_eq!(a.len(), 3);
+    assert_eq!(a.iter().filter(|f| f.kind == "session").count(), 1, "{:?}", ids(&a));
+    assert_eq!(load_staged(root, Some(100)).expect("load").len(), 7);
+}
+
+#[test]
+fn load_staged_errors_when_nothing_loads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(load_staged(tmp.path(), None).is_err());
+    assert!(load_staged(&tmp.path().join("missing"), None).is_err());
+}
