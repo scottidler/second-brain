@@ -151,6 +151,15 @@ pub fn render(distilled: &Distilled, options: RenderOptions) -> RenderedDistille
                     serde_yaml::Value::String(published.clone()),
                 );
             }
+            for (key, value) in [
+                ("channel-id", &p.channel_id),
+                ("channel-handle", &p.channel_handle),
+                ("channel-url", &p.channel_url),
+            ] {
+                if let Some(v) = value {
+                    fm.insert(key.to_string(), serde_yaml::Value::String(v.clone()));
+                }
+            }
             if !p.repos.is_empty() {
                 fm.insert(
                     "github".to_string(),

@@ -24,6 +24,9 @@ fn attach_payload_attaches_for_repos_only_metadata() {
         channel: None,
         duration_seconds: None,
         published_at: None,
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
         repos: vec!["owner/repo".to_string()],
     };
     attach_payload(&mut distilled, Some(&metadata));
@@ -112,6 +115,9 @@ links: []
         channel: Some("Raft Talks".to_string()),
         duration_seconds: Some(3600),
         published_at: None,
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
         repos: vec![],
     };
     let distilled = distiller
@@ -161,6 +167,9 @@ links: []
         channel: None,
         duration_seconds: Some(60),
         published_at: None,
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
         repos: vec![],
     };
     let distilled = distiller

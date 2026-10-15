@@ -491,3 +491,31 @@ fn test_parse_vtt_segments_keeps_non_adjacent_repeat() {
     assert_eq!(segs.len(), 3);
     assert_eq!(segs[0].1, segs[2].1);
 }
+
+const DUMP_JSON_FIXTURE: &[u8] = include_bytes!("fixtures/dump-json-53xycpcgqwe.json");
+
+#[test]
+fn parse_metadata_keeps_channel_fields_from_dump_json() {
+    let m = parse_metadata(DUMP_JSON_FIXTURE).expect("parse fixture");
+    assert_eq!(m.channel_handle.as_deref(), Some("@letsgetrusty"));
+    assert_eq!(m.channel_id.as_deref(), Some("UCSp-OaMpsO8K0KkOqyBl7_w"));
+    assert_eq!(
+        m.channel_url.as_deref(),
+        Some("https://www.youtube.com/channel/UCSp-OaMpsO8K0KkOqyBl7_w")
+    );
+    assert_eq!(m.published_at.as_deref(), Some("2025-11-21"));
+}
+
+#[test]
+fn parse_metadata_leaves_channel_fields_none_when_absent_or_malformed() {
+    let m = parse_metadata(br#"{"title":"t","uploader_id":"","upload_date":"2025-11"}"#).expect("parse");
+    assert!(m.channel_id.is_none());
+    assert!(m.channel_handle.is_none());
+    assert!(m.channel_url.is_none());
+    assert!(m.published_at.is_none());
+}
+
+#[test]
+fn parse_metadata_rejects_non_json() {
+    assert!(parse_metadata(b"not json").is_err());
+}

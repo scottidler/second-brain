@@ -291,3 +291,19 @@
 
 ### Live check (read-only, release binary built from this tree)
 `sb oracle call creator_browse --json '{"type":"youtube","limit":25}'`: spelling `youtube` works (it is the `NoteType::Youtube` enum value). Zero matches for "Hacker News" or "Michael Larabel". Creators returned, verbatim: AI News & Strategy Daily | Nate B Jones; Better Stack; Chase AI; Let's Get Rusty; IndyDevDan; AI Engineer; Weekly Spiral; Coach McKie; Matt Pocock; AI LABS; Code to the Moon; Simon Scrapes; David Ondrej; Cole Medin; The Spread Offense; The AI Automators; Sidero Labs; Dreams of Code; Throw Deep Publishing; Playrbook; Jake Van Clief; American Football Academy; No Boilerplate; Eric Michaud; Ray Amjad.
+
+## Phase 14: Persist channel metadata
+### Design decisions
+- Split yt-dlp JSON parsing out of the spawn into pure `parse_metadata(&[u8])` — borg/src/youtube.rs — so the fixture test exercises exactly the code `fetch_metadata` runs, with no network.
+- `channel_id`, `channel_handle` (yt-dlp `uploader_id`), `channel_url`, `published_at` added to `youtube::VideoMetadata`, `distillers::VideoMetadata`, and `vault::distilled::VideoPayload` (all `#[serde(default)]` on the payload). Empty strings map to `None`.
+- `upload_date` (`YYYYMMDD`) is normalised to ISO `YYYY-MM-DD` in `iso_date_from_upload_date`; non-8-digit values become `None` rather than leaking a malformed date.
+- Frontmatter: `channel-id`, `channel-handle`, `channel-url` written top-level in distillers/src/render.rs. `published_at` reuses the existing `cortex-video-published-at` key (no second date key). `attach_payload` now also fires when only channel fields are set.
+- `borg::stages::distill::video_metadata_from_yt_dlp` stops hardcoding `published_at: None`.
+- Fixture: borg/src/youtube/fixtures/dump-json-53xycpcgqwe.json, a field subset of a real `yt-dlp --dump-json` for 53XYcpCgQWE.
+### Deviations
+- None.
+### Tradeoffs
+- Top-level `channel-*` keys (as the phase specified) vs `cortex-video-*` prefix for the siblings; they are intended as cross-kind source keys, while the older channel name/date keep their `cortex-video-` keys.
+### Open questions
+- The live re-ingest check (`channel-handle: '@letsgetrusty'` after re-ingesting https://www.youtube.com/watch?v=53XYcpCgQWE) is OWED after deploy; the daemon runs the old binary, so it was not run here. The unit test proves the same chain (fixture -> parse -> map -> distill -> render) and observed `channel-handle: '@letsgetrusty'`, `channel-id: UCSp-OaMpsO8K0KkOqyBl7_w`, `cortex-video-published-at: 2025-11-21`.
+- Phase 17 owns indexing these keys in oracle; not touched here.

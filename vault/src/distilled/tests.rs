@@ -113,6 +113,9 @@ fn roundtrip_video_payload() {
             channel: Some("Some Channel".to_string()),
             duration_seconds: Some(3247),
             published_at: Some("2026-04-22".to_string()),
+            channel_id: None,
+            channel_handle: None,
+            channel_url: None,
             repos: vec![],
         })),
         meta: sample_meta(),
@@ -466,4 +469,14 @@ fn distilled_without_tools_key_deserializes_empty() {
     assert!(!yaml.contains("tools"), "empty tools is omitted");
     let decoded: Distilled = serde_yaml::from_str(&yaml).expect("deserialize");
     assert!(decoded.tools.is_empty());
+}
+
+#[test]
+fn video_payload_without_channel_fields_still_deserializes() {
+    let yaml = "channel: Some Channel\nduration-seconds: 60\npublished-at: '2026-04-22'\n";
+    let p: VideoPayload = serde_yaml::from_str(yaml).expect("legacy payload");
+    assert_eq!(p.channel.as_deref(), Some("Some Channel"));
+    assert!(p.channel_id.is_none());
+    assert!(p.channel_handle.is_none());
+    assert!(p.channel_url.is_none());
 }

@@ -255,6 +255,10 @@ fn video_metadata_from_yt_dlp_maps_uploader_and_duration() {
         duration_secs: 612.4,
         description: "x".to_string(),
         tags: Vec::new(),
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
+        published_at: None,
     };
     let mapped = video_metadata_from_yt_dlp(&src);
     assert_eq!(mapped.channel.as_deref(), Some("Some Channel"));
@@ -270,6 +274,10 @@ fn video_metadata_from_yt_dlp_drops_sentinel_uploader() {
         duration_secs: 0.0,
         description: String::new(),
         tags: Vec::new(),
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
+        published_at: None,
     };
     let mapped = video_metadata_from_yt_dlp(&src);
     assert!(mapped.channel.is_none());
@@ -304,6 +312,9 @@ async fn distill_stage_handles_video_through_fabric_with_metadata() {
         channel: Some("Channel".to_string()),
         duration_seconds: Some(60),
         published_at: None,
+        channel_id: None,
+        channel_handle: None,
+        channel_url: None,
         repos: vec![],
     };
     let distilled = stage
@@ -732,4 +743,45 @@ fn persist_thread_transcript_writes_md_and_yml() {
         yml.contains("extractor: thread-markdown-shim"),
         "expected extractor in yml: {yml}"
     );
+}
+
+#[tokio::test]
+async fn fixture_video_renders_channel_handle_frontmatter() {
+    let src = crate::youtube::parse_metadata(include_bytes!("../../youtube/fixtures/dump-json-53xycpcgqwe.json"))
+        .expect("parse fixture");
+    let mapped = video_metadata_from_yt_dlp(&src);
+    assert_eq!(mapped.published_at.as_deref(), Some("2025-11-21"));
+
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        "distill-video",
+        "summary: \"A short talk.\"\nclaims:\n  - text: \"Claim one.\"\n    anchor: \"00:00:30\"\ntags: []\nlinks: []\n",
+    );
+    let stage = make_stage_with_fake(fake);
+    let distilled = stage
+        .distill_with_video_metadata(
+            IngestKind::YoutubeUrl,
+            "[00:00:00] Welcome.\n[00:00:30] Main claim here.",
+            Some("https://www.youtube.com/watch?v=53XYcpCgQWE"),
+            Some("21+ Rust Pro Tips (TOP SECRET)"),
+            Some(&mapped),
+            None,
+        )
+        .await
+        .expect("distill");
+    let fm = distillers::render::render(
+        &distilled,
+        distillers::RenderOptions {
+            include_transcript: false,
+        },
+    )
+    .frontmatter_additions;
+    let mut map = serde_yaml::Mapping::new();
+    for (k, v) in &fm {
+        map.insert(serde_yaml::Value::String(k.clone()), v.clone());
+    }
+    let yaml = serde_yaml::to_string(&map).expect("yaml");
+    println!("{yaml}");
+    assert!(yaml.contains("channel-handle: '@letsgetrusty'"), "{yaml}");
+    assert!(yaml.contains("cortex-video-published-at: 2025-11-21"), "{yaml}");
 }

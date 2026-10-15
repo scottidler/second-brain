@@ -54,6 +54,9 @@ pub struct VideoMetadata {
     /// ISO 8601 date, e.g. "2026-05-16". Optional because yt-dlp may not
     /// always surface it.
     pub published_at: Option<String>,
+    pub channel_id: Option<String>,
+    pub channel_handle: Option<String>,
+    pub channel_url: Option<String>,
     /// `owner/repo` slugs harvested from the video description (see
     /// `borg::github::extract_repo_slugs`). Empty when none were found.
     pub repos: Vec<String>,
@@ -630,13 +633,23 @@ fn attach_payload(distilled: &mut Distilled, metadata: Option<&VideoMetadata>) {
     let Some(m) = metadata else {
         return;
     };
-    if m.channel.is_none() && m.duration_seconds.is_none() && m.published_at.is_none() && m.repos.is_empty() {
+    if m.channel.is_none()
+        && m.duration_seconds.is_none()
+        && m.published_at.is_none()
+        && m.channel_id.is_none()
+        && m.channel_handle.is_none()
+        && m.channel_url.is_none()
+        && m.repos.is_empty()
+    {
         return;
     }
     distilled.kind_specific = Some(KindPayload::Video(VideoPayload {
         channel: m.channel.clone(),
         duration_seconds: m.duration_seconds,
         published_at: m.published_at.clone(),
+        channel_id: m.channel_id.clone(),
+        channel_handle: m.channel_handle.clone(),
+        channel_url: m.channel_url.clone(),
         repos: m.repos.clone(),
     }));
 }

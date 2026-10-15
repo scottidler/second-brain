@@ -59,7 +59,10 @@ pub fn video_metadata_from_yt_dlp(meta: &crate::youtube::VideoMetadata) -> Video
     VideoMetadata {
         channel,
         duration_seconds,
-        published_at: None,
+        published_at: meta.published_at.clone(),
+        channel_id: meta.channel_id.clone(),
+        channel_handle: meta.channel_handle.clone(),
+        channel_url: meta.channel_url.clone(),
         // Stays empty here: this is a pure yt-dlp field mapper. The
         // description scan that populates `repos` runs at the
         // `distill_for_publish_video` seam where `metadata.description` is in

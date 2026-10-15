@@ -113,6 +113,47 @@ pub struct VideoMetadata {
     pub duration_secs: f64,
     pub description: String,
     pub tags: Vec<String>,
+    /// yt-dlp `channel_id` (stable `UC...` id). `None` when absent or empty.
+    pub channel_id: Option<String>,
+    /// yt-dlp `uploader_id`, the channel handle (e.g. `@letsgetrusty`).
+    pub channel_handle: Option<String>,
+    /// yt-dlp `channel_url`.
+    pub channel_url: Option<String>,
+    /// yt-dlp `upload_date` (`YYYYMMDD`) normalised to ISO `YYYY-MM-DD`.
+    pub published_at: Option<String>,
+}
+
+fn non_empty_str(json: &serde_json::Value, key: &str) -> Option<String> {
+    json[key].as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// `20251121` -> `2025-11-21`; anything not 8 ASCII digits is `None`.
+fn iso_date_from_upload_date(raw: &str) -> Option<String> {
+    if raw.len() == 8 && raw.bytes().all(|b| b.is_ascii_digit()) {
+        Some(format!("{}-{}-{}", &raw[..4], &raw[4..6], &raw[6..]))
+    } else {
+        None
+    }
+}
+
+/// Parse `yt-dlp --dump-json` stdout into `VideoMetadata`.
+pub fn parse_metadata(stdout: &[u8]) -> Result<VideoMetadata> {
+    let json: serde_json::Value = serde_json::from_slice(stdout).context("Failed to parse yt-dlp JSON")?;
+
+    Ok(VideoMetadata {
+        title: json["title"].as_str().unwrap_or("Unknown").to_string(),
+        uploader: json["uploader"].as_str().unwrap_or("Unknown").to_string(),
+        duration_secs: json["duration"].as_f64().unwrap_or(0.0),
+        description: json["description"].as_str().unwrap_or("").to_string(),
+        tags: json["tags"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
+        channel_id: non_empty_str(&json, "channel_id"),
+        channel_handle: non_empty_str(&json, "uploader_id"),
+        channel_url: non_empty_str(&json, "channel_url"),
+        published_at: json["upload_date"].as_str().and_then(iso_date_from_upload_date),
+    })
 }
 
 pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
@@ -141,18 +182,7 @@ pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadat
         output.stdout.len()
     );
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).context("Failed to parse yt-dlp JSON")?;
-
-    Ok(VideoMetadata {
-        title: json["title"].as_str().unwrap_or("Unknown").to_string(),
-        uploader: json["uploader"].as_str().unwrap_or("Unknown").to_string(),
-        duration_secs: json["duration"].as_f64().unwrap_or(0.0),
-        description: json["description"].as_str().unwrap_or("").to_string(),
-        tags: json["tags"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-            .unwrap_or_default(),
-    })
+    parse_metadata(&output.stdout)
 }
 
 pub async fn fetch_subtitles(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {

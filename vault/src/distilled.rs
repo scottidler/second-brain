@@ -332,6 +332,14 @@ pub struct VideoPayload {
     /// ISO 8601 UTC date.
     #[serde(default)]
     pub published_at: Option<String>,
+    /// Stable YouTube channel id (`UC...`).
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    /// Channel handle, e.g. `@letsgetrusty`.
+    #[serde(default)]
+    pub channel_handle: Option<String>,
+    #[serde(default)]
+    pub channel_url: Option<String>,
     /// `owner/repo` slugs harvested from the video description. Rendered as a
     /// top-level `github:` YAML sequence. `#[serde(default)]` keeps legacy
     /// `distilled.yml` artifacts without the field deserializable.
