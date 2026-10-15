@@ -130,9 +130,50 @@ fn test_creator_stats() {
             [],
         ).expect("insert");
 
-    let stats = index.creator_stats().expect("creator_stats");
+    let stats = index.creator_stats(None).expect("creator_stats");
     assert_eq!(stats[0], ("Alice".to_string(), 2));
     assert_eq!(stats[1], ("Bob".to_string(), 1));
+}
+
+#[test]
+fn test_creator_stats_and_notes_filtered_by_type() {
+    let index = SearchIndex::open_memory().expect("open");
+    for (path, ty, creator) in [
+        ("a.md", "youtube", "Alice"),
+        ("b.md", "article", "Hacker News"),
+        ("c.md", "youtube", "Hacker News"),
+    ] {
+        index.conn.execute(
+            "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+             VALUES (?1, 'T', ?2, 'assisted', '', '2026-03-21', '[]', '', ?3, '', '', 0)",
+            rusqlite::params![path, ty, creator],
+        ).expect("insert");
+    }
+    index.conn.execute(
+        "INSERT INTO notes (path, title, note_type, origin, status, date, tags, source, creator, body, summary, modified_at)
+         VALUES ('d.md', 'T', 'article', 'assisted', '', '2026-03-21', '[]', '', 'Michael Larabel', '', '', 0)",
+        [],
+    ).expect("insert");
+
+    let all = index.creator_stats(None).expect("all");
+    assert_eq!(all.len(), 3);
+    let yt = index.creator_stats(Some("youtube")).expect("youtube");
+    assert!(yt.iter().all(|(n, _)| n != "Michael Larabel"));
+    assert_eq!(yt.iter().find(|(n, _)| n == "Hacker News").map(|x| x.1), Some(1));
+
+    let notes = index
+        .notes_by_creator("hacker", None, false, Some("youtube"), None)
+        .expect("notes");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].path, "c.md");
+    let none = index
+        .notes_by_creator("larabel", None, false, Some("youtube"), None)
+        .expect("notes");
+    assert!(none.is_empty());
+    let unfiltered = index
+        .notes_by_creator("hacker", None, false, None, None)
+        .expect("notes");
+    assert_eq!(unfiltered.len(), 2);
 }
 
 #[test]

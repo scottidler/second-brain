@@ -1225,12 +1225,14 @@ fn notes_by_creator_narrows_by_tags_sibling() {
         .expect("b");
 
     let rows = index
-        .notes_by_creator("acme", Some(&["rust".to_string()]), false, None)
+        .notes_by_creator("acme", Some(&["rust".to_string()]), false, None, None)
         .expect("filtered");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path, "notes/a.md");
 
-    let all = index.notes_by_creator("acme", None, false, None).expect("unfiltered");
+    let all = index
+        .notes_by_creator("acme", None, false, None, None)
+        .expect("unfiltered");
     assert_eq!(all.len(), 2);
 }
 

@@ -276,3 +276,18 @@
 ### Open questions
 - OWED to Scott, not attempted: the live check (`sb borg extension stage --to ./dev-ext`, load in `about:debugging`, capture a page with a note, confirm the vault note carries `capture-note:`).
 - OWED to Scott, not attempted: the operator step `sb borg extension sign`, then `otto deploy`.
+
+## Phase 13: creator_browse type filter
+### Design decisions
+- `creator_stats(note_type: Option<&str>)` and `notes_by_creator(.., note_type, limit)` filter through the existing `Filter::and_eq("note_type", ..)` seam - `vault/src/search/stats.rs` - same as `search`/`list_notes`; new pure builder `creator_stats_filter` keeps the SQL testable like its siblings.
+- `CreatorBrowseRequest.note_type: Option<NoteType>` with `#[serde(rename = "type")]` - `oracle/src/tools.rs` - wire name is `type` per the API Design block; typed via the `NoteType` enum (schema is law), converted with `as_str()` in `oracle/src/server.rs::creator_browse`. The schemars description documents the field. No handle field (Phase 17).
+- The type applies to both branches (creator list and per-creator notes).
+### Deviations
+- None. (Other request structs name the wire field `note_type`; this one is `type` as the doc specifies.)
+### Tradeoffs
+- Rust field named `note_type` renamed on the wire to `type` vs a raw `r#type` field - keeps the keyword out of the Rust API and matches sibling structs internally.
+### Open questions
+- None.
+
+### Live check (read-only, release binary built from this tree)
+`sb oracle call creator_browse --json '{"type":"youtube","limit":25}'`: spelling `youtube` works (it is the `NoteType::Youtube` enum value). Zero matches for "Hacker News" or "Michael Larabel". Creators returned, verbatim: AI News & Strategy Daily | Nate B Jones; Better Stack; Chase AI; Let's Get Rusty; IndyDevDan; AI Engineer; Weekly Spiral; Coach McKie; Matt Pocock; AI LABS; Code to the Moon; Simon Scrapes; David Ondrej; Cole Medin; The Spread Offense; The AI Automators; Sidero Labs; Dreams of Code; Throw Deep Publishing; Playrbook; Jake Van Clief; American Football Academy; No Boilerplate; Eric Michaud; Ray Amjad.

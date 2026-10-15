@@ -132,7 +132,7 @@ fn tag_search_filter_has_exact_sql_and_params() {
 #[test]
 fn creator_and_source_filters_have_exact_sql_and_params() {
     let tags = two_tags();
-    let c = notes_by_creator_filter("Alice", Some(&tags), false);
+    let c = notes_by_creator_filter("Alice", Some(&tags), false, None);
     assert_eq!(
         c.sql,
         format!("{NOTE_COLS}\n             FROM notes WHERE LOWER(creator) LIKE ?{OR_TAGS}")
@@ -202,7 +202,7 @@ fn every_builder_binds_exactly_its_params() {
         &list_notes_filter(Some(&tags), true, Some("a"), Some("b"), Some("c"), Some("d")),
     );
     assert_binds(&index, &tag_search_filter(Some(&tags), true));
-    assert_binds(&index, &notes_by_creator_filter("a", Some(&tags), true));
+    assert_binds(&index, &notes_by_creator_filter("a", Some(&tags), true, None));
     assert_binds(&index, &notes_by_source_domain_filter("a", Some(&tags), true));
     assert_binds(
         &index,
@@ -266,14 +266,14 @@ fn creator_source_and_tag_search_positive_and_negative() {
     assert_eq!(
         paths(
             index
-                .notes_by_creator("alice", Some(&tags), true, None)
+                .notes_by_creator("alice", Some(&tags), true, None, None)
                 .expect("creator")
         ),
         vec!["n/hit.md"]
     );
     assert!(
         index
-            .notes_by_creator("alice", Some(&other), true, None)
+            .notes_by_creator("alice", Some(&other), true, None, None)
             .expect("creator")
             .is_empty()
     );

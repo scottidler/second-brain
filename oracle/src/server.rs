@@ -951,6 +951,7 @@ impl OracleMcpServer {
                         &creator,
                         req.tags.as_deref(),
                         req.tags_mode.unwrap_or_default().is_all(),
+                        req.note_type.as_ref().map(|t| t.as_str()),
                         req.limit,
                     )
                     .map_err(Self::err)?;
@@ -964,7 +965,9 @@ impl OracleMcpServer {
                 }))?]))
             }
             None => {
-                let stats = db.creator_stats().map_err(Self::err)?;
+                let stats = db
+                    .creator_stats(req.note_type.as_ref().map(|t| t.as_str()))
+                    .map_err(Self::err)?;
                 let limit = req.limit.unwrap_or(50) as usize;
                 let creators: Vec<serde_json::Value> = stats
                     .iter()

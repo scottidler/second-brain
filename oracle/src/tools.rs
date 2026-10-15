@@ -392,6 +392,13 @@ pub struct CreatorBrowseRequest {
     #[schemars(description = "Creator name to filter (substring match). Omit to list all creators with counts.")]
     pub creator: Option<String>,
 
+    /// Restrict creators and their notes to one note type
+    #[serde(rename = "type")]
+    #[schemars(
+        description = "Restrict to one note type (e.g. youtube), so the creator list is channels and not article authors. Omit for all types."
+    )]
+    pub note_type: Option<NoteType>,
+
     /// Filter to notes by tag, combined per `tags_mode` (default: any)
     #[schemars(
         description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one)."

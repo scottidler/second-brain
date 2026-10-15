@@ -371,12 +371,14 @@ impl super::SearchIndex {
     }
 
     /// Get creator statistics (name -> count), sorted by count
-    pub fn creator_stats(&self) -> Result<Vec<(String, u64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT creator, COUNT(*) as cnt FROM notes WHERE creator != '' GROUP BY creator ORDER BY cnt DESC",
-        )?;
+    pub fn creator_stats(&self, note_type: Option<&str>) -> Result<Vec<(String, u64)>> {
+        log::debug!("search::creator_stats: note_type={note_type:?}");
+        let f = creator_stats_filter(note_type).then(" GROUP BY creator ORDER BY cnt DESC");
+        let mut stmt = self.conn.prepare(&f.sql)?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .query_map(rusqlite::params_from_iter(&f.params), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?
             .filter_map(warn_row)
             .collect();
         Ok(rows)
@@ -388,11 +390,15 @@ impl super::SearchIndex {
         creator: &str,
         tags: Option<&[String]>,
         tags_all: bool,
+        note_type: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Vec<NoteRow>> {
-        log::debug!("search::notes_by_creator: creator={creator} tags={tags:?} tags_all={tags_all} limit={limit:?}");
+        log::debug!(
+            "search::notes_by_creator: creator={creator} tags={tags:?} tags_all={tags_all} note_type={note_type:?} limit={limit:?}"
+        );
         let limit = limit.unwrap_or(20);
-        let f = notes_by_creator_filter(creator, tags, tags_all).then(&format!(" ORDER BY date DESC LIMIT {limit}"));
+        let f = notes_by_creator_filter(creator, tags, tags_all, note_type)
+            .then(&format!(" ORDER BY date DESC LIMIT {limit}"));
         let mut stmt = self.conn.prepare(&f.sql)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(&f.params), NoteRow::from_row)?
@@ -643,12 +649,23 @@ pub(super) fn tag_search_filter(tags: Option<&[String]>, tags_all: bool) -> Filt
 }
 
 /// `notes_by_creator`'s statement up to (not including) `ORDER BY`/`LIMIT`.
-pub(super) fn notes_by_creator_filter(creator: &str, tags: Option<&[String]>, tags_all: bool) -> Filter {
+pub(super) fn notes_by_creator_filter(
+    creator: &str,
+    tags: Option<&[String]>,
+    tags_all: bool,
+    note_type: Option<&str>,
+) -> Filter {
     Filter::new(
         &format!("{NOTE_COLUMNS}\n             FROM notes WHERE LOWER(creator) LIKE ?"),
         vec![Value::Text(format!("%{}%", creator.to_lowercase()))],
     )
+    .and_eq("note_type", note_type)
     .and_tags("notes", tags, tags_all)
+}
+
+/// `creator_stats`'s statement up to (not including) `GROUP BY`.
+pub(super) fn creator_stats_filter(note_type: Option<&str>) -> Filter {
+    Filter::new("SELECT creator, COUNT(*) as cnt FROM notes WHERE creator != ''", vec![]).and_eq("note_type", note_type)
 }
 
 /// `notes_by_source_domain`'s statement up to (not including) `ORDER BY`/`LIMIT`.
