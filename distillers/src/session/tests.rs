@@ -440,7 +440,7 @@ async fn chunk_retry_recovers_transient_malformed_then_valid() {
     fake.set_response(PATTERN_REDUCE, REDUCE_YAML_VALID);
     let distiller = make_distiller(fake, SessionConfig::default());
     let built = distiller
-        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()], None)
         .await
         .expect("distill_long");
     let distilled = built.take();
@@ -473,7 +473,7 @@ async fn chunk_retries_zero_disables_retry_and_degrades() {
     };
     let distiller = make_distiller(fake, config);
     let built = distiller
-        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()], None)
         .await
         .expect("distill_long");
     let distilled = built.take();
@@ -499,7 +499,10 @@ async fn chunk_retry_exhausted_degrades_to_partial_chunk_failure() {
         "USER: FAIL-MARKER chunk\nASSISTANT: x".to_string(),
         "USER: OK-MARKER chunk\nASSISTANT: y".to_string(),
     ];
-    let built = distiller.distill_long("body text", chunks).await.expect("distill_long");
+    let built = distiller
+        .distill_long("body text", chunks, None)
+        .await
+        .expect("distill_long");
     let distilled = built.take();
     assert_eq!(
         distilled.meta.validation.fallback_reason.as_deref(),
@@ -565,7 +568,7 @@ async fn chunk_retry_never_overlaps_a_running_call() {
     let probe = InFlightProbe::new();
     let distiller = SessionDistiller::new(probe.clone(), SessionConfig::default());
     let built = distiller
-        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()])
+        .distill_long("body text", vec!["USER: chunk one\nASSISTANT: ok".to_string()], None)
         .await
         .expect("distill_long");
     let distilled = built.take();
@@ -583,4 +586,32 @@ async fn chunk_retry_never_overlaps_a_running_call() {
         distilled.meta.validation.fallback_reason.is_none(),
         "the second attempt succeeded, so the chunk is not degraded"
     );
+}
+
+#[tokio::test]
+async fn map_reduce_session_reduce_input_carries_capture_note() {
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(PATTERN_CHUNK, CHUNK_YAML_VALID);
+    fake.set_response(PATTERN_REDUCE, REDUCE_YAML_VALID);
+    let m = meta();
+    let body = huge_body();
+    let config = SessionConfig {
+        token_cap: 30_000,
+        ..SessionConfig::default()
+    };
+    let note = "Keep for the token-broker decision.";
+    let distiller = SessionDistiller::new(fake.clone(), config);
+    distiller
+        .distill(DistillInputs {
+            capture_note: Some(note),
+            ..inputs(&body, Some(&m))
+        })
+        .await
+        .expect("distill");
+    let reduce_call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded");
+    assert!(reduce_call.input.contains(note));
 }

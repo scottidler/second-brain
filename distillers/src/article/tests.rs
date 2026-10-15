@@ -688,3 +688,38 @@ async fn single_call_article_populates_enumeration_and_strips_item_anchors() {
     assert_eq!(distilled.key_ideas.len(), 1);
     assert!(!distilled.meta.validation.enumeration_shortfall);
 }
+
+#[tokio::test]
+async fn long_article_reduce_input_carries_capture_note() {
+    let transcript = article_with_late_fact();
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Pooled claim.\"\n    anchor: null\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Pooled claim.\"\n    anchor: null\n",
+    );
+    let note = "Saved for the leader-lease section.";
+    let distiller = ArticleDistiller::new(fake.clone(), ArticleConfig::default());
+    distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: Some(note),
+            session_metadata: None,
+        })
+        .await
+        .expect("distill");
+    let reduce_call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded");
+    assert!(reduce_call.input.contains(note));
+    assert!(reduce_call.input.contains("## Claim Pool"));
+}

@@ -93,7 +93,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for ArticleDistiller<F> {
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
-            (self.distill_long(transcript, chunks).await?, chunk_count)
+            (
+                self.distill_long(transcript, chunks, inputs.capture_note).await?,
+                chunk_count,
+            )
         };
 
         // Loud sub-threshold truncation (single-call path only): if the input
@@ -277,7 +280,12 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
     /// selected claim as an anchorless synthesis. Selection failure / empty
     /// selection reverts to the chronological chunk-claim merge and records the
     /// distinct `reduce-selection-failed` reason, mirroring the video path.
-    async fn distill_long(&self, transcript: &str, chunks: Vec<String>) -> Result<Distilled> {
+    async fn distill_long(
+        &self,
+        transcript: &str,
+        chunks: Vec<String>,
+        capture_note: Option<&str>,
+    ) -> Result<Distilled> {
         log::debug!(
             "ArticleDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -406,7 +414,13 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
         }
 
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &combined_candidates, declared_count);
+        let reduce_input = build_reduce_input(
+            &chunk_summaries,
+            &combined_claims,
+            &combined_candidates,
+            declared_count,
+            capture_note,
+        );
         let mut anchors_stripped: u32 = 0;
         let mut tldr: Option<String> = None;
         let mut enumeration: Option<vault::distilled::Enumeration> = None;

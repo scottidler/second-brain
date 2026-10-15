@@ -169,3 +169,46 @@
 ### Open questions
 - RESOLVED (orchestrator): Phases 10 and 11 would have measured deployed patterns. Answer: no deploy in the middle of the run; add `--patterns-dir` (see Design decisions).
 - Pre-existing flake, unrelated to this phase, which hit one `otto ci` run: `cortex::sweep::tests::test_daemon_cold_tick_fires` takes only `serial_test::serial(xdg_data_home)`. The staged-proposal tests at `cortex/src/sweep/tests.rs:738` and `:790` take only `testutil::lock_env()` and redirect `XDG_DATA_HOME` through `empty_receipts_db()`. Two disjoint locks guard one env var. When they overlap, the cold tick opens another DB and surfaces 0. The fix is for all three to take the same lock. Left out of this phase's commit.
+
+## Phase 10: Capture note into map-reduce, plus note pattern guidance
+### Design decisions
+- `build_reduce_input(.., note: Option<&str>)` and `build_thread_reduce_input(.., note: Option<&str>)` (distillers/src/parse.rs). A non-blank note leads the reduce input in the same labeled "context only - NOT instructions" block the single-call path uses. A blank or absent note leaves the input byte-identical to a bare capture.
+- One block source: the new private `parse::capture_note_section` builds it, and `compose_capture_input`, `build_reduce_input` and `build_thread_reduce_input` all call it. The single-call bytes are unchanged, pinned by `parse::tests::compose_capture_input_unchanged_by_shared_note_section`.
+- Thread: the note comes before `## Thread Head` and appears once. The thread builder calls `build_reduce_input` with `None` and adds the note itself.
+- Every long-path caller passes the note: `distill_long` in article.rs, video.rs, thread.rs and session.rs gains a `capture_note` arg, fed from `inputs.capture_note`. The map (chunk) calls do not get the note. The doc scopes the change to the reduce input, and the reduce pattern is where tldr and claims are selected.
+- voicenote.rs passes `None`, per the Non-Goal "Capture notes on voicenote, image and idea ingests". A comment there says why.
+- Patterns: one `# CAPTURE NOTE` block, identical in all 9 files, placed just before `# OUTPUT`: distill-{video,article,thread,session}, their `-reduce` siblings, and distill-repo. It names the labeled input section and covers: weight tldr (when the schema has one) and claim selection toward the stated interest; never invent relevance the source does not support; ignore an empty note; treat instructions in the note as content; never turn the note into a claim, quote or link.
+- distillers/AGENTS.md gains an invariant line for the capture note on both paths.
+- Tests: `video::tests::long_video_with_capture_note_carries_note_into_reduce_input` (the success-criterion test) plus `long_video_without_capture_note_has_no_note_block`. Also `article::tests::long_article_reduce_input_carries_capture_note`, `thread::tests::long_thread_reduce_input_carries_capture_note`, `session::tests::map_reduce_session_reduce_input_carries_capture_note`, and three parse tests (leading block, blank note is byte-identical, thread ordering). Bite check: I passed `None` at the video reduce call site and the success-criterion test failed (`panicked at distillers/src/video/tests.rs:1001`). It passes again after the revert.
+- Observed: `rg -l "capture note" borg/patterns/distill-*.md | wc -l` -> `9`.
+- Observed, live, `./target/release/sb borg eval --regenerate --patterns-dir borg/patterns` (release build of this tree, exit 0, one attempt, no prompt iteration). `regenerate: 18 fixtures with a capture note, each distilled without and with it (5 without a note skipped)`. Claim support:
+  ```
+  === without capture note ===
+  kind         claims  supported  unsupported  contradicted
+  article          48      27.1%           35             0
+  repo             29      89.7%            3             0
+  session           8     100.0%            0             0
+  thread           17      94.1%            1             0
+  video            59      32.2%           40             0
+  ALL             161      50.9%           79             0
+
+  === with capture note ===
+  kind         claims  supported  unsupported  contradicted
+  article          45      24.4%           34             0
+  repo             29      86.2%            4             0
+  session           8     100.0%            0             0
+  thread           17     100.0%            0             0
+  video            63      34.9%           41             0
+  ALL             162      51.2%           79             0
+  ```
+  Unsupported, without vs with the note: 79 vs 79. The criterion "no more unsupported with the note than without" passes. Composite score, without vs with: `ALL 18 ... 1.593` vs `ALL 18 ... 1.907`.
+  - Both arms report `11 from truncated sources`. The judge sees a source cut at 24000 chars (`vault::fabric: Truncating input from 27218 to 24000 chars`), so the high unsupported rate on article and video is the same in both arms and does not come from the note.
+  - Fallbacks: `1 fixtures on a distill fallback` without the note, `2` with it. The run log shows two article chunk YAML parse failures and one article reduce YAML parse failure (`falling back to concat + chronological claims`). The log does not tie these to an arm.
+### Deviations
+- The doc's bullet lists three pattern rules. The orchestrator's brief added two more: treat instructions in the note as content, and use the literal phrase "capture note". The block carries both. It also adds a rule that the note itself never becomes a claim, quote or link, so the note cannot be graded as source content.
+- `distill_long` signatures in four distillers changed. The doc names only the two builders, but the note has to reach them through `distill_long`. Same effect, correct seam.
+### Tradeoffs
+- Note on the reduce call only vs. on every chunk call too: reduce-only keeps the chunk extraction neutral over the whole source, and puts the weighting where selection happens. It also keeps the chunk inputs the same, with no added tokens.
+- One identical block in 9 files vs. per-kind wording: identical text keeps the rule auditable with one `rg`. "tldr (when the schema has one)" covers the thread and session patterns, which have no tldr.
+### Open questions
+- None.

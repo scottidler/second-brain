@@ -104,7 +104,7 @@ impl<F: FabricCaller + Clone> DistillExtractor for ThreadDistiller<F> {
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
-            let (d, author, post_count) = self.distill_long(transcript, chunks).await?;
+            let (d, author, post_count) = self.distill_long(transcript, chunks, inputs.capture_note).await?;
             (d, author, post_count, chunk_count)
         };
 
@@ -256,7 +256,12 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
     /// chronological chunk merge (`reduce-selection-failed`); author/post-count
     /// still come from whatever the reduce parse yielded (both default when the
     /// reduce fails entirely, exactly as a fabric-failed single call would).
-    async fn distill_long(&self, transcript: &str, chunks: Vec<String>) -> Result<ThreadDistilled> {
+    async fn distill_long(
+        &self,
+        transcript: &str,
+        chunks: Vec<String>,
+        capture_note: Option<&str>,
+    ) -> Result<ThreadDistilled> {
         log::debug!(
             "ThreadDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -366,7 +371,7 @@ impl<F: FabricCaller + Clone> ThreadDistiller<F> {
         // `post-count` survive the long path.
         let head: String = transcript.chars().take(THREAD_HEAD_CHARS).collect();
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_thread_reduce_input(&head, &chunk_summaries, &combined_claims);
+        let reduce_input = build_thread_reduce_input(&head, &chunk_summaries, &combined_claims, capture_note);
         let mut anchors_stripped: u32 = 0;
         let (summary, claims, author, post_count, reduce_selection_failed) = match self
             .call_fabric(PATTERN_REDUCE, &reduce_input)

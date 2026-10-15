@@ -613,3 +613,38 @@ fn infer_platform_handles_subdomain_hosts() {
     assert_eq!(infer_platform(Some("https://example.com/anything")), "unknown");
     assert_eq!(infer_platform(None), "unknown");
 }
+
+#[tokio::test]
+async fn long_thread_reduce_input_carries_capture_note() {
+    let transcript = long_thread_with_head_author();
+    let fake = Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"A chunk claim.\"\n    anchor: null\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"A chunk claim.\"\n    anchor: null\n",
+    );
+    let note = "Keeping this for the eval-harness argument in post 4.";
+    let distiller = ThreadDistiller::new(fake.clone(), ThreadConfig::default());
+    distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: Some("https://x.com/simonw/status/1"),
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: Some(note),
+            session_metadata: None,
+        })
+        .await
+        .expect("distill");
+    let reduce_call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded");
+    assert!(reduce_call.input.contains(note));
+    assert!(reduce_call.input.contains("## Thread Head"));
+}

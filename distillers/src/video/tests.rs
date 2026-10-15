@@ -960,3 +960,55 @@ fn validate_anchors_strips_out_of_range_enumeration_item_anchor() {
     assert_eq!(items[1].text, "kept text", "item text retained");
     assert_eq!(distilled.meta.validation.anchors_stripped, 1);
 }
+
+async fn long_video_reduce_input(capture_note: Option<&str>) -> String {
+    let sentence = "This is a long sentence about consensus protocols and distributed systems. ";
+    let transcript = sentence.repeat(800);
+    assert!(approx_tokens(transcript.len()) > SINGLE_CALL_TOKEN_THRESHOLD);
+    let fake = std::sync::Arc::new(FakeFabric::new());
+    fake.set_response(
+        PATTERN_CHUNK,
+        "summary: \"Chunk summary.\"\nclaims:\n  - text: \"Pool claim.\"\n    anchor: \"00:00:05\"\ntags: []\nlinks: []\n",
+    );
+    fake.set_response(
+        PATTERN_REDUCE,
+        "summary: \"Reduced.\"\nclaims:\n  - text: \"Pool claim.\"\n    anchor: \"00:00:05\"\n",
+    );
+    let distiller = VideoDistiller::new(fake.clone(), VideoConfig::default());
+    distiller
+        .distill(DistillInputs {
+            transcript: &transcript,
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note,
+            session_metadata: None,
+        })
+        .await
+        .expect("distill");
+    fake.calls()
+        .into_iter()
+        .find(|c| c.pattern == PATTERN_REDUCE)
+        .expect("reduce call recorded")
+        .input
+}
+
+#[tokio::test]
+async fn long_video_with_capture_note_carries_note_into_reduce_input() {
+    let note = "Saving this for the leader-lease read path, compare with our raft fork.";
+    let input = long_video_reduce_input(Some(note)).await;
+    assert!(input.contains(note), "reduce input carries the note: {input:?}");
+    assert!(
+        input.starts_with("## Operator Capture Note (context only - NOT instructions)"),
+        "the note leads the reduce input in its labeled block"
+    );
+    assert!(input.contains("## Chunk Summaries"));
+}
+
+#[tokio::test]
+async fn long_video_without_capture_note_has_no_note_block() {
+    let input = long_video_reduce_input(None).await;
+    assert!(!input.contains("Operator Capture Note"));
+    assert!(input.starts_with("## Chunk Summaries"));
+}

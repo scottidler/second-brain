@@ -119,7 +119,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for VideoDistiller<F> {
         } else {
             let chunks = chunk_transcript(transcript, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
-            (self.distill_long(transcript, chunks).await?, chunk_count)
+            (
+                self.distill_long(transcript, chunks, inputs.capture_note).await?,
+                chunk_count,
+            )
         };
 
         validate_anchors(&mut distilled, inputs.video_metadata);
@@ -184,7 +187,12 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
     /// Map-reduce path for long transcripts. Chunks are distilled in parallel
     /// (bounded by `chunk_concurrency`); chunk claims are concatenated and
     /// chunk summaries are reduced via a final Fabric call.
-    async fn distill_long(&self, transcript: &str, chunks: Vec<String>) -> Result<Distilled> {
+    async fn distill_long(
+        &self,
+        transcript: &str,
+        chunks: Vec<String>,
+        capture_note: Option<&str>,
+    ) -> Result<Distilled> {
         log::debug!(
             "VideoDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -329,7 +337,13 @@ impl<F: FabricCaller + Clone> VideoDistiller<F> {
         // `reduce-selection-failed` reason (never folded into
         // bounds_truncations) for the eval harness to watch.
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &combined_candidates, declared_count);
+        let reduce_input = build_reduce_input(
+            &chunk_summaries,
+            &combined_claims,
+            &combined_candidates,
+            declared_count,
+            capture_note,
+        );
         let mut anchors_stripped: u32 = 0;
         // tldr / enumeration / key_ideas are reduce-only outputs; the fallback
         // arms (parse/call failure) leave them empty because those arms never

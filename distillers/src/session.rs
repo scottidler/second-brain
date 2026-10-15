@@ -180,7 +180,10 @@ impl<F: FabricCaller + Clone> DistillExtractor for SessionDistiller<F> {
         } else {
             let chunks = chunk_transcript(&marked, CHUNK_TOKEN_TARGET);
             let chunk_count = chunks.len().max(1);
-            (self.distill_long(&marked, chunks).await?, chunk_count)
+            (
+                self.distill_long(&marked, chunks, inputs.capture_note).await?,
+                chunk_count,
+            )
         };
 
         let mut bounded = enforce_bounds(distilled.take(), max_claims(chunk_count));
@@ -279,7 +282,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
     /// Chunks distill in parallel via `distill-session-chunk`; a single
     /// `distill-session-reduce` synthesizes the summary and SELECTS the final
     /// claims from the pooled chunk claims (mirrors video/thread).
-    async fn distill_long(&self, body: &str, chunks: Vec<String>) -> Result<Built> {
+    async fn distill_long(&self, body: &str, chunks: Vec<String>, capture_note: Option<&str>) -> Result<Built> {
         log::debug!(
             "SessionDistiller::distill_long: chunks={} threshold_tokens={} target_tokens={}",
             chunks.len(),
@@ -363,7 +366,7 @@ impl<F: FabricCaller + Clone> SessionDistiller<F> {
         }
 
         let joined = chunk_summaries.join("\n\n");
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None);
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None, capture_note);
         let mut anchors_stripped: u32 = 0;
         let (summary, claims, reduce_selection_failed, slug) = match self
             .call_fabric(PATTERN_REDUCE, &reduce_input)

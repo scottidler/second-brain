@@ -279,8 +279,9 @@ impl<F: FabricCaller + Clone> VoiceNoteDistiller<F> {
         // distinct `reduce-selection-failed` reason for the eval harness.
         let joined = chunk_summaries.join("\n\n");
         // Voice notes are not a listicle kind: no enumeration candidates, no
-        // declared count reach the reduce input.
-        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None);
+        // declared count reach the reduce input. No capture note either: the
+        // operator's own words are the content.
+        let reduce_input = build_reduce_input(&chunk_summaries, &combined_claims, &[], None, None);
         let mut anchors_stripped: u32 = 0;
         let (summary, claims, reduce_selection_failed) = match self.call_fabric(PATTERN_REDUCE, &reduce_input).await {
             Ok(raw) => match parse_reduce_yaml(&raw) {
