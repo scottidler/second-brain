@@ -341,8 +341,8 @@ fn union_capped(preserved: &[String], fresh: &[String], canon: Option<&Canonical
 /// of the previous `patch_cortex_fields` helper. Only keys on
 /// `CORTEX_PRESERVE_KEYS` or `markdown::BORG_PRESERVE_KEYS` are accepted.
 ///
-/// Cortex keys replace (scalars) or union into (lists) the fresh render.
-/// A borg key fills in only when the fresh render lacks it, because a fresh
+/// Cortex keys replace (scalars, written raw) or union into (lists) the
+/// fresh render. A borg key fills in only when the fresh render lacks it, because a fresh
 /// value is the operator's newer statement; it is written through
 /// `yaml_scalar`, so a multiline value lands as a valid block scalar.
 ///
@@ -372,8 +372,11 @@ pub fn apply_preserved_fields(rendered: &str, fields: &[(String, FieldValue)], c
         }
         match value {
             FieldValue::Scalar(v) => {
+                // Raw on purpose: cortex scalars are typed YAML (`true`,
+                // `0.85`) read back verbatim, and `yaml_scalar` would quote
+                // them into strings that index as unclassified.
                 remove_key(&mut lines, key);
-                lines.push(format!("{key}: {}", yaml_scalar(v)));
+                lines.push(format!("{key}: {v}"));
             }
             FieldValue::List(preserved) => {
                 // Union, preserved first: a refetch never removes a tag that

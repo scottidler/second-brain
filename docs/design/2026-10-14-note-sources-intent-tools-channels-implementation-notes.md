@@ -54,8 +54,8 @@
 
 ## Phase 4: Capture-note boilerplate filter
 ### Design decisions
-- `router::extract_capture_note` filters `Source: <site>` lines (case-insensitive prefix, trimmed, non-empty remainder) BEFORE the whitespace-collapsing token pass — borg/src/router.rs — the line boundary is gone once whitespace is collapsed. Prose that merely starts with the word "Source" (`Source code is...`) is kept because the rule requires the `Source:` colon form.
-- `router::drop_note_equal_to_title(note, title)` — borg/src/router.rs — pure, case-insensitive, whitespace-collapsed equality; returns `None` for empty/blank notes.
+- `router::extract_capture_note` filters `Source: <site>` lines (case-insensitive prefix, trimmed, non-empty remainder) BEFORE the whitespace-collapsing token pass, borg/src/router.rs, the line boundary is gone once whitespace is collapsed. Prose that merely starts with the word "Source" (`Source code is...`) is kept because the rule requires the `Source:` colon form.
+- `router::drop_note_equal_to_title(note, title)`, borg/src/router.rs, pure, case-insensitive, whitespace-collapsed equality; returns `None` for empty/blank notes.
 - Publish seam: applied where `NoteContent` is built in `process_url_inner` (borg/src/pipeline.rs), against `scraped_title` (the title the fetcher returned, not the owner/repo or thread override). That drops `## Why Captured` and the `capture-note:` frontmatter key.
 - Measurement: the 58 `capture-note:` values from ~/repos/scottidler/obsidian/notes (YAML-decoded, each fed through `extract_capture_note` with a trailing URL line) via a throwaway test, reverted and not committed. Observed: `MEASURE survivors=9 of 58`. The 9 survivors are 1 real intent note and 8 page titles, which the title-equality rule handles at publish (needs the fetched title, not measurable offline).
 ### Deviations
@@ -264,8 +264,8 @@
 
 ## Phase 12: Popup note field
 ### Design decisions
-- The popup no longer posts on open; a textarea (`#note`, autofocused) and a Capture button submit — `borg/clients/extension/popup.html`, `popup.js` — the doc's Resolved Decision. Enter submits with focus in the textarea, Shift+Enter inserts a newline, so a bare capture is one keypress.
-- `buildBody(url, rawNote)` is a pure function that returns `{url}` or `{url, note}`, with `note` trimmed and omitted when empty — `popup.js:buildBody`.
+- The popup no longer posts on open; a textarea (`#note`, autofocused) and a Capture button submit, `borg/clients/extension/popup.html`, `popup.js`, the doc's Resolved Decision. Enter submits with focus in the textarea, Shift+Enter inserts a newline, so a bare capture is one keypress.
+- `buildBody(url, rawNote)` is a pure function that returns `{url}` or `{url, note}`, with `note` trimmed and omitted when empty, `popup.js:buildBody`.
 - The button is disabled while a capture is in flight and re-enabled on every failure path, so a failed capture can be retried; success closes the popup as before.
 - `borg/clients/AGENTS.md` updated to describe the new popup flow. `popup.css` gained two rules for the textarea and button. The no-`keepalive` rule is untouched.
 ### Deviations
@@ -294,7 +294,7 @@
 
 ## Phase 14: Persist channel metadata
 ### Design decisions
-- Split yt-dlp JSON parsing out of the spawn into pure `parse_metadata(&[u8])` — borg/src/youtube.rs — so the fixture test exercises exactly the code `fetch_metadata` runs, with no network.
+- Split yt-dlp JSON parsing out of the spawn into pure `parse_metadata(&[u8])`, borg/src/youtube.rs, so the fixture test exercises exactly the code `fetch_metadata` runs, with no network.
 - `channel_id`, `channel_handle` (yt-dlp `uploader_id`), `channel_url`, `published_at` added to `youtube::VideoMetadata`, `distillers::VideoMetadata`, and `vault::distilled::VideoPayload` (all `#[serde(default)]` on the payload). Empty strings map to `None`.
 - `upload_date` (`YYYYMMDD`) is normalised to ISO `YYYY-MM-DD` in `iso_date_from_upload_date`; non-8-digit values become `None` rather than leaking a malformed date.
 - Frontmatter: `channel-id`, `channel-handle`, `channel-url` written top-level in distillers/src/render.rs. `published_at` reuses the existing `cortex-video-published-at` key (no second date key). `attach_payload` now also fires when only channel fields are set.
@@ -423,3 +423,26 @@
   ```
   Error: cannot reach daemon at 127.0.0.1:46689 for GET /channels/search: error sending request for url (http://127.0.0.1:46689/channels/search?handle=%40letsgetrusty&q=tokio)
   ```
+
+## Implementation audit (round 1)
+
+Source of the findings: both review-panel seats timed out (rc=124) on the full 17-phase dispatch and again on a Phases 1-8 retry, so no seat produced a review. The findings rest on the Codex (staff-engineer) seat's preserved traces, each re-tested by the panel agent, plus the panel agent's own wiring checks (all PASS). There was no cross-model independence this round. Synthesis: `~/.cache/review-panel/runs/UtqlBAm4/synthesis.md`.
+
+### Design decisions
+- Preserved cortex scalars write raw again (`{key}: {v}`), as base d4e44d3 did. Only the borg-owned `capture-note` goes through `yaml_scalar`, `borg/src/pipeline/atomic.rs:apply_preserved_fields`, `yaml_scalar` quoted `true` into `'true'` and `0.85` into `'0.85'`, so after a `--force` reingest `vault/src/search.rs` indexed the note as unclassified and `cortex/src/classify.rs` (which skips only a `Bool(true)`) re-classified it. Regression test `borg/src/pipeline/publish/tests.rs:preserved_cortex_bool_and_float_scalars_survive_reingest_typed` reads a note carrying `cortex-classified: true` and `cortex-confidence: 0.85`, reingests it twice, and parses the written frontmatter with serde_yaml, asserting a YAML bool and a YAML float. With `yaml_scalar` still in place it failed: `pass 1: cortex-classified must stay a YAML bool: ... cortex-classified: 'true'`. It passes with the raw write.
+- The borg unit's `ReadWritePaths` now includes the configured `archive.root` when it is under neither the vault nor the data dir, `borg/src/service.rs:writable_paths`, the archive write fails the publish closed, so under `ProtectHome=read-only` a custom root failed every URL ingest. The default root (`~/.local/share/sb/borg/sources`) is under the data dir and is not listed twice. Tests: `render_systemd_unit_grants_a_custom_archive_root`, `render_systemd_unit_does_not_duplicate_the_default_archive_root`, `writable_paths_skips_an_archive_root_under_the_vault`. The test `cfg()` now pins `archive.root` under the test data dir, so the goldens no longer depend on the real `XDG_DATA_HOME`; both goldens are byte-identical.
+- Cortex's unit is unchanged. Cortex only reads the archive (`cortex/src/embed/source.rs`, mtime and `distilled.yml` reads, no writes), and its `Hardening::Strict` renders `ProtectSystem=strict` + `ProtectHome=read-only`, which leaves every path outside `ReadWritePaths` readable. A custom `archive-root` is already readable to it.
+- Criterion amendment (the orchestrator's doc edit, committed here unchanged): the Phase 3 success criterion and Acceptance Criterion 1 said the archive holds ">= 1,361" dirs after `--apply`. 1,361 was the staged `distilled.yml` count, which includes session traces the archive skips by design (Resolved Decision). The 2026-10-15 dry run on ripr reported `scanned=1367 to_copy=718 session=649`, so 718 was the ceiling. Both criteria now read ">= the dry run's `to_copy` count".
+
+### Deviations
+- Correction to Phase 5's notes: its Deviations bucket says "Cortex scalars still write raw (`{key}: {v}`), not through `yaml_scalar`". That was false as committed: e4ef713 changed `atomic.rs` to write them through `yaml_scalar`. This commit makes the Phase 5 statement true by restoring the raw write.
+- Pushback on the audit's Phase 6 finding (synthesis item 4, "same effect" overstated because the note lives in the Stage-0 envelope, written after the general permit and skipped when `staging.enabled=false`): the deviation holds. `borg/src/replay.rs:replay_one` bails with `staging.enabled must be true` when staging is off, and bails with `trace ... not found in staging` when the envelope does not exist, before it reads anything. A trace whose note is missing because staging is disabled or because the permit was never acquired is a trace replay cannot run at all, so recording the note anywhere else would not reach replay.
+
+### Tradeoffs
+- `writable_paths` adds the archive root only when it is outside the vault and data dir vs always listing it: always listing it would change both goldens and every default unit for no access change, and duplicate entries make drift reports noisier.
+- Fixed the borg unit only vs also widening the staging root: the staging root has the same pre-existing gap but only WARNs on failure, and it is not in this audit's fix list.
+
+### Open questions
+- Deferred (synthesis item 5): the archive backfill (`borg/src/archive/backfill.rs`) joins `<staging-root>/<trace>` and ignores `staging.layout: per-stage`. ripr runs per-trace, and cortex's staged readers make the same assumption. Fix if a host ever runs per-stage.
+- Deferred (synthesis item 6): a preserved `capture-note` is trimmed (`router.rs`), so a hand-edited `|` block scalar loses its trailing newline on reingest. Ingest-written notes are already trimmed, so only hand edits are affected.
+- A custom `archive.root` under `/tmp` would still land in the unit's `PrivateTmp` namespace. Not handled; nobody configures that.

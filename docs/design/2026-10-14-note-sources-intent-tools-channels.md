@@ -257,7 +257,7 @@ Within each part, deterministic work comes first and prompt work last. The eval 
 - Existing video transcripts are archived as staged, duplicated text included. Phase 1 fixes new ingests only.
 - Operator step (Scott, on the daemon host ripr): run it with `--apply` before anyone runs `sb borg retention sweep`.
 - **Success criteria:**
-  - After `--apply` on ripr, `fd -t d . ~/.local/share/sb/borg/sources --max-depth 1 | wc -l` is >= 1,361 (the staged `distilled.yml` count on 2026-10-14).
+  - After `--apply` on ripr, `fd -t d . ~/.local/share/sb/borg/sources --max-depth 1 | wc -l` is >= the dry run's `to_copy` count. Amended at the implementation audit: the first draft said >= 1,361, but that count includes session traces, which the archive skips by design. The dry run on 2026-10-15 reported scanned=1367, to_copy=718, session=649.
   - A second run reports 0 to copy.
 
 #### Phase 4: Capture-note boilerplate filter
@@ -372,7 +372,8 @@ Within each part, deterministic work comes first and prompt work last. The eval 
 
 ## Acceptance Criteria
 
-- [ ] `fd -t d . ~/.local/share/sb/borg/sources --max-depth 1 | wc -l` >= 1,361 on ripr after Phase 3, and a trace whose staging dir is gone still yields its transcript to cortex embed.
+- [ ] `fd -t d . ~/.local/share/sb/borg/sources --max-depth 1 | wc -l` >= the `sb borg retention archive` dry run's `to_copy` count on ripr after Phase 3, and a trace whose staging dir is gone still yields its transcript to cortex embed.
+  - Amended at the implementation audit: the first draft said >= 1,361, which counts session traces that the archive skips by design. Dry run on 2026-10-15: scanned=1367, to_copy=718, session=649.
   - Observed on main: `ls: cannot access '/home/saidler/.local/share/sb/borg/sources': No such file or directory`.
 - [ ] `sb borg ingest` takes `--note`, and a `--force` reingest keeps the decoded `capture-note` value.
   - Observed on main: `sb/src/cli/borg/args.rs:33-49` declares `url`, `--clipboard`, `--file`, `--tags`, `--force` and no `--note`.

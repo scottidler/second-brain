@@ -215,3 +215,39 @@ fn preserved_boilerplate_capture_note_is_dropped_and_intent_survives() {
         );
     }
 }
+
+/// Regression (implementation audit round 1): a `--force` reingest must
+/// write preserved cortex scalars raw. Writing them through `yaml_scalar`
+/// quoted `true` into `'true'` and `0.85` into `'0.85'`, so the search index
+/// read the note as unclassified and cortex re-classified it.
+#[test]
+fn preserved_cortex_bool_and_float_scalars_survive_reingest_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.md");
+    std::fs::write(
+        &old,
+        "---\ntitle: Old\nstatus: read\ncortex-classified: true\ncortex-confidence: 0.85\n---\nBody.\n",
+    )
+    .unwrap();
+    let fresh = "---\ntitle: New\nstatus: inbox\n---\nNew body.\n";
+
+    let mut note = old;
+    for pass in 1..=2 {
+        let fields = read_preserved_fields(&note).expect("read");
+        let written = apply_preserved_fields(fresh, &fields, None);
+        let fm = parse_frontmatter(&written);
+        assert_eq!(
+            fm.get("cortex-classified"),
+            Some(&serde_yaml::Value::Bool(true)),
+            "pass {pass}: cortex-classified must stay a YAML bool:\n{written}"
+        );
+        assert_eq!(
+            fm.get("cortex-confidence").and_then(serde_yaml::Value::as_f64),
+            Some(0.85),
+            "pass {pass}: cortex-confidence must stay a YAML float:\n{written}"
+        );
+        assert_eq!(fm.get("status").and_then(|v| v.as_str()), Some("read"), "{written}");
+        note = dir.path().join(format!("pass-{pass}.md"));
+        std::fs::write(&note, &written).unwrap();
+    }
+}

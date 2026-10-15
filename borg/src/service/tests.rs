@@ -2,8 +2,12 @@ use super::*;
 use crate::config::Config;
 use vault::systemd::EnvBootstrap;
 
+/// A default config with the archive root pinned under the test data dir, so
+/// the rendered unit does not depend on the real `XDG_DATA_HOME`.
 fn cfg() -> Config {
-    Config::default()
+    let mut config = Config::default();
+    config.archive.root = PathBuf::from("/home/tester/.local/share/sb/borg/sources");
+    config
 }
 
 /// A default config (no `log-level` set) must render `--log-level info`, and
@@ -234,4 +238,36 @@ fn launchd_plist_runs_borg_daemon_start_under_the_installed_label() {
     ));
     assert!(plist.contains("<string>com.obsidian-borg</string>"));
     assert!(plist.contains("/tmp/obsidian-borg.stdout.log"));
+}
+
+/// A custom archive root outside the vault and data dir must be writable, or
+/// every URL ingest fails closed on the archive write under `ProtectHome`.
+#[test]
+fn render_systemd_unit_grants_a_custom_archive_root() {
+    let mut config = cfg();
+    config.archive.root = PathBuf::from("/home/tester/archive/sources");
+    let unit = golden_unit(&config);
+    assert!(
+        unit.contains(
+            "ReadWritePaths=/home/tester/repos/scottidler/obsidian /home/tester/.local/share/sb /home/tester/archive/sources\n"
+        ),
+        "custom archive root must be in ReadWritePaths:\n{unit}"
+    );
+}
+
+/// The default archive root sits under the data dir, which is already
+/// writable, so it is not listed twice.
+#[test]
+fn render_systemd_unit_does_not_duplicate_the_default_archive_root() {
+    let unit = golden_unit(&cfg());
+    assert!(
+        unit.contains("ReadWritePaths=/home/tester/repos/scottidler/obsidian /home/tester/.local/share/sb\n"),
+        "default archive root must not be added:\n{unit}"
+    );
+}
+
+#[test]
+fn writable_paths_skips_an_archive_root_under_the_vault() {
+    let paths = writable_paths(Path::new("/v"), Path::new("/d"), Path::new("/v/system/sources"));
+    assert_eq!(paths, vec![PathBuf::from("/v"), PathBuf::from("/d")]);
 }

@@ -239,11 +239,27 @@ fn render_systemd_unit(
         kill_mode: None,
         success_exit_status: Vec::new(),
         hardening: Hardening::Strict {
-            rw_paths: vec![vault_path.to_path_buf(), data_path.to_path_buf()],
+            rw_paths: writable_paths(vault_path, data_path, &config.archive.root),
         },
         wanted_by: Some("default.target".to_string()),
     };
     render_service(&unit)
+}
+
+/// The unit's `ReadWritePaths`: the vault and the borg data dir, plus the
+/// source archive root when it lives under neither. The archive write fails
+/// the publish closed, so a custom `archive.root` left read-only under
+/// `ProtectHome` would fail every URL ingest.
+fn writable_paths(vault_path: &Path, data_path: &Path, archive_root: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![vault_path.to_path_buf(), data_path.to_path_buf()];
+    if !paths.iter().any(|p| archive_root.starts_with(p)) {
+        log::debug!(
+            "service::writable_paths: archive root {} is outside the vault and data dir; granting it",
+            archive_root.display()
+        );
+        paths.push(archive_root.to_path_buf());
+    }
+    paths
 }
 
 /// The `borg.service` text `--install` writes, resolved from ambient state
