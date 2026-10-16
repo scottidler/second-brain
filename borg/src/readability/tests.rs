@@ -78,7 +78,17 @@ fn render_markdown_refuses_pathologically_deep_html() {
     let depth = 3_000;
     let html = format!("{}x{}", "<span>".repeat(depth), "</span>".repeat(depth));
     let err = render_markdown(&html, "https://example.com/deep").expect_err("deep html must be refused");
-    assert!(matches!(err, ReadableError::Extract { .. }), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            ReadableError::TooDeep {
+                depth: 3_000,
+                limit: MAX_NESTING_DEPTH,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
     assert_eq!(
         render_markdown("<p>ok</p>", "https://example.com/").expect("shallow"),
         "ok"
@@ -92,4 +102,59 @@ fn only_html_content_types_go_to_readability() {
     assert!(is_html_content_type(None));
     assert!(!is_html_content_type(Some("application/pdf")));
     assert!(!is_html_content_type(Some("image/png")));
+}
+
+#[test]
+fn pdf_is_recognised_by_content_type_or_magic_bytes() {
+    let pdf = b"%PDF-1.7\n%binary";
+    assert_eq!(body_kind(Some("application/pdf"), b""), BodyKind::Pdf);
+    assert_eq!(body_kind(Some("Application/PDF; qs=0.1"), pdf), BodyKind::Pdf);
+    assert_eq!(body_kind(Some("text/html"), pdf), BodyKind::Pdf, "mislabeled PDF");
+    assert_eq!(body_kind(None, pdf), BodyKind::Pdf, "unlabeled PDF");
+    assert_eq!(body_kind(Some("text/html"), b"<html></html>"), BodyKind::Html);
+    assert_eq!(body_kind(None, b"<p>x</p>"), BodyKind::Html);
+    assert_eq!(body_kind(Some("image/png"), b"\x89PNG"), BodyKind::Other);
+}
+
+/// Serve one canned HTTP response on a loopback port and return its base URL.
+async fn serve_once(content_type: &'static str, body: &'static [u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        sock.write_all(head.as_bytes()).await.expect("head");
+        sock.write_all(body).await.expect("body");
+    });
+    format!("http://{addr}")
+}
+
+/// The 2026-10-15 crash: a PDF behind a query-string URL went down the HTML
+/// path. It must come back as PDF bytes, whatever the URL path looks like.
+#[tokio::test]
+async fn query_string_pdf_url_is_fetched_as_pdf() {
+    let base = serve_once("application/pdf", b"%PDF-1.7\nbody").await;
+    let url = format!("{base}/download?token=abc&id=42");
+    match fetch_article_readable(&url, 5).await.expect("fetch") {
+        Fetched::Pdf(bytes) => assert!(bytes.starts_with(PDF_MAGIC)),
+        other => panic!("expected a PDF, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pdf_served_as_html_is_fetched_as_pdf() {
+    let base = serve_once("text/html; charset=utf-8", b"%PDF-1.4\nbody").await;
+    match fetch_article_readable(&format!("{base}/paper"), 5)
+        .await
+        .expect("fetch")
+    {
+        Fetched::Pdf(_) => {}
+        other => panic!("expected a PDF, got {other:?}"),
+    }
 }

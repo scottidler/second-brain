@@ -526,7 +526,13 @@ pub(crate) async fn process_article_readable(
     log::debug!("process_article_readable[{trace_id}]: url={url}");
     // Reuse the Jina HTTP-scrape timeout class: this is the same shape of fetch,
     // now done in-process instead of via a remote API or a shelled binary.
-    let article_md = crate::readability::fetch_article_readable(url, config.pipeline.jina_timeout_secs).await?;
+    let (article_md, extractor) =
+        match crate::readability::fetch_article_readable(url, config.pipeline.jina_timeout_secs).await? {
+            crate::readability::Fetched::Article(md) => (md, "readable"),
+            crate::readability::Fetched::Pdf(bytes) => {
+                (extract_pdf_markdown(url, bytes, config, trace_id).await?, "pdf")
+            }
+        };
 
     // Reject too-thin output or a block page (caller falls through to the
     // fabric-u -> Jina chain).
@@ -539,7 +545,7 @@ pub(crate) async fn process_article_readable(
         trace_id,
         url,
         article_md.as_bytes(),
-        "readable",
+        extractor,
         200,
         Some("text/markdown"),
     ) {
@@ -552,6 +558,28 @@ pub(crate) async fn process_article_readable(
         article_md.chars().count()
     );
     Ok((title, article_md, None))
+}
+
+/// A PDF found at a URL goes to markitdown, the same extractor an uploaded PDF
+/// uses, never to the HTML readability path. The URL keeps its article note, so
+/// dedup, reingest, and `source:` stay keyed on the URL.
+async fn extract_pdf_markdown(url: &str, bytes: Vec<u8>, config: &Config, trace_id: &str) -> Result<String> {
+    log::debug!("extract_pdf_markdown[{trace_id}]: url={url} bytes={}", bytes.len());
+    let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
+    let temp_dir = std::env::temp_dir().join("obsidian-borg");
+    std::fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+    let temp_path = temp_dir.join(format!("{trace_id}.pdf"));
+    std::fs::write(&temp_path, &bytes).context("Failed to write temp PDF")?;
+    let timeout = config.pipeline.markitdown_timeout_secs;
+    let extract_path = temp_path.clone();
+    let result = tokio::task::spawn_blocking(move || extraction::extract_markdown(&extract_path, timeout)).await;
+    let _ = std::fs::remove_file(&temp_path);
+    let markdown = result.context("markitdown task failed")??;
+    log::info!(
+        "[{trace_id}] PDF at {url} extracted by markitdown: {} chars",
+        markdown.chars().count()
+    );
+    Ok(markdown)
 }
 
 /// Validate the readable-extracted markdown before acceptance: too-thin output

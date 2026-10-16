@@ -32,6 +32,37 @@ pub enum ReadableError {
     Empty { url: String },
     #[error("readable fetch for {url} returned {content_type}, not HTML")]
     NotHtml { url: String, content_type: String },
+    #[error("readability refused {url}: article nests {depth} elements deep (limit {limit})")]
+    TooDeep { url: String, depth: usize, limit: usize },
+}
+
+/// What a readable fetch found at the URL. A PDF is recognised by its
+/// `Content-Type` or its `%PDF-` magic bytes, never by the URL path, so a
+/// query string or a mislabeled server cannot send it down the HTML path.
+#[derive(Debug)]
+pub enum Fetched {
+    Article(String),
+    Pdf(Vec<u8>),
+}
+
+#[derive(Debug, PartialEq)]
+enum BodyKind {
+    Html,
+    Pdf,
+    Other,
+}
+
+const PDF_MAGIC: &[u8] = b"%PDF-";
+
+fn body_kind(content_type: Option<&str>, body: &[u8]) -> BodyKind {
+    let is_pdf_type = content_type.is_some_and(|ct| ct.to_ascii_lowercase().contains("application/pdf"));
+    if is_pdf_type || body.starts_with(PDF_MAGIC) {
+        BodyKind::Pdf
+    } else if is_html_content_type(content_type) {
+        BodyKind::Html
+    } else {
+        BodyKind::Other
+    }
 }
 
 /// `htmd` walks the DOM recursively, a few frames per nesting level. A 14 MB
@@ -93,9 +124,10 @@ fn max_nesting_depth(html: &str) -> usize {
 /// render it to markdown (`htmd`). `timeout_secs` bounds the HTTP fetch. DOM
 /// parsing + markdown rendering are CPU-bound and synchronous, so they run on a
 /// blocking thread (never on the async runtime, per subprocess/async hygiene).
-/// Returns the article markdown, or a typed [`ReadableError`] the caller treats
-/// as "fall through to the existing fetch chain".
-pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<String, ReadableError> {
+/// Returns the article markdown, the bytes of a PDF for the caller's PDF
+/// extractor, or a typed [`ReadableError`] the caller treats as "fall through
+/// to the existing fetch chain".
+pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Fetched, ReadableError> {
     log::debug!("fetch_article_readable: url={url} timeout_secs={timeout_secs}");
 
     let client = vault::http::builder(Timeouts::total(Duration::from_secs(timeout_secs)))
@@ -123,16 +155,26 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Stri
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    if !is_html_content_type(content_type.as_deref()) {
+    let is_pdf_type = body_kind(content_type.as_deref(), b"") == BodyKind::Pdf;
+    if !is_pdf_type && !is_html_content_type(content_type.as_deref()) {
         return Err(ReadableError::NotHtml {
             url: url.to_string(),
             content_type: content_type.unwrap_or_default(),
         });
     }
-    let html = response.text().await.map_err(|source| ReadableError::Fetch {
+    let body = response.bytes().await.map_err(|source| ReadableError::Fetch {
         url: url.to_string(),
         source,
     })?;
+    if body_kind(content_type.as_deref(), &body) == BodyKind::Pdf {
+        log::info!(
+            "fetch_article_readable: url={url} is a PDF ({} bytes, content-type {})",
+            body.len(),
+            content_type.as_deref().unwrap_or("none")
+        );
+        return Ok(Fetched::Pdf(body.to_vec()));
+    }
+    let html = String::from_utf8_lossy(&body).into_owned();
 
     let url_owned = url.to_string();
     let markdown = match tokio::task::spawn_blocking(move || extract_markdown(&html, &url_owned)).await {
@@ -152,7 +194,7 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Stri
         "fetch_article_readable: url={url} produced {} chars",
         markdown.chars().count()
     );
-    Ok(markdown)
+    Ok(Fetched::Article(markdown))
 }
 
 /// Sync extraction: `dom_smoothie` (HTML -> clean article HTML) -> `htmd`.
@@ -176,9 +218,10 @@ fn extract_markdown(html: &str, url: &str) -> Result<String, ReadableError> {
 fn render_markdown(content_html: &str, url: &str) -> Result<String, ReadableError> {
     let depth = max_nesting_depth(content_html);
     if depth > MAX_NESTING_DEPTH {
-        return Err(ReadableError::Extract {
+        return Err(ReadableError::TooDeep {
             url: url.to_string(),
-            reason: format!("article nests {depth} elements deep (limit {MAX_NESTING_DEPTH})"),
+            depth,
+            limit: MAX_NESTING_DEPTH,
         });
     }
     htmd::convert(content_html).map_err(|e| ReadableError::Extract {
