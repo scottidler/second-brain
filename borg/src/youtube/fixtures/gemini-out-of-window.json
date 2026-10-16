@@ -1,0 +1,29 @@
+{
+  "id": "interactions/abc123",
+  "status": "completed",
+  "model": "gemini-3.8-flash",
+  "usage": {
+    "total_input_tokens": 46513,
+    "total_output_tokens": 17
+  },
+  "steps": [
+    {
+      "type": "thought",
+      "content": [
+        {
+          "type": "text",
+          "text": "Transcribing the video."
+        }
+      ]
+    },
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "[00:00:00] Start.\n[00:10:00] Middle.\n[40:00] Way past the window end."
+        }
+      ]
+    }
+  ]
+}

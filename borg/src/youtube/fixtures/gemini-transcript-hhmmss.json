@@ -1,0 +1,29 @@
+{
+  "id": "interactions/abc123",
+  "status": "completed",
+  "model": "gemini-3.8-flash",
+  "usage": {
+    "total_input_tokens": 46513,
+    "total_output_tokens": 58
+  },
+  "steps": [
+    {
+      "type": "thought",
+      "content": [
+        {
+          "type": "text",
+          "text": "Transcribing the video."
+        }
+      ]
+    },
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "[00:00:00] Welcome back to the channel.\n[00:00:04] Today we look at Rust error handling,\nstarting with the question mark operator.\n[00:00:11] Let's open the editor.\n[00:01:02] Here is the first example.\n[00:08:30] Thanks for watching.\n"
+        }
+      ]
+    }
+  ]
+}

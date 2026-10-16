@@ -1,0 +1,10 @@
+{
+  "id": "interactions/abc123",
+  "status": "completed",
+  "model": "gemini-3.8-flash",
+  "usage": {
+    "total_input_tokens": 1302,
+    "total_output_tokens": 0
+  },
+  "steps": []
+}

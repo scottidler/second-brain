@@ -753,6 +753,7 @@ pub mod breaker;
 pub mod dataapi;
 pub(crate) mod diagnostics;
 pub mod error;
+pub mod gemini;
 pub mod search;
 use diagnostics::{download_diagnostics, error_summary, is_http_403};
 pub use error::FetchError;

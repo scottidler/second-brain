@@ -1,0 +1,29 @@
+{
+  "id": "interactions/abc123",
+  "status": "completed",
+  "model": "gemini-3.8-flash",
+  "usage": {
+    "total_input_tokens": 46513,
+    "total_output_tokens": 475
+  },
+  "steps": [
+    {
+      "type": "thought",
+      "content": [
+        {
+          "type": "text",
+          "text": "Transcribing the video."
+        }
+      ]
+    },
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "[00:00:00] line 0\n[00:00:15] line 1\n[00:00:30] line 2\n[00:00:45] line 3\n[00:01:00] line 4\n[00:01:15] line 5\n[00:01:30] line 6\n[00:01:45] line 7\n[00:02:00] line 8\n[00:02:15] line 9\n[00:02:30] line 10\n[00:02:45] line 11\n[00:03:00] line 12\n[00:03:15] line 13\n[00:03:30] line 14\n[00:03:45] line 15\n[00:04:00] line 16\n[00:04:15] line 17\n[00:04:30] line 18\n[00:04:45] line 19\n[00:05:00] line 20\n[00:05:15] line 21\n[00:05:30] line 22\n[00:05:45] line 23\n[00:06:00] line 24\n[00:06:15] line 25\n[00:06:30] line 26\n[00:06:45] line 27\n[00:07:00] line 28\n[00:07:15] line 29\n[00:07:30] line 30\n[00:07:45] line 31\n[00:08:00] line 32\n[00:08:15] line 33\n[00:08:30] line 34\n[00:08:45] line 35\n[00:09:00] line 36\n[00:09:15] line 37\n[00:09:30] line 38\n[00:09:45] line 39\n[00:10:00] line 40\n[00:10:15] line 41\n[00:10:30] line 42\n[00:10:45] line 43\n[00:11:00] line 44\n[00:11:15] line 45\n[00:11:30] line 46\n[00:11:45] line 47\n[00:12:00] line 48\n[00:12:15] line 49\n[00:12:30] line 50\n[00:12:45] line 51\n[00:13:00] line 52\n[00:13:15] line 53\n[00:13:30] line 54\n[00:13:45] line 55\n[00:14:00] line 56\n[00:14:15] line 57\n[00:14:30] line 58\n[00:14:45] line 59\n[00:01:01] line 60 out of order\n[00:15:15] line 61\n[00:15:30] line 62\n[00:15:45] line 63\n[00:16:00] line 64\n[00:16:15] line 65\n[00:16:30] line 66\n[00:16:45] line 67\n[00:17:00] line 68\n[00:17:15] line 69\n[00:17:30] line 70\n[00:17:45] line 71\n[00:18:00] line 72\n[00:18:15] line 73\n[00:18:30] line 74\n[00:18:45] line 75\n[00:19:00] line 76\n[00:19:15] line 77\n[00:19:30] line 78\n[00:19:45] line 79\n[00:20:00] line 80\n[00:20:15] line 81\n[00:20:30] line 82\n[00:20:45] line 83\n[00:21:00] line 84\n[00:21:15] line 85\n[00:21:30] line 86\n[00:21:45] line 87\n[00:22:00] line 88\n[00:22:15] line 89\n[00:22:30] line 90\n[00:22:45] line 91\n[00:23:00] line 92\n[00:23:15] line 93\n[00:23:30] line 94\n[00:23:45] line 95\n[00:24:00] line 96\n[00:24:15] line 97\n[00:24:30] line 98\n[00:24:45] line 99"
+        }
+      ]
+    }
+  ]
+}

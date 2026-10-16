@@ -1,0 +1,29 @@
+{
+  "id": "interactions/abc123",
+  "status": "completed",
+  "model": "gemini-3.8-flash",
+  "usage": {
+    "total_input_tokens": 46513,
+    "total_output_tokens": 33
+  },
+  "steps": [
+    {
+      "type": "thought",
+      "content": [
+        {
+          "type": "text",
+          "text": "Transcribing the video."
+        }
+      ]
+    },
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "[50:00] So that is the scheduler.\n[50:07] Now the work stealing part.\n[52:30] Each worker owns a queue.\n[54:58] And that wraps it up."
+        }
+      ]
+    }
+  ]
+}
