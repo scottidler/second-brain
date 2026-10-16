@@ -40,7 +40,11 @@ pub fn init_permits(cfg: &Config) -> Result<()> {
     let vision_cap = cfg.youtube.slides.content_filter.max_vision_concurrency;
     log::debug!("init_permits: vision={vision_cap}");
     crate::ocr::init_vision_permits(vision_cap);
-    crate::youtube::breaker::init(cfg.youtube.pause_after_failures, cfg.youtube.pause_for);
+    crate::youtube::breaker::init(
+        cfg.youtube.pause_after_failures,
+        cfg.youtube.pause_for,
+        &cfg.youtube.canary_url,
+    );
 
     log::debug!("pipeline permits initialized: general={general} heavy={heavy} vision={vision_cap}");
     Ok(())

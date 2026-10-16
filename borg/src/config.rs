@@ -574,6 +574,9 @@ pub struct YoutubeConfig {
     /// How long the pause lasts, a humantime string (`30m`).
     #[serde(deserialize_with = "deserialize_pause_for", serialize_with = "serialize_humantime")]
     pub pause_for: Duration,
+    /// Known-good video the breaker re-fetches before pausing, until a video
+    /// fetches cleanly in this process.
+    pub canary_url: String,
 }
 
 impl Default for YoutubeConfig {
@@ -584,6 +587,7 @@ impl Default for YoutubeConfig {
             ffmpeg_filter_threads: default_ffmpeg_filter_threads(),
             pause_after_failures: crate::youtube::breaker::DEFAULT_PAUSE_AFTER_FAILURES,
             pause_for: crate::youtube::breaker::DEFAULT_PAUSE_FOR,
+            canary_url: crate::youtube::breaker::DEFAULT_CANARY_URL.to_string(),
         }
     }
 }

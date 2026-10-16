@@ -32,6 +32,9 @@ pub const PAUSED: &str = "youtube paused";
 
 pub const DEFAULT_PAUSE_AFTER_FAILURES: u32 = 5;
 pub const DEFAULT_PAUSE_FOR: Duration = Duration::from_secs(30 * 60);
+/// The canary before any video has fetched cleanly in this process: YouTube's
+/// first upload, which is not going away.
+pub const DEFAULT_CANARY_URL: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
 
 /// Errors that name a cause particular to one video. They never count toward
 /// a pause, whatever the streak.
@@ -139,23 +142,28 @@ impl Breaker {
     }
 }
 
-static SETTINGS: OnceLock<(u32, Duration)> = OnceLock::new();
+static SETTINGS: OnceLock<(u32, Duration, String)> = OnceLock::new();
 static BREAKER: Mutex<Option<Breaker>> = Mutex::new(None);
 
 /// Size the process-wide breaker from config. The first call wins.
-pub fn init(pause_after_failures: u32, pause_for: Duration) {
-    log::debug!("youtube::breaker::init: pause_after_failures={pause_after_failures} pause_for={pause_for:?}");
-    let _ = SETTINGS.set((pause_after_failures, pause_for));
+pub fn init(pause_after_failures: u32, pause_for: Duration, canary_url: &str) {
+    log::debug!(
+        "youtube::breaker::init: pause_after_failures={pause_after_failures} pause_for={pause_for:?} canary_url={canary_url}"
+    );
+    let _ = SETTINGS.set((pause_after_failures, pause_for, canary_url.to_string()));
 }
 
 fn with_breaker<T>(f: impl FnOnce(&mut Breaker) -> T) -> T {
     let mut guard = BREAKER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let breaker = guard.get_or_insert_with(|| {
-        let (failures, pause_for) = SETTINGS
-            .get()
-            .copied()
-            .unwrap_or((DEFAULT_PAUSE_AFTER_FAILURES, DEFAULT_PAUSE_FOR));
-        Breaker::new(failures, pause_for)
+        let (failures, pause_for, canary) = SETTINGS.get().cloned().unwrap_or((
+            DEFAULT_PAUSE_AFTER_FAILURES,
+            DEFAULT_PAUSE_FOR,
+            DEFAULT_CANARY_URL.to_string(),
+        ));
+        let mut breaker = Breaker::new(failures, pause_for);
+        breaker.record_success(&canary);
+        breaker
     });
     f(breaker)
 }

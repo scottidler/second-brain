@@ -1179,5 +1179,6 @@ fn youtube_pause_settings_parse_from_yaml_and_default() {
         crate::youtube::breaker::DEFAULT_PAUSE_AFTER_FAILURES
     );
     assert_eq!(default.pause_for, crate::youtube::breaker::DEFAULT_PAUSE_FOR);
+    assert_eq!(default.canary_url, crate::youtube::breaker::DEFAULT_CANARY_URL);
     assert!(serde_yaml::from_str::<YoutubeConfig>("pause-for: soon\n").is_err());
 }
