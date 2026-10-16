@@ -58,3 +58,38 @@ fn extract_markdown_errors_on_contentless_input() {
         );
     }
 }
+
+#[test]
+fn max_nesting_depth_counts_open_elements_only() {
+    assert_eq!(max_nesting_depth("<p>a</p>"), 1);
+    assert_eq!(max_nesting_depth("<div><p>a<br>b<img src=x/></p></div>"), 2);
+    assert_eq!(
+        max_nesting_depth("<!doctype html><!-- c --><ul><li>a</li><li>b</li></ul>"),
+        2
+    );
+    assert_eq!(max_nesting_depth("plain text, no tags"), 0);
+}
+
+/// A PDF parsed as HTML nested ~2,400 deep and `htmd`'s recursion overflowed
+/// the stack, aborting the daemon. Deep input must fail this one conversion.
+/// Without the guard this test aborts the whole test binary.
+#[test]
+fn render_markdown_refuses_pathologically_deep_html() {
+    let depth = 3_000;
+    let html = format!("{}x{}", "<span>".repeat(depth), "</span>".repeat(depth));
+    let err = render_markdown(&html, "https://example.com/deep").expect_err("deep html must be refused");
+    assert!(matches!(err, ReadableError::Extract { .. }), "got {err:?}");
+    assert_eq!(
+        render_markdown("<p>ok</p>", "https://example.com/").expect("shallow"),
+        "ok"
+    );
+}
+
+#[test]
+fn only_html_content_types_go_to_readability() {
+    assert!(is_html_content_type(Some("text/html; charset=utf-8")));
+    assert!(is_html_content_type(Some("application/xhtml+xml")));
+    assert!(is_html_content_type(None));
+    assert!(!is_html_content_type(Some("application/pdf")));
+    assert!(!is_html_content_type(Some("image/png")));
+}

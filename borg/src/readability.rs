@@ -30,6 +30,63 @@ pub enum ReadableError {
     Extract { url: String, reason: String },
     #[error("readability produced empty content for {url}")]
     Empty { url: String },
+    #[error("readable fetch for {url} returned {content_type}, not HTML")]
+    NotHtml { url: String, content_type: String },
+}
+
+/// `htmd` walks the DOM recursively, a few frames per nesting level. A 14 MB
+/// PDF served from a URL with a query string reached this path, parsed into
+/// ~2,400 nested elements, and overflowed the 2 MiB blocking-thread stack,
+/// which aborts the whole daemon. Real articles nest well under 100 deep.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// Whether a `Content-Type` header names an HTML document. A missing header
+/// is treated as HTML (servers omit it); anything else (PDF, images, JSON)
+/// falls through to the fetch chain built for it.
+fn is_html_content_type(content_type: Option<&str>) -> bool {
+    content_type.is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.contains("text/html") || ct.contains("application/xhtml")
+    })
+}
+
+/// Deepest element nesting in `html`, computed without recursion so it is safe
+/// on any input. Counts start tags against end tags; void elements, self-closing
+/// tags, comments, and declarations do not nest.
+fn max_nesting_depth(html: &str) -> usize {
+    const VOID: [&str; 14] = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+    ];
+    let bytes = html.as_bytes();
+    let (mut depth, mut max, mut i) = (0usize, 0usize, 0usize);
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let end = match html[i..].find('>') {
+            Some(off) => i + off,
+            None => break,
+        };
+        let tag = &html[i + 1..end];
+        if let Some(rest) = tag.strip_prefix('/') {
+            if !rest.is_empty() {
+                depth = depth.saturating_sub(1);
+            }
+        } else if !(tag.starts_with('!') || tag.starts_with('?') || tag.ends_with('/')) {
+            let name: String = tag
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if !name.is_empty() && !VOID.contains(&name.as_str()) {
+                depth += 1;
+                max = max.max(depth);
+            }
+        }
+        i = end + 1;
+    }
+    max
 }
 
 /// Fetch `url` with a browser UA, extract the main article (`dom_smoothie`), and
@@ -59,6 +116,17 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Stri
         return Err(ReadableError::Status {
             url: url.to_string(),
             status,
+        });
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if !is_html_content_type(content_type.as_deref()) {
+        return Err(ReadableError::NotHtml {
+            url: url.to_string(),
+            content_type: content_type.unwrap_or_default(),
         });
     }
     let html = response.text().await.map_err(|source| ReadableError::Fetch {
@@ -100,8 +168,20 @@ fn extract_markdown(html: &str, url: &str) -> Result<String, ReadableError> {
         url: url.to_string(),
         reason: e.to_string(),
     })?;
-    let content_html = article.content.to_string();
-    htmd::convert(&content_html).map_err(|e| ReadableError::Extract {
+    render_markdown(&article.content, url)
+}
+
+/// `htmd` over article HTML, refused past [`MAX_NESTING_DEPTH`] so a
+/// pathological page fails this extraction instead of overflowing the stack.
+fn render_markdown(content_html: &str, url: &str) -> Result<String, ReadableError> {
+    let depth = max_nesting_depth(content_html);
+    if depth > MAX_NESTING_DEPTH {
+        return Err(ReadableError::Extract {
+            url: url.to_string(),
+            reason: format!("article nests {depth} elements deep (limit {MAX_NESTING_DEPTH})"),
+        });
+    }
+    htmd::convert(content_html).map_err(|e| ReadableError::Extract {
         url: url.to_string(),
         reason: e.to_string(),
     })
