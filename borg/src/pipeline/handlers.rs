@@ -49,12 +49,13 @@ pub(crate) fn extract_article_title(article_md: &str, url: &str) -> String {
         return title;
     }
 
-    // Strategy 3: Derive from URL path
-    if let Some(segment) = url
+    // Strategy 3: Derive from URL path, query and fragment dropped
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    if let Some(segment) = path
         .trim_end_matches('/')
         .rsplit('/')
         .next()
-        .filter(|s| !s.is_empty() && *s != url)
+        .filter(|s| !s.is_empty() && *s != path)
     {
         let cleaned = segment
             .rsplit_once('.')

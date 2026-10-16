@@ -189,6 +189,23 @@ fn test_extract_title_falls_back_to_url_segment() {
     );
 }
 
+/// The Databricks PDF note was titled from its whole query string.
+#[test]
+fn test_extract_title_url_segment_drops_query_and_fragment() {
+    let md = "No title metadata here\nJust plain text\n";
+    assert_eq!(
+        extract_article_title(
+            md,
+            "https://x.com/files/big-book-data-engineering.pdf?itm_source=www&itm_offer=big-book.pdf"
+        ),
+        "big book data engineering"
+    );
+    assert_eq!(
+        extract_article_title(md, "https://x.com/docs/getting-started#install"),
+        "getting started"
+    );
+}
+
 #[tokio::test]
 async fn test_process_content_formerly_unsupported_types() {
     // All content types (Image, PDF, Document, Audio) are now implemented.
