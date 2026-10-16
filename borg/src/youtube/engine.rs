@@ -166,7 +166,20 @@ async fn fetch_gemini(url: &str, config: &Config) -> Result<VideoFetch, FetchErr
     let video_id =
         extract_video_id(url).ok_or_else(|| FetchError::Response(format!("no youtube video id in url {url}")))?;
     let started = Instant::now();
-    let metadata = data_api_client(config)?.fetch_metadata(&video_id).await?;
+    let budget = config.youtube.gemini.budget;
+    // The budget covers the whole fetch, Data API included: each Data API call
+    // is bounded by `youtube.data-api.timeout` (the client) and, here, by what
+    // is left of the budget, whichever is smaller.
+    let metadata = match tokio::time::timeout(budget, data_api_client(config)?.fetch_metadata(&video_id)).await {
+        Ok(result) => result?,
+        Err(_) => {
+            log::warn!(
+                "engine::fetch_gemini: video {video_id} data api did not answer within the gemini budget of {}",
+                humantime::format_duration(budget)
+            );
+            return Err(FetchError::Timeout);
+        }
+    };
     let transcript = gemini_client(config)?
         .fetch_transcript(&video_id, metadata.duration_secs, started)
         .await?;
@@ -179,11 +192,11 @@ async fn fetch_gemini(url: &str, config: &Config) -> Result<VideoFetch, FetchErr
     })
 }
 
-/// The Data API calls share the gemini engine's per-call bound
-/// (`youtube.gemini.timeout`) and spend from the same budget.
+/// Each Data API request is bounded by `youtube.data-api.timeout`;
+/// [`fetch_gemini`] also bounds the pair by the gemini budget.
 #[cfg(not(test))]
 fn data_api_client(config: &Config) -> Result<DataApiClient, FetchError> {
-    DataApiClient::from_config(&config.youtube.data_api, config.youtube.gemini.timeout)
+    DataApiClient::from_config(&config.youtube.data_api)
 }
 
 #[cfg(not(test))]
@@ -197,7 +210,7 @@ fn gemini_client(config: &Config) -> Result<GeminiClient, FetchError> {
 fn data_api_client(config: &Config) -> Result<DataApiClient, FetchError> {
     let bases = bases::current()?;
     let key = vault::config::resolve_secret(&config.youtube.data_api.api_key).unwrap_or_default();
-    DataApiClient::with_base_url(key, &bases.data_api, config.youtube.gemini.timeout)
+    DataApiClient::with_base_url(key, &bases.data_api, config.youtube.data_api.timeout)
 }
 
 #[cfg(test)]

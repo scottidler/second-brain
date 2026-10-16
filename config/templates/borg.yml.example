@@ -148,6 +148,12 @@ youtube:
   #   budget: 15m     # all windows plus retries, at least timeout
   # data-api:
   #   api-key: YOUTUBE_API_KEY
+  #   timeout: 30s    # one videos.list / channels.list call, at least 1s
+  # The gemini budget covers the whole gemini fetch, Data API included: each
+  # Data API call gets the smaller of data-api.timeout and the budget left.
+  # The keys are checked when the daemon starts (gemini with no fallback and
+  # an empty key refuses to start; with a fallback it WARNs), never on other
+  # `sb borg` commands, which run in shells without borg.env.
 
 # Where first-party clients (sb borg ingest/reingest/replay/queue/wait, the
 # oracle ingest_queue tool) reach the daemon. `request-timeout` (humantime)

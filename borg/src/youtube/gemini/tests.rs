@@ -9,6 +9,11 @@ const OUT_OF_ORDER: &str = include_str!("../fixtures/gemini-out-of-order.json");
 const OUT_OF_WINDOW: &str = include_str!("../fixtures/gemini-out-of-window.json");
 const NO_TEXT: &str = include_str!("../fixtures/gemini-no-text.json");
 const RETRY_400: &str = include_str!("../fixtures/gemini-retry-400.json");
+/// Recorded live from desk, 2026-10-16 (implementation audit round 1): the
+/// static Interactions response for the 46s Short `BJq73Hecbbo`, model
+/// `gemini-3.8-flash`, `TRANSCRIPT_PROMPT`, no offsets. Only the thought
+/// step's opaque `signature` blob was replaced.
+const RECORDED_SHORT: &str = include_str!("../fixtures/gemini-recorded-short.json");
 
 const KEY: &str = "GEMINI-SECRET-do-not-leak-456";
 
@@ -17,6 +22,8 @@ enum Reply {
     Respond(u16, String),
     /// Accept the request and never answer.
     Hang,
+    /// Answer after a delay.
+    Delayed(Duration, u16, String),
 }
 
 /// Every request received: the raw head and the body.
@@ -72,19 +79,23 @@ async fn spawn_stub(replies: Vec<Reply>) -> (String, Requests) {
                 }
                 let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
                 seen.lock().unwrap().push((head, body));
-                match reply {
+                let (status, body) = match reply {
                     Reply::Hang => {
                         tokio::time::sleep(Duration::from_secs(3600)).await;
+                        return;
                     }
-                    Reply::Respond(status, body) => {
-                        let response = format!(
-                            "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        let _ = socket.shutdown().await;
+                    Reply::Delayed(delay, status, body) => {
+                        tokio::time::sleep(delay).await;
+                        (status, body)
                     }
-                }
+                    Reply::Respond(status, body) => (status, body),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
             });
         }
     });
@@ -551,14 +562,21 @@ async fn one_silent_window_among_spoken_ones_is_ok() {
     assert_eq!(transcript.segments, vec![(1.0, "spoken".to_string())]);
 }
 
+/// The budget is exhausted across windows, with a config `validate` accepts
+/// (`budget >= timeout`): every window answers, but slowly, and the windows
+/// together outlast the budget. The first attempt whose remaining budget is
+/// below the per-call timeout is budget-bound, so its expiry is `Timeout`,
+/// not the per-call `Network`. (The old version of this test used
+/// `timeout > budget`, which `validate` rejects; implementation audit round 1.)
 #[tokio::test]
-async fn stub_that_never_answers_is_timeout_at_budget() {
-    let (base, _) = spawn_stub(vec![Reply::Hang]).await;
-    let budget = Duration::from_millis(400);
-    let config = config(Duration::from_secs(1800), Duration::from_secs(60), budget);
+async fn windows_that_outlast_a_legal_budget_are_timeout() {
+    let delay = Duration::from_millis(300);
+    let (base, seen) = spawn_stub(vec![Reply::Delayed(delay, 200, NO_TEXT.to_string())]).await;
+    let budget = Duration::from_secs(1);
+    let config = config(Duration::from_secs(1800), budget, budget);
     let started = Instant::now();
     let err = client(&base, KEY, &config)
-        .fetch_transcript("abcdefghijk", 512.0, started)
+        .fetch_transcript("abcdefghijk", 6.0 * 1800.0, started)
         .await
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -566,16 +584,15 @@ async fn stub_that_never_answers_is_timeout_at_budget() {
     assert!(!err.is_permanent());
     assert!(elapsed >= budget, "{elapsed:?}");
     assert!(elapsed < budget + Duration::from_secs(2), "{elapsed:?}");
+    let hits = seen.lock().unwrap().len();
+    assert!((2..6).contains(&hits), "several windows ran, not all six: {hits}");
 }
 
 #[tokio::test]
 async fn budget_is_measured_from_the_callers_start() {
     let (base, seen) = spawn_stub(vec![ok(HHMMSS)]).await;
-    let config = config(
-        Duration::from_secs(1800),
-        Duration::from_secs(10),
-        Duration::from_millis(100),
-    );
+    let budget = Duration::from_millis(100);
+    let config = config(Duration::from_secs(1800), budget, budget);
     let started = Instant::now() - Duration::from_millis(200);
     let err = client(&base, KEY, &config)
         .fetch_transcript("abcdefghijk", 512.0, started)
@@ -610,7 +627,7 @@ async fn per_call_timeout_is_a_network_error_without_retry() {
 async fn retry_that_would_pass_the_budget_is_timeout() {
     let (base, seen) = spawn_stub(vec![Reply::Respond(503, "{}".to_string()), Reply::Hang]).await;
     let budget = Duration::from_millis(400);
-    let config = config(Duration::from_secs(1800), Duration::from_secs(60), budget);
+    let config = config(Duration::from_secs(1800), budget, budget);
     let err = client(&base, KEY, &config)
         .fetch_transcript("abcdefghijk", 512.0, Instant::now())
         .await
@@ -663,6 +680,17 @@ async fn key_is_absent_from_every_error_display() {
         Reply::Respond(503, "{}".to_string()),
         Reply::Respond(200, "<html>".to_string()),
         Reply::Respond(200, OUT_OF_WINDOW.to_string()),
+        // The API echoing the key in its own message: redacted by the client.
+        Reply::Respond(
+            400,
+            format!(
+                r#"{{"error":{{"code":400,"message":"API key not valid: {KEY}","status":"INVALID_ARGUMENT","details":[{{"reason":"API_KEY_INVALID"}}]}}}}"#
+            ),
+        ),
+        Reply::Respond(
+            503,
+            format!(r#"{{"error":{{"code":503,"message":"overloaded for key {KEY}","status":"UNAVAILABLE"}}}}"#),
+        ),
     ];
     for reply in replies {
         let (base, _) = spawn_stub(vec![reply]).await;
@@ -692,4 +720,33 @@ async fn key_is_absent_from_every_error_display() {
         .unwrap_err();
     assert!(matches!(dead, FetchError::Network(_)), "{dead}");
     assert!(!dead.to_string().contains(KEY));
+}
+
+/// The recorded live response goes through the real extractor and parser.
+/// Its shape differs from the synthesized fixtures only in ways the client
+/// ignores: the `thought` step carries a `signature` and no `content`, and
+/// the body has `id`, `created`, `updated`, `service_tier`, `object` and a
+/// richer `usage`. The model wrote `[MM:SS]`, as the design doc measured for Shorts.
+#[tokio::test]
+async fn recorded_short_parses_through_the_real_client() {
+    let output = extract_text(RECORDED_SHORT).unwrap();
+    assert_eq!(output.served_model.as_deref(), Some("gemini-3.8-flash"));
+    let text = output.text.unwrap();
+    assert!(text.starts_with("[00:00] This woman can tie her shoes"), "{text}");
+
+    let (base, seen) = spawn_stub(vec![ok(RECORDED_SHORT)]).await;
+    let transcript = client(&base, KEY, &default_config())
+        .fetch_transcript("BJq73Hecbbo", 46.0, Instant::now())
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1, "one unclipped window");
+    let segments = &transcript.segments;
+    assert_eq!(segments.len(), 14);
+    assert_eq!(segments[0].0, 0.0);
+    assert!(segments[0].1.starts_with("This woman can tie her shoes"));
+    assert_eq!(
+        segments.last().unwrap(),
+        &(44.0, "And then just tighten. That's it.".to_string())
+    );
+    assert!(segments.windows(2).all(|w| w[0].0 <= w[1].0), "non-decreasing");
 }

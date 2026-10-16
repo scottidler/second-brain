@@ -4,6 +4,9 @@
 //! fallback from the variant alone. The Data API key never appears in any
 //! `Display`: variants carry a reason, not a request.
 
+/// What [`FetchError::redact`] puts where a key was.
+pub const REDACTED: &str = "[redacted]";
+
 /// Why a YouTube fetch failed.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -44,6 +47,28 @@ impl FetchError {
     /// Exactly `NotFound` and `NotLive`.
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::NotFound(_) | Self::NotLive(_))
+    }
+
+    /// Replace every occurrence of `secret` in the error's text with
+    /// `[redacted]`. The clients call it on every error they return, so a
+    /// key the API echoes back inside its own message never reaches a
+    /// `Display`, a log line, or a receipt. A blank `secret` is a no-op.
+    pub fn redact(self, secret: &str) -> Self {
+        let secret = secret.trim();
+        if secret.is_empty() {
+            return self;
+        }
+        let scrub = |text: String| text.replace(secret, REDACTED);
+        match self {
+            Self::NotFound(s) => Self::NotFound(scrub(s)),
+            Self::NotLive(s) => Self::NotLive(scrub(s)),
+            Self::Auth(s) => Self::Auth(scrub(s)),
+            Self::Quota(s) => Self::Quota(scrub(s)),
+            Self::Service(s) => Self::Service(scrub(s)),
+            Self::Network(s) => Self::Network(scrub(s)),
+            Self::Response(s) => Self::Response(scrub(s)),
+            other @ (Self::Empty | Self::Timeout | Self::YtDlp(_)) => other,
+        }
     }
 
     /// The error as the pipeline's `eyre::Report`. A yt-dlp arm error comes

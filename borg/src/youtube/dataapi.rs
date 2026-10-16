@@ -51,10 +51,11 @@ impl DataApiClient {
     }
 
     /// Resolve the key named by `youtube.data-api.api-key` (env var name or
-    /// secret file). A key that does not resolve is `Auth`.
-    pub fn from_config(config: &YoutubeDataApiConfig, timeout: Duration) -> Result<Self, FetchError> {
+    /// secret file), with `youtube.data-api.timeout` per request. A key that
+    /// does not resolve is `Auth`.
+    pub fn from_config(config: &YoutubeDataApiConfig) -> Result<Self, FetchError> {
         let key = vault::config::resolve_secret(&config.api_key).unwrap_or_default();
-        Self::new(key, timeout)
+        Self::new(key, config.timeout)
     }
 
     /// Point the client at a local stub server (`TranscriptionClient::with_groq_url` precedent).
@@ -66,7 +67,14 @@ impl DataApiClient {
     }
 
     /// Metadata for `video_id`. `channels.list` failing leaves `channel_handle` `None` (WARN).
+    /// Every error is redacted of the key.
     pub async fn fetch_metadata(&self, video_id: &str) -> Result<VideoMetadata, FetchError> {
+        self.fetch_metadata_unredacted(video_id)
+            .await
+            .map_err(|e| e.redact(&self.api_key))
+    }
+
+    async fn fetch_metadata_unredacted(&self, video_id: &str) -> Result<VideoMetadata, FetchError> {
         log::debug!("dataapi::fetch_metadata: video_id={video_id}");
         if self.api_key.trim().is_empty() {
             return Err(FetchError::Auth("the youtube data api key resolved empty".to_string()));
@@ -136,7 +144,8 @@ impl DataApiClient {
         if status.is_success() {
             Ok(body)
         } else {
-            Err(classify_failure(status.as_u16(), &body))
+            // Redacted here too: the channels.list WARN logs this error directly.
+            Err(classify_failure(status.as_u16(), &body).redact(&self.api_key))
         }
     }
 }
@@ -245,9 +254,11 @@ pub fn parse_iso8601_duration(raw: &str) -> Option<u64> {
     seen.then_some(total)
 }
 
+/// `items` is required: only an explicit `items: []` means the video is gone
+/// (`NotFound`, permanent). A 200 body without it (`{}`) is malformed, so
+/// `Response`, which leaves the fallback free to run.
 #[derive(Deserialize)]
 struct VideoList {
-    #[serde(default)]
     items: Vec<VideoItem>,
 }
 

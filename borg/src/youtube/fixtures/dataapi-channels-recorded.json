@@ -1,0 +1,43 @@
+{
+  "kind": "youtube#channelListResponse",
+  "etag": "PUg7Jku9yWgHd9qWoOPaUHWXVt0",
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 5
+  },
+  "items": [
+    {
+      "kind": "youtube#channel",
+      "etag": "GalPn3TyjDAMQu3em79FfpRg4DY",
+      "id": "UCkVfrGwV-iG9bSsgCbrNPxQ",
+      "snippet": {
+        "title": "Better Stack",
+        "description": "30x cheaper than Datadog. Predictable pricing. Exceptional customer support.",
+        "customUrl": "@betterstack",
+        "publishedAt": "2020-11-10T15:07:23.189017Z",
+        "thumbnails": {
+          "default": {
+            "url": "https://yt3.ggpht.com/CoQXQKlzRpBxtXwiSWvu_ho0VZTo6k4u50fwVd65ni_o6padwctoRxJvAExmTLVesmSKinPm2g=s88-c-k-c0x00ffffff-no-rj",
+            "width": 88,
+            "height": 88
+          },
+          "medium": {
+            "url": "https://yt3.ggpht.com/CoQXQKlzRpBxtXwiSWvu_ho0VZTo6k4u50fwVd65ni_o6padwctoRxJvAExmTLVesmSKinPm2g=s240-c-k-c0x00ffffff-no-rj",
+            "width": 240,
+            "height": 240
+          },
+          "high": {
+            "url": "https://yt3.ggpht.com/CoQXQKlzRpBxtXwiSWvu_ho0VZTo6k4u50fwVd65ni_o6padwctoRxJvAExmTLVesmSKinPm2g=s800-c-k-c0x00ffffff-no-rj",
+            "width": 800,
+            "height": 800
+          }
+        },
+        "localized": {
+          "title": "Better Stack",
+          "description": "30x cheaper than Datadog. Predictable pricing. Exceptional customer support."
+        },
+        "country": "US"
+      }
+    }
+  ]
+}

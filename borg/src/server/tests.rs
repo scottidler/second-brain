@@ -446,3 +446,22 @@ async fn channel_search_failure_is_502_with_the_stderr_tail() {
         assert!(json["stderr-tail"].is_null(), "{err}: {json}");
     }
 }
+
+/// The gemini key check moved out of `Config::validate` (run by every `sb
+/// borg` subcommand) to daemon start. `serve_init` must still refuse a gemini
+/// engine with no fallback whose keys resolve empty, before it binds anything.
+#[tokio::test]
+async fn serve_init_rejects_gemini_without_fallback_when_keys_empty() {
+    let mut config = Config::default();
+    config.youtube.engine = crate::config::YoutubeEngine::Gemini;
+    config.youtube.fallback = None;
+    config.youtube.gemini.api_key = "SB_TEST_SERVE_INIT_GEMINI_KEY_UNSET".to_string();
+    config.youtube.data_api.api_key = "SB_TEST_SERVE_INIT_YOUTUBE_KEY_UNSET".to_string();
+    config.validate().expect("structurally valid: the CLI path loads it");
+    let err = match serve_init(config, "0.0.0-test".to_string()).await {
+        Ok(_) => panic!("serve_init must refuse empty gemini keys"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("youtube.gemini.api-key"), "{err}");
+    assert!(err.contains("youtube.data-api.api-key"), "{err}");
+}

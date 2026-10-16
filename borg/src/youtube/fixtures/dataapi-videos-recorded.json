@@ -1,0 +1,93 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "J9J8Bafv-znuxQUM5ubCTrcXOIY",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "QIkYPq2_ZeS2McMfq_fYswVoA1Y",
+      "id": "SDLfjrUyBw4",
+      "snippet": {
+        "publishedAt": "2026-06-05T16:00:32Z",
+        "channelId": "UCkVfrGwV-iG9bSsgCbrNPxQ",
+        "title": "Dolt: This Makes SQL Feel Like Git",
+        "description": "Dolt is a SQL database that works like Git, giving developers branches, commits, diffs, merges, pull requests, and rollback workflows for real database tables instead of messy CSV files, JSON configs, or mystery spreadsheet edits. \n\nIn this video, we look at why traditional databases are painful for collaboration and data version control, how Dolt brings Git-style workflows to structured data, and why this matters for ML datasets, test data, game configs, AI agents, internal tools, audits, and production data changes.\n\n🔗 Relevant Links\nDolt Repo - https://github.com/dolthub/dolt\nDoltHub - https://www.dolthub.com/\n\n❤️ More about us\nRadically better observability stack: https://betterstack.com/\nWritten tutorials: https://betterstack.com/community/\nExample projects: https://github.com/BetterStackHQ\n\n📱 Socials\nTwitter: https://twitter.com/betterstackhq\nInstagram: https://www.instagram.com/betterstackhq/\nTikTok: https://www.tiktok.com/@betterstack\nLinkedIn: https://www.linkedin.com/company/betterstack\n\n📌 Chapters:\n0:00 Why Your Database Needs Git\n0:35 The Problem With Data Version Control\n1:49 What Is Dolt? Git for SQL Databases\n2:09 Dolt Demo: Branch, Diff, Commit, and Merge Data\n3:37 How Dolt Works Under the Hood\n4:19 Prolly Trees Explained Simply\n5:20 Dolt vs Git, DVC, lakeFS, and Traditional Databases\n6:28 Should You Use Dolt?",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/SDLfjrUyBw4/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/SDLfjrUyBw4/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/SDLfjrUyBw4/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/SDLfjrUyBw4/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/SDLfjrUyBw4/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "Better Stack",
+        "tags": [
+          "dolt",
+          "dolt database",
+          "git for data",
+          "git for databases",
+          "sql database",
+          "version controlled database",
+          "database version control",
+          "data version control",
+          "sql version control",
+          "mysql compatible database",
+          "database branching",
+          "database commits",
+          "database diffs",
+          "table diffs",
+          "data diffs",
+          "database pull requests",
+          "sql commits",
+          "git workflow",
+          "developer tools",
+          "software engineering",
+          "backend development",
+          "database tools",
+          "ml dataset versioning",
+          "data engineering",
+          "dolthub"
+        ],
+        "categoryId": "28",
+        "liveBroadcastContent": "none",
+        "defaultLanguage": "en",
+        "localized": {
+          "title": "Dolt: This Makes SQL Feel Like Git",
+          "description": "Dolt is a SQL database that works like Git, giving developers branches, commits, diffs, merges, pull requests, and rollback workflows for real database tables instead of messy CSV files, JSON configs, or mystery spreadsheet edits. \n\nIn this video, we look at why traditional databases are painful for collaboration and data version control, how Dolt brings Git-style workflows to structured data, and why this matters for ML datasets, test data, game configs, AI agents, internal tools, audits, and production data changes.\n\n🔗 Relevant Links\nDolt Repo - https://github.com/dolthub/dolt\nDoltHub - https://www.dolthub.com/\n\n❤️ More about us\nRadically better observability stack: https://betterstack.com/\nWritten tutorials: https://betterstack.com/community/\nExample projects: https://github.com/BetterStackHQ\n\n📱 Socials\nTwitter: https://twitter.com/betterstackhq\nInstagram: https://www.instagram.com/betterstackhq/\nTikTok: https://www.tiktok.com/@betterstack\nLinkedIn: https://www.linkedin.com/company/betterstack\n\n📌 Chapters:\n0:00 Why Your Database Needs Git\n0:35 The Problem With Data Version Control\n1:49 What Is Dolt? Git for SQL Databases\n2:09 Dolt Demo: Branch, Diff, Commit, and Merge Data\n3:37 How Dolt Works Under the Hood\n4:19 Prolly Trees Explained Simply\n5:20 Dolt vs Git, DVC, lakeFS, and Traditional Databases\n6:28 Should You Use Dolt?"
+        },
+        "defaultAudioLanguage": "en"
+      },
+      "contentDetails": {
+        "duration": "PT6M59S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": false,
+        "contentRating": {},
+        "projection": "rectangular"
+      }
+    }
+  ],
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 1
+  }
+}

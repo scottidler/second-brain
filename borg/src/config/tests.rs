@@ -1278,46 +1278,76 @@ fn youtube_engine_validate_rejects_budget_below_timeout() {
 }
 
 #[test]
-fn youtube_engine_validate_rejects_gemini_without_fallback_when_key_empty() {
+fn youtube_engine_daemon_start_rejects_gemini_without_fallback_when_key_empty() {
     let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
     config.youtube.gemini.api_key = UNSET_KEY_A.to_string();
     config.youtube.data_api.api_key = UNSET_KEY_B.to_string();
-    let err = config.validate().expect_err("empty keys must fail").to_string();
+    let err = config
+        .validate_daemon_start()
+        .expect_err("empty keys must fail daemon start")
+        .to_string();
     assert!(err.contains("youtube.gemini.api-key"), "{err}");
     assert!(err.contains("youtube.data-api.api-key"), "{err}");
 }
 
+/// `validate` runs on every `sb borg` subcommand (`sb borg log`, `queue`,
+/// ...), in shells that never see the daemon's borg.env. The audit found
+/// the key check there failing every CLI call; it now lives in
+/// `validate_daemon_start` only.
 #[test]
-fn youtube_engine_validate_rejects_empty_key_file() {
+fn youtube_engine_validate_ignores_empty_gemini_keys_outside_the_daemon() {
+    vault::capture::install();
+    for yaml in [
+        "youtube:\n  engine: gemini\n",
+        "youtube:\n  engine: gemini\n  fallback: yt-dlp\n",
+        "youtube:\n  engine: yt-dlp\n  fallback: gemini\n",
+    ] {
+        let mut config = youtube_engine_config(yaml);
+        config.youtube.gemini.api_key = "SB_TEST_YOUTUBE_ENGINE_CLI_KEY".to_string();
+        config.youtube.data_api.api_key = UNSET_KEY_B.to_string();
+        config
+            .validate()
+            .unwrap_or_else(|e| panic!("validate must not read the key env for {yaml:?}: {e}"));
+    }
+    assert!(vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_CLI_KEY").is_empty());
+}
+
+#[test]
+fn youtube_engine_daemon_start_rejects_empty_key_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key_file = dir.path().join("gemini-key");
     fs::write(&key_file, "  \n").expect("write");
     let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
     config.youtube.gemini.api_key = key_file.to_string_lossy().into_owned();
     config.youtube.data_api.api_key = key_file.to_string_lossy().into_owned();
-    let err = config.validate().expect_err("a blank secret file resolves empty");
+    let err = config
+        .validate_daemon_start()
+        .expect_err("a blank secret file resolves empty");
     assert!(err.to_string().contains("resolve empty"), "{err}");
 }
 
 #[test]
-fn youtube_engine_validate_accepts_resolvable_keys() {
+fn youtube_engine_daemon_start_accepts_resolvable_keys() {
     let dir = tempfile::tempdir().expect("tempdir");
     let key_file = dir.path().join("key");
     fs::write(&key_file, "not-a-real-key\n").expect("write");
     let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
     config.youtube.gemini.api_key = key_file.to_string_lossy().into_owned();
     config.youtube.data_api.api_key = key_file.to_string_lossy().into_owned();
-    config.validate().expect("resolvable keys validate");
+    config.validate().expect("structure is fine");
+    config
+        .validate_daemon_start()
+        .expect("resolvable keys start the daemon");
 }
 
 #[test]
-fn youtube_engine_validate_warns_when_gemini_fallback_key_empty() {
+fn youtube_engine_daemon_start_warns_when_gemini_fallback_key_empty() {
     vault::capture::install();
     let mut config = youtube_engine_config("youtube:\n  engine: yt-dlp\n  fallback: gemini\n");
     config.youtube.gemini.api_key = "SB_TEST_YOUTUBE_ENGINE_WARN_KEY".to_string();
     config.youtube.data_api.api_key = UNSET_KEY_B.to_string();
     config
-        .validate()
+        .validate_daemon_start()
         .expect("a gemini fallback with empty keys still starts the daemon");
     assert_eq!(
         vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_WARN_KEY").len(),
@@ -1326,10 +1356,36 @@ fn youtube_engine_validate_warns_when_gemini_fallback_key_empty() {
 }
 
 #[test]
+fn youtube_engine_data_api_timeout_defaults_and_parses() {
+    let config = youtube_engine_config("{}");
+    assert_eq!(config.youtube.data_api.timeout, Duration::from_secs(30));
+    let config = youtube_engine_config("youtube:\n  data-api:\n    timeout: 5s\n");
+    assert_eq!(config.youtube.data_api.timeout, Duration::from_secs(5));
+    config.validate().expect("5s is legal");
+    let err = serde_yaml::from_str::<Config>("youtube:\n  data-api:\n    timeout: soon\n")
+        .expect_err("a non-humantime timeout fails the load")
+        .to_string();
+    assert!(err.contains("timeout"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_data_api_timeout_below_minimum() {
+    let config = youtube_engine_config("youtube:\n  data-api:\n    timeout: 500ms\n");
+    let err = config.validate().expect_err("500ms must fail").to_string();
+    assert!(err.contains("youtube.data-api.timeout"), "{err}");
+    youtube_engine_config("youtube:\n  data-api:\n    timeout: 1s\n")
+        .validate()
+        .expect("1s is the floor and legal");
+}
+
+#[test]
 fn youtube_engine_validate_yt_dlp_default_ignores_gemini_keys() {
     vault::capture::install();
     let mut config = youtube_engine_config("{}");
     config.youtube.gemini.api_key = "SB_TEST_YOUTUBE_ENGINE_QUIET_KEY".to_string();
     config.validate().expect("yt-dlp only needs no gemini keys");
+    config
+        .validate_daemon_start()
+        .expect("yt-dlp only needs no gemini keys at daemon start");
     assert!(vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_QUIET_KEY").is_empty());
 }

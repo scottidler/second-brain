@@ -49,14 +49,25 @@ async fn gemini_engine_slides_off_spawns_zero_yt_dlp() {
     assert_eq!(hits.get("/interactions"), 1);
 }
 
-/// Slides on: exactly one yt-dlp call, the mp4 download. Transcript binding
-/// reads the fetch's segments and makes no caption call.
+/// Slides on: exactly one yt-dlp call, the mp4 download, and transcript
+/// binding runs on the gemini fetch's segments. The canned download writes a
+/// real mp4, so frame extraction (real ffmpeg), clustering and binding all
+/// run; a fake fabric answers the slide-aware pattern so the manifest comes
+/// back in the result. Before implementation audit round 1 the stub failed
+/// the download, binding never ran, and the "no caption call" assert held
+/// trivially.
 #[tokio::test]
 async fn gemini_engine_slides_on_spawns_only_the_mp4_download() {
     permits::HEAVY_PERMITS.init(4);
     let dir = tempfile::tempdir().unwrap();
     let mut config = stub::config(dir.path(), YoutubeEngine::Gemini, None);
     config.youtube.slides.enabled = true;
+    // Keep every cluster and never propose text-only, so the manifest (and
+    // its bound transcript) is what the slide path returns.
+    config.youtube.slides.transition_min_seconds = 0.0;
+    config.youtube.slides.slide_thresholds.min_unique_slides = 1;
+    config.youtube.slides.slide_thresholds.text_only_max_ratio = 2.0;
+    config.fabric.binary = stub::slides_fabric(dir.path()).to_string_lossy().to_string();
     let (bases, _hits) = bases(stub::routes(stub::DATAAPI_LIVE, gemini_ok())).await;
 
     let (result, spawns) = spawn::scope(
@@ -65,15 +76,39 @@ async fn gemini_engine_slides_on_spawns_only_the_mp4_download() {
     )
     .await;
 
-    let result = result.expect("a failed slides download degrades to text-only, it does not fail");
+    let result = result.expect("process_youtube");
     assert_eq!(spawns.count(), 1, "calls: {:?}", spawns.calls());
     assert_eq!(
         spawns.count_with("--merge-output-format"),
         1,
         "the one call is the mp4 download"
     );
-    assert_eq!(spawns.count_with("--write-auto-sub"), 0, "binding made no caption call");
-    assert!(result.slide_payload.is_none());
+    let payload = result
+        .slide_payload
+        .expect("the slide path ran to a manifest: download, frames, binding");
+    let _ = std::fs::remove_dir_all(&payload.slides_source_root);
+    let manifest = payload.manifest;
+    assert!(!manifest.slides.is_empty(), "frames clustered into slides");
+    let bound: Vec<&String> = manifest.slides.iter().flat_map(|s| s.transcript.iter()).collect();
+    assert!(
+        bound
+            .iter()
+            .any(|line| line.as_str() == "[00:00] Welcome back to the channel."),
+        "the first gemini segment is bound to a slide: {bound:?}"
+    );
+    let gemini_texts = [
+        "Welcome back to the channel.",
+        "Today we look at Rust error handling, starting with the question mark operator.",
+        "Let's open the editor.",
+        "Here is the first example.",
+        "Thanks for watching.",
+    ];
+    for line in &bound {
+        assert!(
+            gemini_texts.iter().any(|t| line.ends_with(t)),
+            "every bound line comes from VideoFetch.segments, none from a caption fetch: {line}"
+        );
+    }
 }
 
 /// Gemini 5xx twice (the first try and its one retry) + `fallback: yt-dlp`:

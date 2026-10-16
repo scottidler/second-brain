@@ -138,9 +138,20 @@ pub(crate) fn config(dir: &Path, engine: YoutubeEngine, fallback: Option<Youtube
     config
 }
 
+/// Seconds of synthetic video the canned mp4 download writes: the Data API
+/// live fixture's duration (`PT8M32S`), so frame sampling sees the same
+/// length the metadata reports.
+pub(crate) const MP4_SECS: u32 = 512;
+
 /// A canned yt-dlp: `--dump-json` prints the recorded metadata,
-/// `--write-auto-sub` writes [`VTT`] under `dir` and prints its path, and
-/// anything else (the slides mp4 download, audio) exits 1.
+/// `--write-auto-sub` writes [`VTT`] under `dir` and prints its path, the
+/// slides mp4 download (`--merge-output-format`) writes a real
+/// [`MP4_SECS`]-second `testsrc` mp4 at its `-o` path with ffmpeg, and
+/// anything else (audio) exits 1.
+///
+/// The mp4 is real because everything after the download (ffmpeg frame
+/// extraction, pHash clustering, transcript binding) is the code under test;
+/// ffmpeg is already a hard test requirement (`youtube::tests`, CI installs it).
 pub(crate) fn yt_dlp(dir: &Path) -> spawn::Stub {
     let dir: PathBuf = dir.to_path_buf();
     Arc::new(move |argv: &[String]| {
@@ -154,6 +165,48 @@ pub(crate) fn yt_dlp(dir: &Path) -> spawn::Stub {
             let printed = serde_json::json!({"en-orig": {"filepath": path}}).to_string();
             return Ok(spawn::exit(0, &printed, ""));
         }
-        Ok(spawn::exit(1, "", "ERROR: stub yt-dlp does not download"))
+        if has("--merge-output-format") {
+            let out = argv
+                .iter()
+                .position(|a| a == "-o")
+                .and_then(|i| argv.get(i + 1))
+                .ok_or_else(|| std::io::Error::other("stub yt-dlp: mp4 download without -o"))?;
+            return synth_mp4(Path::new(out));
+        }
+        Ok(spawn::exit(1, "", "ERROR: stub yt-dlp does not download audio"))
     })
+}
+
+/// Write a [`MP4_SECS`]-second `testsrc` mp4 to `out`, answering as yt-dlp would.
+fn synth_mp4(out: &Path) -> std::io::Result<std::process::Output> {
+    let source = format!("testsrc=duration={MP4_SECS}:rate=1:size=160x120");
+    let synth = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &source])
+        .args(["-pix_fmt", "yuv420p"])
+        .arg(out)
+        .output()
+        .map_err(|e| std::io::Error::other(format!("ffmpeg must be on PATH for this test (CI installs it): {e}")))?;
+    if !synth.status.success() {
+        return Err(std::io::Error::other(format!(
+            "ffmpeg synth failed: {}",
+            String::from_utf8_lossy(&synth.stderr)
+        )));
+    }
+    Ok(spawn::exit(0, &format!("[download] {}", out.display()), ""))
+}
+
+/// A stand-in `fabric` binary: answers the slide-aware pattern
+/// (`obsidian-youtube-slides`) with a valid summary that embeds `s001`, and
+/// fails every other pattern so the distiller takes its transcript fallback.
+pub(crate) fn slides_fabric(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-fabric");
+    let script = "#!/bin/sh\n\
+case \"$*\" in\n\
+  *obsidian-youtube-slides*) printf -- '---\\nshape: hero\\nembed_slides: [s001]\\n---\\nslide body\\n' ;;\n\
+  *) echo \"fake fabric: no pattern $*\" >&2; exit 1 ;;\n\
+esac\n";
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }

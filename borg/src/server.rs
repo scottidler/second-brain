@@ -148,6 +148,11 @@ impl ServerHandle {
 pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartup, ServerHandle)> {
     log::info!("Starting borg daemon");
 
+    // Env-dependent config checks (the gemini keys): only the daemon gets
+    // borg.env, so they run here and not in `Config::validate`, which every
+    // `sb borg` subcommand calls.
+    config.validate_daemon_start().context("borg::serve_init")?;
+
     // Refuse to start without canonical assets present and parseable. The
     // alternative (silent-degrade ingest) lets junk tags accumulate in the
     // vault and breaks the canonical contract every other subsystem

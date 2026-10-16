@@ -131,3 +131,49 @@
 
 ### Open questions
 - None.
+
+## Implementation audit fixes
+Audit: `~/.cache/review-panel/runs/BZwwP77p/synthesis.md` (round 1).
+
+### Design decisions
+- Key check moved out of `Config::validate` into `Config::validate_daemon_start` (`borg/src/config.rs`), called first in `borg::serve_init` (`borg/src/server.rs`), before canonical assets, binding, or transports. `validate` keeps only structural rules, so `sb borg log/queue/ingest/...` no longer fail or WARN in a shell without `borg.env`. Tests: `config::tests::youtube_engine_validate_ignores_empty_gemini_keys_outside_the_daemon`, the `youtube_engine_daemon_start_*` set, `server::tests::serve_init_rejects_gemini_without_fallback_when_keys_empty`, and `sb/tests/config.rs` (built binary: `borg log` exit 0 with empty keys, `borg daemon --start` exit 1 naming both keys, structural errors still fail `borg log`). Mutation check: calling `validate_daemon_start` from `validate` fails both `borg log` tests.
+- Hand run, built `target/debug/sb`, `XDG_CONFIG_HOME=<tmp>`, `GEMINI_API_KEY`/`YOUTUBE_API_KEY` unset, `borg.yml` = `youtube: {engine: gemini}`:
+  ```
+  $ sb borg log --limit 1
+  [INFO] vault::config: Loaded config from: <tmp>/xdg/sb/borg.yml
+  (no receipts rows match)
+  exit=0
+  $ sb borg daemon --start
+  [INFO] borg::server: Starting borg daemon
+  Error: borg::serve_init
+  Caused by:
+      1: youtube.engine is gemini with no fallback, but these keys resolve empty: youtube.gemini.api-key (GEMINI_API_KEY), youtube.data-api.api-key (YOUTUBE_API_KEY); set the env vars (the daemon gets them from borg.env) or configure `fallback`
+  exit=1
+  ```
+  With `fallback: yt-dlp`, `borg log` printed no key WARN.
+- `youtube.data-api.timeout`: humantime, default 30s (`DEFAULT_DATA_API_TIMEOUT`), floor 1s (`MIN_DATA_API_TIMEOUT`). 1s because a healthy Data API reply is sub-second but a floor below 1s would turn ordinary latency into `Network`. `DataApiClient::from_config` now takes only the config block.
+- Budget covers the Data API: `engine::fetch_gemini` wraps `fetch_metadata` (both calls) in `tokio::time::timeout(gemini.budget)` -> `FetchError::Timeout`. Started at the same `Instant` the Gemini windows measure from, so each Data API request is bounded by min(data-api.timeout, budget left). Tests: `engine::tests::gemini_budget_bounds_the_data_api_calls`, `data_api_calls_use_the_data_api_timeout`.
+- `VideoList.items` lost `#[serde(default)]`: `{}` is a serde error -> `Response` (non-permanent). `dataapi::tests::body_without_items_is_response_not_not_found`.
+- `FetchError::redact(secret)` (`youtube/error.rs`) scrubs the key from every text variant. `DataApiClient::fetch_metadata` and `GeminiClient::fetch_transcript` redact every error they return, and the non-2xx classification is redacted at the source too, because the channels.list WARN and the gemini per-window WARN log those errors before they reach the boundary. The echo cases are now inside both `key_is_absent_from_every_error_display` tests, plus `channels_failure_warn_is_redacted` and two `error::tests::redact_*` tests.
+- Slides-on test: the canned yt-dlp (`engine::stub::yt_dlp`) answers the mp4 download by writing a real 512s `testsrc` mp4 (160x120, 1 fps) at its `-o` path with ffmpeg. Everything after the download is real: ffmpeg frame extraction, pHash clustering, transcript binding. A stand-in fabric script (`engine::stub::slides_fabric`) answers only the slide-aware pattern, so `try_extract_slides` returns its manifest and the test reads the bound transcripts. The test config sets `transition-min-seconds: 0`, `min-unique-slides: 1`, `text-only-max-ratio: 2.0` so the shape never collapses to text-only before the manifest is returned. Asserts: spawn count exactly 1 (the mp4 download), the first gemini segment `[00:00] Welcome back to the channel.` is bound, and every bound line is a gemini segment. Mutation check: passing `&[]` to `segment_with_pairs` fails it.
+- Recorded fixtures, live from desk on 2026-10-16, keys loaded from keep into the process env and sent through curl `--variable`/`--expand-header` (never on a command line or in output): `fixtures/dataapi-videos-recorded.json` (`videos.list` for `SDLfjrUyBw4`, HTTP 200), `fixtures/dataapi-channels-recorded.json` (`channels.list` for `UCkVfrGwV-iG9bSsgCbrNPxQ`, HTTP 200), `fixtures/gemini-recorded-short.json` (static Interactions for `BJq73Hecbbo`, `gemini-3.8-flash`, `TRANSCRIPT_PROMPT`, no offsets, HTTP 200 in 13.7s). Scrubbing: no key-shaped string in any body (`AIza` count 0); the thought step's opaque `signature` blob was replaced with a placeholder. Tests: `dataapi::tests::recorded_live_bodies_map_every_field`, `gemini::tests::recorded_short_parses_through_the_real_client`.
+- Shape comparison, recorded vs synthesized:
+  - `videos.list`: every field the mapper reads (`snippet.{publishedAt, channelId, title, description, channelTitle, tags, liveBroadcastContent}`, `contentDetails.duration`) has the synthesized type and nesting. The live body adds `thumbnails`, `localized`, `defaultLanguage`, `defaultAudioLanguage`, `contentDetails.{caption, licensedContent, contentRating, projection}`; all ignored. Maps to title "Dolt: This Makes SQL Feel Like Git", Better Stack, 419s, 25 tags, 2026-06-05.
+  - `channels.list`: `items[0].snippet.customUrl` = `@betterstack`, same path as the synthesized fixture; live adds `description`, `publishedAt`, `thumbnails`, `localized`, `country`, `pageInfo`.
+  - Interactions: `status`, `model`, `steps[].type`, `steps[].content[].{type,text}` match. Differences: the `thought` step has a `signature` and no `content` (the synthesized one had `content`); top-level `id`, `created`, `updated`, `service_tier`, `object`; richer `usage`. `Step.content` already defaults to empty, so no code change was needed. 14 `[MM:SS]` lines through `[00:44]`, non-decreasing.
+  - No field shape differed in a way the code reads, so no mapper or parser change came from the recordings.
+
+### Deviations
+- Phase 3 timeout tests: besides the never-answers case the audit named, `budget_is_measured_from_the_callers_start` and `retry_that_would_pass_the_budget_is_timeout` also used `timeout > budget`. All three now use legal configs (`timeout == budget`).
+- Fixing `retry_that_would_pass_the_budget_is_timeout` under a legal config exposed a race: reqwest's own client timeout (the per-call value, a backstop) can fire before the tokio budget bound when the two are within a millisecond, and it was reported as the per-call `Network` even on a budget-bound attempt. `GeminiClient::post` now returns `PostError::TimedOut` separately, and `attempt` maps any timeout on a budget-bound attempt to `Timeout`. Same contract, correct classification.
+- The fixtures were recorded directly against the APIs with curl from desk, not during the AC4 ripr run the synthesis suggested. The task ordered desk recording; AC4 stays the ship gate.
+- The audit listed the key echo as Defer; it was folded anyway (ordered). It is a redaction at the client boundary, not a contract that Google echoes keys.
+
+### Tradeoffs
+- The slides-on test needs ffmpeg (already a hard test requirement, `youtube::tests::test_extract_frames_synthetic_video`, CI installs it) and writes a shell fabric stand-in (precedent: `vault/src/fabric/tests.rs`). The alternative, a `cfg(test)` probe inside `try_extract_slides`, would observe binding without running it end to end. Running the real frame path costs about 0.3s and proves more. Tesseract is not required: a missing tesseract degrades OCR to empty text.
+- Budget bound around the whole `fetch_metadata` vs threading a deadline into `DataApiClient`: the wrapper keeps the client free of gemini concepts; the cost is that a budget expiry during the non-fatal `channels.list` fails the fetch with `Timeout`, which is correct since no budget is left for Gemini anyway.
+- The new key and method pushed `borg/src/config.rs` to 1523 lines, over the 1500 bloat limit. The engine block (`YoutubeEngine`, `YoutubeGeminiConfig`, `YoutubeDataApiConfig`, their consts and deserializers, `validate_youtube_engine`, `validate_daemon_start`, `secret_resolves`) moved, unchanged, to `borg/src/config/engine.rs`, re-exported with `pub use engine::*`, so every `crate::config::...` path still resolves. Decomposed rather than raising the limit, per `.otto.yml`.
+- `validate_daemon_start` as a new `Config` method vs a free fn in `server.rs`: it reads only config plus env, and sits beside `validate` so the two halves of youtube validation are read together.
+
+### Open questions
+- None.

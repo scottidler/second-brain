@@ -142,3 +142,71 @@ async fn yt_dlp_arm_wraps_a_metadata_failure_unchanged() {
     assert!(err.to_string().contains("yt-dlp metadata failed"), "{err}");
     assert_eq!(spawns.count(), 1, "no subtitle fetch after a metadata failure");
 }
+
+/// A loopback server that accepts every connection and never answers.
+async fn hanging_server() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The gemini budget covers the whole fetch, measured from the first Data
+/// API request: a Data API that never answers is `Timeout` at the budget,
+/// even when `youtube.data-api.timeout` alone would wait longer.
+#[tokio::test]
+async fn gemini_budget_bounds_the_data_api_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = stub::config(dir.path(), YoutubeEngine::Gemini, None);
+    config.youtube.data_api.timeout = std::time::Duration::from_secs(30);
+    config.youtube.gemini.timeout = std::time::Duration::from_millis(300);
+    config.youtube.gemini.budget = std::time::Duration::from_millis(300);
+    let hang = hanging_server().await;
+    let bases = ApiBases {
+        data_api: hang.clone(),
+        gemini: hang,
+    };
+
+    let started = Instant::now();
+    let err = api::scope(bases, fetch(YoutubeEngine::Gemini, stub::URL, &config))
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(matches!(err, FetchError::Timeout), "{err:?}");
+    assert!(!err.is_permanent(), "a timeout leaves the fallback free to run");
+    assert!(elapsed >= std::time::Duration::from_millis(300), "{elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+}
+
+/// Each Data API request has its own bound, `youtube.data-api.timeout`, not
+/// the 5m gemini per-call timeout: a hung Data API with budget to spare is
+/// a `Network` error at the data-api timeout.
+#[tokio::test]
+async fn data_api_calls_use_the_data_api_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = stub::config(dir.path(), YoutubeEngine::Gemini, None);
+    config.youtube.data_api.timeout = std::time::Duration::from_millis(200);
+    config.youtube.gemini.timeout = std::time::Duration::from_secs(30);
+    config.youtube.gemini.budget = std::time::Duration::from_secs(30);
+    let hang = hanging_server().await;
+    let bases = ApiBases {
+        data_api: hang.clone(),
+        gemini: hang,
+    };
+
+    let started = Instant::now();
+    let err = api::scope(bases, fetch(YoutubeEngine::Gemini, stub::URL, &config))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Network(_)), "{err:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}

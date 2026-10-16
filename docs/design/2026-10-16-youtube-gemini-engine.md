@@ -181,6 +181,8 @@ pub struct YoutubeGeminiConfig {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct YoutubeDataApiConfig {
     pub api_key: String,         // env var NAME, default "YOUTUBE_API_KEY"
+    #[serde(deserialize_with = "deserialize_humantime", serialize_with = "serialize_humantime")]
+    pub timeout: Duration,       // 30s per Data API request; >= 1s (implementation audit round 1)
 }
 
 // borg/src/youtube/engine.rs
@@ -203,12 +205,14 @@ pub struct VideoFetch {
 
 - Base URLs are not config. Each client gets a `#[cfg(test)]` `with_base_url` constructor, the `TranscriptionClient::with_groq_url` precedent (`transcription.rs:55`).
 - An unknown `engine` / `fallback` value fails at every config load: serde rejects an unknown enum variant.
-- The rest of validation lives in `Config::validate` (`config.rs:1260`). It runs only at daemon start; the doctor skips it by design. Hard errors that name the field:
+- Structural validation lives in `Config::validate`. It does NOT run only at daemon start, as this doc first said: `BorgCli::run` calls it before every `sb borg` subcommand (`sb/src/cli/borg.rs:19`, true at v0.17.5 too); the doctor skips it by design. So it holds only rules that do not read the environment. Hard errors that name the field:
   - `fallback == Some(engine)`
-  - `window < 5m`, `timeout < 30s`, `budget < timeout`
-  - gemini is the `engine`, there is no `fallback`, and the gemini or data-api key env var resolves empty
-- Daemon-start WARN: gemini is only the `fallback` and its key resolves empty. The primary still works, so the daemon still starts.
-  - The daemon is the only process that gets `borg.env`, which is why the check lives in `validate` and not in the doctor.
+  - `gemini.window < 5m`, `gemini.timeout < 30s`, `gemini.budget < gemini.timeout`
+  - `data-api.timeout < 1s`
+- The key checks live in `Config::validate_daemon_start`, called first in `borg::serve_init`, before anything binds (implementation audit round 1):
+  - Hard error: gemini is the `engine`, there is no `fallback`, and the gemini or data-api key env var resolves empty.
+  - WARN: gemini is the `fallback`, or the `engine` with a `fallback`, and a key resolves empty. The other engine still works, so the daemon still starts.
+  - The daemon is the only process that gets `borg.env`, which is why the check runs at daemon start and not in `validate` (every CLI call) or the doctor. Putting it in `validate` failed `sb borg log` in any shell without the keys.
 - At runtime a key that resolves empty is `FetchError::Auth`, raised before any HTTP request.
 - `YoutubeConfig` gains `deny_unknown_fields`.
   - Today `youtube.engine: bogus` loads silently (observed below).
@@ -222,6 +226,8 @@ youtube:
   gemini:
     model: gemini-3.8-flash
     window: 30m
+  data-api:
+    timeout: 30s   # the default; shown for the new key
 ```
 
 ### API Design
@@ -245,9 +251,11 @@ youtube:
   - If this call fails, `channel_handle` is `None`, logged at WARN. Not fatal: yt-dlp's `uploader_id` is `Option` today too.
 - Errors:
   - `items: []` -> `NotFound`
+  - A 200 body with no `items` key at all (`{}`) -> `Response`, non-permanent, so the fallback runs. Only an explicit `items: []` means the video is gone (implementation audit round 1).
   - 403 or 429 -> `Quota | Auth`, classified by the error reason
   - 5xx -> `Service`
-  - The key never appears in any error `Display`.
+  - The key never appears in any error `Display`. Both clients redact the key from every error they return (`FetchError::redact`), including an error body that echoes it back.
+- Each request is bounded by `youtube.data-api.timeout` (30s) and by what is left of `gemini.budget`, whichever is smaller (`engine::fetch_gemini`).
 
 **Gemini** (`youtube/gemini.rs`), header `x-goog-api-key`, `POST https://generativelanguage.googleapis.com/v1beta/interactions`:
 
@@ -264,8 +272,9 @@ youtube:
   - Calls run sequentially inside the existing `HEAVY_PERMITS` hold (`handlers.rs:86`).
 - Deadlines:
   - Each call: `gemini.timeout` (5m). The longest Phase 0 call was 314s, on a 58.5 min single call; a 30 min window sits between that and the 41s for 8.5 min.
-  - All windows plus retries: `gemini.budget` (15m), measured from the first Data API request.
+  - All windows plus retries: `gemini.budget` (15m), measured from the first Data API request. It bounds the Data API calls too, not only the windows.
     - Exhaustion -> `Timeout`, which is non-permanent, so the fallback runs.
+    - A per-call timeout that fires while budget remains is `Network`, not `Timeout`, and is not retried (decided, implementation audit round 1, Q1). It is non-permanent, so with the defaults a hung first call falls back at the 5m mark with about 25m of hard timeout left; a retry would only burn another 5m. `Timeout` is reached when elapsed windows exhaust the budget.
     - 15m is half of `pipeline.hard-timeout-secs` (1800, `config.rs:419`). The yt-dlp fallback keeps the other half.
   - The hard timeout wraps all of `process_url_inner`, including the wait for a heavy permit (`pipeline.rs:531`).
     - If it fires first, the receipt is `pipeline-timed-out` exactly as today, and no fallback runs.
@@ -280,6 +289,7 @@ youtube:
   - Order: a timestamp below the previous one is set to the previous one.
     - More than 2% of a window's lines out of order -> `Response`.
     - Phase 0 measured 1 in 1,036 lines (0.1%).
+    - The order check runs per window. Nothing checks the join between windows: a window whose first timestamp sits below the previous window's last is appended as is. Design gap, accepted (implementation audit round 1); the bounds check already confines each window's timestamps to its own slice plus 5s.
   - `completed` with no `model_output` text: that window has no speech, so zero segments and `Ok`.
 - Whole fetch: zero segments across every window -> `Empty`.
   - `Empty` is non-permanent, so with a fallback set the yt-dlp chain decides. Its Groq step is the authoritative check for speech.
@@ -325,6 +335,7 @@ youtube:
 - `youtube/dataapi.rs`: `videos.list` + `channels.list` -> `VideoMetadata`. ISO-8601 duration parse, `HANDLE_PATTERN` gate.
 - `FetchError`, the full set from Architecture.
 - Recorded fixtures: one live video, one `items: []`, one `upcoming`, one 403 quota body.
+  - Amended at implementation audit round 1: the Phase 2 fixtures were synthesized from the API docs. Live `videos.list` + `channels.list` bodies for `SDLfjrUyBw4` were then recorded from desk (`fixtures/dataapi-{videos,channels}-recorded.json`) and parse through the real mappers (`recorded_live_bodies_map_every_field`). Every field the mappers read has the synthesized shape; the live body only adds fields they ignore.
 - A stub server through a `#[cfg(test)]` `with_base_url`, the same shape as `TranscriptionClient::with_groq_url` (`transcription.rs:55`) and its tokio TCP stub (`transcription/tests.rs`).
 - **Success criteria:**
   - The live fixture fills all nine `VideoMetadata` fields.
@@ -358,6 +369,8 @@ youtube:
     - `[40:00]` inside a `(0,1800)` window -> `Response`
     - `completed` no-text -> zero segments, `Ok`
   - Stub: a 400 `Please retry` then a 200 -> success after exactly 2 requests. A stub that never answers -> `Timeout` at `budget`.
+    - Amended at implementation audit round 1: the never-answers case was tested with `timeout > budget`, a config `validate` rejects. With a legal config (`timeout <= budget`) a single hung call is the per-call `Network` (see Deadlines). The criterion is now: slow windows that together exhaust a legal budget -> `Timeout` (`windows_that_outlast_a_legal_budget_are_timeout`).
+  - Amended at implementation audit round 1: one live static response for the 46s Short `BJq73Hecbbo` was recorded (`fixtures/gemini-recorded-short.json`) and parses through the real client (`recorded_short_parses_through_the_real_client`).
 
 #### Phase 4: Engine seam and fallback in the pipeline
 **Model:** opus
@@ -389,19 +402,23 @@ youtube:
 
 ## Acceptance Criteria
 
-- [ ] `youtube.engine: bogus` in `borg.yml` is a config-load error naming both variants.
+- [x] `youtube.engine: bogus` in `borg.yml` is a config-load error naming both variants.
   - Command: `XDG_CONFIG_HOME=<tmp> sb borg log --limit 1`
   - Observed on main (v0.17.5): `Loaded config from: .../borg.yml`, table printed, exit=0. The key is silently ignored.
-- [ ] `rg -n 'enum YoutubeEngine' borg/src/config.rs` returns exactly one line.
-  - Observed on main: zero lines, exit 1.
-- [ ] Under `engine: gemini` with `youtube.slides.enabled: false`, a pipeline test against the Data API and Gemini stubs publishes a note, and the yt-dlp spawn counter reads 0.
+  - Observed after Phase 1: exit 1, "unknown variant bogus, expected yt-dlp or gemini" (Phase 1 notes carry the verbatim text); tested by `config::tests::youtube_engine_bogus_value_names_the_variants`.
+- [x] `rg -n 'enum YoutubeEngine' borg/src/config.rs` returns exactly one line.
+  - Observed on main: zero lines, exit 1. Observed now: one line.
+- [x] Under `engine: gemini` with `youtube.slides.enabled: false`, a pipeline test against the Data API and Gemini stubs publishes a note, and the yt-dlp spawn counter reads 0.
   - With slides enabled, the counter reads exactly 1: the mp4 download, which Non-Goals keeps.
-  - Observed on main: cannot run; depends on Phase 4.
+  - Observed: `pipeline::tests::youtube::gemini_engine_publishes_a_note_with_zero_yt_dlp_spawns` and `gemini_engine_slides_off_spawns_zero_yt_dlp` pass (counter 0). `gemini_engine_slides_on_spawns_only_the_mp4_download` passes: counter 1, the mp4 download; the canned download writes a real mp4, so frame extraction and transcript binding run, and the returned manifest's slides carry the gemini segments (`[00:00] Welcome back to the channel.`). Mutation check: binding `&[]` instead of the segments fails it.
 - [ ] On ripr with `engine: gemini`, `sb borg ingest https://www.youtube.com/watch?v=SDLfjrUyBw4` ends `succeeded` and not degraded.
   - Command: `sb borg log --source '%SDLfjrUyBw4%'`
   - Observed on main: that id is in the 14-day failed set with `yt-dlp metadata failed: ... Video unavailable`, while the Data API reports it public, `PT6M59S`.
-- [ ] With the Data API returning `items: []`, the receipt is `fetch-failed` with reason containing `not found`, and no fallback runs.
-  - Observed on main: cannot run; depends on Phases 2 and 4.
+  - Open: this is the post-ship operator step (Implementation Plan, Operator step). Desk recorded both Data API bodies for this id live and they map cleanly (`recorded_live_bodies_map_every_field`), but the ripr ingest has not run.
+- [x] With the Data API returning `items: []`, the receipt is `fetch-failed` with reason containing `not found`, and no fallback runs.
+  - Observed: `pipeline::tests::youtube::data_api_not_found_fails_the_receipt_without_fallback` passes: receipt `failed` / `fetch-failed`, reason contains `not found`, spawn counter 0, `/interactions` 0.
+- [x] A non-daemon `sb borg` command loads a gemini config whose keys resolve empty; daemon start refuses it (added at implementation audit round 1).
+  - Observed: `sb/tests/config.rs`: `borg_log_loads_a_gemini_config_with_empty_keys` (exit 0, no key text on stderr), `borg_daemon_start_refuses_a_gemini_config_with_empty_keys` (exit 1 naming both keys); `server::tests::serve_init_rejects_gemini_without_fallback_when_keys_empty`.
 
 ## Resolved Decisions
 
@@ -428,6 +445,17 @@ youtube:
   - **Notes:** the removed distill degraded path, Data API serial latency, and the channel backfill are stated.
   - **Panel answers:** Q1 safe; Q2 yes, both seats; Q3 no, now replaced; Q4 three divergences, now handled.
   - Synthesis: `~/.cache/review-panel/runs/9uzIUO9B/synthesis.md`.
+- 2026-10-16, implementation audit round 1 (synthesis `~/.cache/review-panel/runs/BZwwP77p/synthesis.md`), folded:
+  - **Key check location:** the doc's "validate runs only at daemon start" was false; `validate` runs before every `sb borg` subcommand. The key error and WARN moved to `Config::validate_daemon_start`, called by `serve_init`. Structural rules stay in `validate`.
+  - **Data API timeout:** new `youtube.data-api.timeout` (30s, at least 1s) replaces the reuse of `gemini.timeout`.
+  - **Budget:** bounds the Data API calls too, as "measured from the first Data API request" always said.
+  - **`{}` body:** `Response`, not `NotFound`; only `items: []` is permanent.
+  - **Per-call timeout (Q1):** stays `Network`, not retried; falls back at the 5m mark.
+  - **Budget criterion:** re-tested with a legal config, budget exhausted across windows.
+  - **Slides-on test:** binding now actually runs on `VideoFetch.segments`.
+  - **Key echo:** both clients redact the key from every error, echoed bodies included.
+  - **Fixtures (Q3):** live Data API and Gemini responses recorded and parsed by the real code; no shape difference in any field read.
+  - **Cross-window order:** not checked; design gap, accepted.
 
 ## Alternatives Considered
 

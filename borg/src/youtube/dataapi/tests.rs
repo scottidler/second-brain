@@ -9,6 +9,10 @@ const UPCOMING: &str = include_str!("../fixtures/dataapi-videos-upcoming.json");
 const QUOTA: &str = include_str!("../fixtures/dataapi-quota-403.json");
 const CHANNEL_HANDLE: &str = include_str!("../fixtures/dataapi-channels-handle.json");
 const CHANNEL_LEGACY: &str = include_str!("../fixtures/dataapi-channels-legacy.json");
+/// Recorded live from desk, 2026-10-16 (implementation audit round 1): the
+/// real `videos.list` / `channels.list` bodies for `SDLfjrUyBw4`, unedited.
+const RECORDED_VIDEO: &str = include_str!("../fixtures/dataapi-videos-recorded.json");
+const RECORDED_CHANNEL: &str = include_str!("../fixtures/dataapi-channels-recorded.json");
 
 const KEY: &str = "SECRET-KEY-do-not-leak-123";
 
@@ -185,6 +189,30 @@ async fn empty_items_is_not_found_and_permanent() {
     assert!(err.is_permanent());
 }
 
+/// A 200 whose envelope has no `items` at all is a malformed body, not a
+/// gone video: `Response`, non-permanent, so the fallback still runs.
+#[tokio::test]
+async fn body_without_items_is_response_not_not_found() {
+    let (base, _) = spawn_stub(vec![("/videos", 200, "{}".to_string())]).await;
+    let err = client(&base, KEY).fetch_metadata("53XYcpCgQWE").await.unwrap_err();
+    assert!(matches!(err, FetchError::Response(_)), "{err}");
+    assert!(!err.is_permanent());
+}
+
+/// The echo case for channels.list: its error is only logged (WARN), and the
+/// log line must not carry the key either.
+#[tokio::test]
+async fn channels_failure_warn_is_redacted() {
+    vault::capture::install();
+    let body = LIVE.replace("53XYcpCgQWE", "CHANECHO001");
+    let echo = format!(r#"{{"error":{{"message":"API key not valid {KEY}","errors":[{{"reason":"keyInvalid"}}]}}}}"#);
+    let (base, _) = spawn_stub(vec![("/videos", 200, body), ("/channels", 400, echo)]).await;
+    client(&base, KEY).fetch_metadata("CHANECHO001").await.unwrap();
+    let warns = vault::capture::warns_containing("CHANECHO001");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(!warns[0].contains(KEY), "{}", warns[0]);
+}
+
 #[tokio::test]
 async fn upcoming_is_not_live_and_permanent() {
     let (base, seen) = spawn_stub(vec![("/videos", 200, UPCOMING.to_string())]).await;
@@ -264,8 +292,9 @@ async fn empty_key_is_auth_before_any_request() {
 fn unresolvable_key_env_var_is_auth_at_fetch() {
     let config = YoutubeDataApiConfig {
         api_key: "BORG_TEST_YT_DATA_API_KEY_NEVER_SET".to_string(),
+        ..YoutubeDataApiConfig::default()
     };
-    let client = DataApiClient::from_config(&config, Duration::from_secs(5)).unwrap();
+    let client = DataApiClient::from_config(&config).unwrap();
     assert!(client.api_key.is_empty());
 }
 
@@ -286,9 +315,9 @@ async fn key_is_absent_from_every_error_display() {
             format!(r#"{{"error":{{"message":"API key not valid {KEY}","errors":[{{"reason":"keyInvalid"}}]}}}}"#),
         ),
     ];
-    // The API echoing the key inside its own message is outside the contract
-    // (Google does not), so that last case only checks the classification.
-    for (status, body) in &cases[..cases.len() - 1] {
+    // Every case, including the last, where the API echoes the key inside its
+    // own message: the client redacts before any error leaves it.
+    for (status, body) in &cases {
         let (base, _) = spawn_stub(vec![("/videos", *status, body.clone())]).await;
         let err = client(&base, KEY).fetch_metadata("53XYcpCgQWE").await.unwrap_err();
         assert!(!format!("{err}").contains(KEY), "status {status}: {err}");
@@ -297,7 +326,8 @@ async fn key_is_absent_from_every_error_display() {
     let (status, body) = cases.last().unwrap();
     let (base, _) = spawn_stub(vec![("/videos", *status, body.clone())]).await;
     let err = client(&base, KEY).fetch_metadata("53XYcpCgQWE").await.unwrap_err();
-    assert!(matches!(err, FetchError::Auth(_)));
+    assert!(matches!(err, FetchError::Auth(_)), "{err}");
+    assert!(err.to_string().contains(crate::youtube::error::REDACTED), "{err}");
 
     let empty_key_err = client(&base, "").fetch_metadata("x").await.unwrap_err();
     assert!(!empty_key_err.to_string().contains(KEY));
@@ -309,4 +339,31 @@ async fn key_is_absent_from_every_error_display() {
         .unwrap_err();
     assert!(matches!(dead, FetchError::Network(_)), "{dead}");
     assert!(!dead.to_string().contains(KEY));
+}
+
+/// The recorded live bodies go through the real mappers: the synthesized
+/// fixtures' shape matches what the API actually returns (the live body
+/// carries more fields, `thumbnails`, `localized`, `defaultLanguage`, and
+/// `contentDetails.caption`, which the mappers ignore).
+#[tokio::test]
+async fn recorded_live_bodies_map_every_field() {
+    let (base, _) = spawn_stub(vec![
+        ("/videos", 200, RECORDED_VIDEO.to_string()),
+        ("/channels", 200, RECORDED_CHANNEL.to_string()),
+    ])
+    .await;
+    let m = client(&base, KEY).fetch_metadata("SDLfjrUyBw4").await.unwrap();
+    assert_eq!(m.title, "Dolt: This Makes SQL Feel Like Git");
+    assert_eq!(m.uploader, "Better Stack");
+    assert_eq!(m.duration_secs, 419.0, "PT6M59S");
+    assert!(m.description.starts_with("Dolt is a SQL database that works like Git"));
+    assert_eq!(m.tags.len(), 25);
+    assert_eq!(m.tags.first().map(String::as_str), Some("dolt"));
+    assert_eq!(m.channel_id.as_deref(), Some("UCkVfrGwV-iG9bSsgCbrNPxQ"));
+    assert_eq!(
+        m.channel_url.as_deref(),
+        Some("https://www.youtube.com/channel/UCkVfrGwV-iG9bSsgCbrNPxQ")
+    );
+    assert_eq!(m.channel_handle.as_deref(), Some("@betterstack"));
+    assert_eq!(m.published_at.as_deref(), Some("2026-06-05"));
 }

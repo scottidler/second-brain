@@ -1,0 +1,42 @@
+{
+  "id": "v1_ChY2WF9TYXFXaEhhVFZ6N0lQZ2ZxNUNBEhY2WF9TYXFXaEhhVFZ6N0lQZ2ZxNUNB",
+  "status": "completed",
+  "usage": {
+    "total_tokens": 5655,
+    "total_input_tokens": 4175,
+    "input_tokens_by_modality": [
+      {
+        "modality": "text",
+        "tokens": 77
+      },
+      {
+        "modality": "video",
+        "tokens": 4098
+      }
+    ],
+    "total_cached_tokens": 0,
+    "total_output_tokens": 385,
+    "total_tool_use_tokens": 0,
+    "total_thought_tokens": 1095
+  },
+  "created": "2026-10-16T19:50:14Z",
+  "updated": "2026-10-16T19:50:14Z",
+  "service_tier": "standard",
+  "steps": [
+    {
+      "signature": "scrubbed: opaque thought signature, not read by borg",
+      "type": "thought"
+    },
+    {
+      "content": [
+        {
+          "text": "[00:00] This woman can tie her shoes into a perfect bow in just seconds, and the technique amazes everyone.\n[00:05] Let me introduce you to your next party trick.\n[00:07] That's the only way I know how to tie my shoes anymore. I've been doing this since the fifth grade.\n[00:10] I was once standing in an OR hallway, and I had to retie my scrub pants. Picture it right here on my scrub pants, and I was doing that,\n[00:14] and someone was like, \"What the hell just happened?\"\n[00:17] And I was like, \"Oh, you mean this?\"\n[00:19] And soon, they were like, \"Do it again! Do it again!\"\n[00:21] First step is fancy pinkies. You're going to take your pinkies and have your laces lie on top of them.\n[00:25] Little finger guns. Now, you're going to make them sort of more into lobster claws. This is going to make it easier.\n[00:28] You're going to wrap away from you on your right side, towards you on your left side.\n[00:33] Pointer finger of your left hand to your thumb of your right hand, slide them and make them kiss.\n[00:38] You're pinching on whatever is closest to you,\n[00:41] and you're pulling through. If it doesn't look like this, you've you've done it wrong.\n[00:44] And then just tighten. That's it.",
+          "type": "text"
+        }
+      ],
+      "type": "model_output"
+    }
+  ],
+  "object": "interaction",
+  "model": "gemini-3.8-flash"
+}

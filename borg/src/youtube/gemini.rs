@@ -259,6 +259,13 @@ fn excerpt(text: &str) -> String {
     text.chars().take(ERROR_EXCERPT_CHARS).collect()
 }
 
+/// Why one HTTP exchange failed: reqwest's timeout is kept apart so the
+/// caller can tell a budget expiry from a per-call one.
+enum PostError {
+    TimedOut,
+    Failed(FetchError),
+}
+
 /// Why one attempt at a window failed, and whether a retry may help.
 struct AttemptError {
     error: FetchError,
@@ -315,6 +322,17 @@ impl GeminiClient {
     /// Each call is also bounded by the per-call timeout. Windows run
     /// sequentially. Zero segments across every window is `Empty`.
     pub async fn fetch_transcript(
+        &self,
+        video_id: &str,
+        duration_secs: f64,
+        started: Instant,
+    ) -> Result<GeminiTranscript, FetchError> {
+        self.fetch_transcript_unredacted(video_id, duration_secs, started)
+            .await
+            .map_err(|e| e.redact(&self.api_key))
+    }
+
+    async fn fetch_transcript_unredacted(
         &self,
         video_id: &str,
         duration_secs: f64,
@@ -412,13 +430,22 @@ impl GeminiClient {
         }
         let budget_bound = remaining < self.call_timeout;
         let limit = remaining.min(self.call_timeout);
+        // reqwest's own timeout (the per-call value, a backstop) and the tokio
+        // bound can expire within a millisecond of each other; whichever fires,
+        // a budget-bound attempt that times out is `Timeout`.
         let (status, body) = match tokio::time::timeout(limit, self.post(request)).await {
-            Ok(result) => result.map_err(fatal)?,
-            Err(_) if budget_bound => return Err(fatal(FetchError::Timeout)),
-            Err(_) => return Err(fatal(self.call_timed_out())),
+            Ok(Ok(reply)) => reply,
+            Ok(Err(PostError::Failed(e))) => return Err(fatal(e)),
+            Ok(Err(PostError::TimedOut)) | Err(_) if budget_bound => return Err(fatal(FetchError::Timeout)),
+            Ok(Err(PostError::TimedOut)) | Err(_) => return Err(fatal(self.call_timed_out())),
         };
         if !(200..300).contains(&status) {
-            return Err(classify_failure(status, &body));
+            // Redacted here too: fetch_window WARNs this error directly.
+            let AttemptError { error, retryable } = classify_failure(status, &body);
+            return Err(AttemptError {
+                error: error.redact(&self.api_key),
+                retryable,
+            });
         }
         let parsed = match extract_text(&body)?.text {
             Some(text) => parse_window(&text, window),
@@ -434,7 +461,7 @@ impl GeminiClient {
         parsed.map_err(|error| AttemptError { error, retryable: true })
     }
 
-    async fn post(&self, request: &serde_json::Value) -> Result<(u16, String), FetchError> {
+    async fn post(&self, request: &serde_json::Value) -> Result<(u16, String), PostError> {
         let url = format!("{}/interactions", self.base_url);
         let response = self
             .http
@@ -449,11 +476,11 @@ impl GeminiClient {
         Ok((status, body))
     }
 
-    fn transport_error(&self, e: reqwest::Error) -> FetchError {
+    fn transport_error(&self, e: reqwest::Error) -> PostError {
         if e.is_timeout() {
-            return self.call_timed_out();
+            return PostError::TimedOut;
         }
-        FetchError::Network(e.without_url().to_string())
+        PostError::Failed(FetchError::Network(e.without_url().to_string()))
     }
 
     fn call_timed_out(&self) -> FetchError {
