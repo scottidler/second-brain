@@ -750,9 +750,12 @@ fn clean_vtt(vtt: &str) -> String {
 }
 
 pub mod breaker;
+pub mod dataapi;
 pub(crate) mod diagnostics;
+pub mod error;
 pub mod search;
 use diagnostics::{download_diagnostics, error_summary, is_http_403};
+pub use error::FetchError;
 pub use search::{ChannelSearchError, search_channel};
 
 #[cfg(test)]

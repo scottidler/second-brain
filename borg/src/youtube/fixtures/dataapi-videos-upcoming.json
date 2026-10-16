@@ -1,0 +1,17 @@
+{
+  "kind": "youtube#videoListResponse",
+  "items": [
+    {
+      "id": "UPCOMING123",
+      "snippet": {
+        "publishedAt": "2026-10-20T17:00:00Z",
+        "channelId": "UCSp-OaMpsO8K0KkOqyBl7_w",
+        "title": "Premiere soon",
+        "description": "",
+        "channelTitle": "Let's Get Rusty",
+        "liveBroadcastContent": "upcoming"
+      },
+      "contentDetails": {"duration": "P0D"}
+    }
+  ]
+}

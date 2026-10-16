@@ -1,0 +1,51 @@
+//! The error every YouTube fetch engine returns.
+//!
+//! One enum for both engines so `youtube::engine::fetch` can decide on a
+//! fallback from the variant alone. The Data API key never appears in any
+//! `Display`: variants carry a reason, not a request.
+
+/// Why a YouTube fetch failed.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    /// The Data API returned `items: []`: the video is gone.
+    #[error("youtube data api: video {0} not found")]
+    NotFound(String),
+    /// `liveBroadcastContent` is `upcoming` or `live`: no finished recording.
+    #[error("youtube data api: video {0} is not a finished video (live or upcoming)")]
+    NotLive(String),
+    /// The key resolved empty, or the API rejected it.
+    #[error("youtube auth: {0}")]
+    Auth(String),
+    /// The API quota or rate limit is spent.
+    #[error("youtube quota: {0}")]
+    Quota(String),
+    /// A 5xx from the API.
+    #[error("youtube service error: {0}")]
+    Service(String),
+    /// The request never completed (connect, timeout, body read).
+    #[error("youtube network error: {0}")]
+    Network(String),
+    /// A malformed body, an unexpected status, or a failed parse check.
+    #[error("youtube response invalid: {0}")]
+    Response(String),
+    /// No speech in any window.
+    #[error("youtube transcript is empty")]
+    Empty,
+    /// The gemini budget ran out.
+    #[error("youtube gemini budget exhausted")]
+    Timeout,
+    /// The yt-dlp arm's existing errors, wrapped unchanged.
+    #[error("yt-dlp: {0:#}")]
+    YtDlp(eyre::Report),
+}
+
+impl FetchError {
+    /// True when no other engine can do better, so the fallback is skipped.
+    /// Exactly `NotFound` and `NotLive`.
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::NotFound(_) | Self::NotLive(_))
+    }
+}
+
+#[cfg(test)]
+mod tests;

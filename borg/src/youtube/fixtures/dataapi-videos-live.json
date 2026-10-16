@@ -1,0 +1,22 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "fixture",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "id": "53XYcpCgQWE",
+      "snippet": {
+        "publishedAt": "2025-11-21T23:30:05Z",
+        "channelId": "UCSp-OaMpsO8K0KkOqyBl7_w",
+        "title": "21+ Rust Pro Tips (TOP SECRET)",
+        "description": "Rust tips and tricks.\nLine two.",
+        "channelTitle": "Let's Get Rusty",
+        "tags": ["rust", "programming"],
+        "categoryId": "28",
+        "liveBroadcastContent": "none"
+      },
+      "contentDetails": {"duration": "PT8M32S", "dimension": "2d", "definition": "hd"}
+    }
+  ],
+  "pageInfo": {"totalResults": 1, "resultsPerPage": 1}
+}
