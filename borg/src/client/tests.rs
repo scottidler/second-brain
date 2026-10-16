@@ -286,3 +286,35 @@ async fn reingest_sends_each_source_once() {
     })
     .await;
 }
+
+fn ledger_row(date: &str, source: &str) -> ledger::QueriedEntry {
+    ledger::QueriedEntry {
+        date: date.to_string(),
+        method: "cli".to_string(),
+        slug: "s".to_string(),
+        filename: "s.md".to_string(),
+        source: source.to_string(),
+        line_number: 0,
+    }
+}
+
+/// A re-run of `reingest --before D` must skip a source already reingested
+/// after D: its newest row decides, not the original row that still matches.
+#[test]
+fn reingest_date_bounds_judge_each_sources_newest_row() {
+    let newest_first = vec![
+        ledger_row("2026-10-15", "https://youtu.be/done"),
+        ledger_row("2026-09-20", "https://youtu.be/recent"),
+        ledger_row("2023-01-16", "https://youtu.be/pending"),
+        ledger_row("2023-01-10", "https://youtu.be/done"),
+    ];
+    let filter = ledger::EntryFilter {
+        before: Some("2026-09-15".to_string()),
+        ..ledger::EntryFilter::default()
+    };
+    let kept: Vec<String> = newest_per_source_in_bounds(newest_first, &filter)
+        .into_iter()
+        .map(|e| e.source)
+        .collect();
+    assert_eq!(kept, vec!["https://youtu.be/pending".to_string()]);
+}

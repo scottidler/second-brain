@@ -243,6 +243,20 @@ pub enum ReingestEntryStatus {
     Error(String),
 }
 
+/// One entry per source, its newest ledger row (the ledger is newest-first),
+/// kept only when that row's date is inside `filter`'s bounds.
+fn newest_per_source_in_bounds(
+    entries: Vec<ledger::QueriedEntry>,
+    filter: &ledger::EntryFilter,
+) -> Vec<ledger::QueriedEntry> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .into_iter()
+        .filter(|e| seen.insert(e.source.clone()))
+        .filter(|e| filter.date_in_bounds(&e.date))
+        .collect()
+}
+
 /// Whether the ledger entry's note (in `notes/` or `inbox/`) carries a `type:` line
 /// containing `type_filter`. An unreadable note is excluded with a WARN naming it.
 fn note_has_type(vault_root: &std::path::Path, entry: &ledger::QueriedEntry, type_filter: &str) -> bool {
@@ -306,7 +320,16 @@ pub async fn reingest(
         after,
     };
 
-    let entries: Vec<QueriedEntry> = ledger::query_entries(&ledger_file, &filter)?;
+    // Date bounds apply to each source's NEWEST row, after the one-per-source
+    // dedup below. Filtering rows first let a source reingested today match
+    // `--before` through its original row, so a re-run redid finished work.
+    let entries: Vec<QueriedEntry> = ledger::query_entries(
+        &ledger_file,
+        &EntryFilter {
+            source: source.clone(),
+            ..EntryFilter::default()
+        },
+    )?;
 
     let entries: Vec<QueriedEntry> = if let Some(ref type_filter) = content_type {
         let vault_root = config.vault_root()?;
@@ -323,8 +346,7 @@ pub async fn reingest(
     // it here once overwrote 24 session notes with a fetch error's summary.
     // The ledger appends a row per (re)ingest, so one source can appear many
     // times; reingest each source once (first row wins: the ledger is newest-first).
-    let mut seen = std::collections::HashSet::new();
-    let entries: Vec<QueriedEntry> = entries.into_iter().filter(|e| seen.insert(e.source.clone())).collect();
+    let entries = newest_per_source_in_bounds(entries, &filter);
 
     let (entries, skipped): (Vec<QueriedEntry>, Vec<QueriedEntry>) = entries
         .into_iter()
