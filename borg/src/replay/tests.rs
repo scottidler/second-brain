@@ -351,3 +351,19 @@ mod daemon_timeouts {
         assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
     }
 }
+
+/// The client halts on a paused YouTube breaker, which only the failure text
+/// carries; the stage alone (`fetch-failed`) was all `/trace` used to send.
+#[test]
+fn failed_trace_reason_carries_the_failure_text() {
+    assert_eq!(
+        failed_trace_reason(
+            Some("fetch-failed".into()),
+            Some("youtube paused for another 60s".into())
+        ),
+        "fetch-failed: youtube paused for another 60s"
+    );
+    assert_eq!(failed_trace_reason(Some("crashed".into()), None), "crashed");
+    assert_eq!(failed_trace_reason(None, Some("boom".into())), "boom");
+    assert_eq!(failed_trace_reason(None, None), "failed");
+}

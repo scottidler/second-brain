@@ -203,6 +203,11 @@ pub struct TraceStateResponse {
     /// `failure_stage = "crashed"`).
     pub status: Option<String>,
     pub failure_stage: Option<String>,
+    /// The failure's own text, so a client can act on what went wrong (a
+    /// paused YouTube breaker) instead of only the stage. `default` keeps a
+    /// client reading an older daemon's response working.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     pub note_path: Option<String>,
     /// Whether the trace's source archive (`archive.root/<trace>/distilled.yml`)
     /// exists on this daemon host, so its verbatim source outlives the staging
@@ -225,6 +230,7 @@ pub async fn trace_state(State(state): State<AppState>, Path(trace_id): Path<Str
             trace_id: r.trace_id,
             status: Some(r.status),
             failure_stage: r.failure_stage,
+            failure_reason: r.failure_reason,
             note_path: r.note_path,
             source_durable,
         })
@@ -236,6 +242,7 @@ pub async fn trace_state(State(state): State<AppState>, Path(trace_id): Path<Str
                 trace_id,
                 status: None,
                 failure_stage: None,
+                failure_reason: None,
                 note_path: None,
                 source_durable,
             }),

@@ -126,10 +126,6 @@ pub enum Command {
         /// How many entries to have in flight at once
         #[arg(long, default_value_t = 1)]
         jobs: usize,
-        /// Stop sending after this many failures in a row (an upstream rate
-        /// limit fails every entry; each one is another request against it)
-        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
-        stop_after_failures: u64,
     },
     /// Replay the ingestion pipeline for staged traces or vault notes
     Replay(ReplayCliArgs),

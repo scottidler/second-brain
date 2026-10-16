@@ -324,6 +324,16 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str, note: Opt
     }
 }
 
+/// A failed trace's reason as the client reports it: the stage, then the
+/// failure's own text when the daemon sends it (a paused YouTube breaker is
+/// only visible in the text).
+pub(crate) fn failed_trace_reason(stage: Option<String>, reason: Option<String>) -> String {
+    match (stage, reason) {
+        (Some(stage), Some(reason)) => format!("{stage}: {reason}"),
+        (stage, reason) => stage.or(reason).unwrap_or_else(|| "failed".to_string()),
+    }
+}
+
 /// Poll `GET /trace/{trace_id}` until the receipts row reaches a terminal
 /// state, or the polling ceiling (`hard_timeout + POLL_GRACE_SECS`) elapses.
 /// Shared by replay (`reingest_via_daemon`) and `crate::reingest`.
@@ -353,7 +363,7 @@ pub(crate) async fn poll_trace_terminal(
                         });
                     }
                     Some("failed") => {
-                        let reason = body.failure_stage.unwrap_or_else(|| "failed".to_string());
+                        let reason = failed_trace_reason(body.failure_stage, body.failure_reason);
                         return Ok(IngestResult {
                             status: IngestStatus::Failed { reason },
                             trace_id: Some(trace_id.to_string()),

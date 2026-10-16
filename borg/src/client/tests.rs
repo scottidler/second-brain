@@ -110,7 +110,6 @@ async fn reingest_against_a_silent_daemon_reports_the_item_error_within_twice_th
             None,
             false,
             1,
-            5,
             |_| {},
         )
         .await
@@ -226,7 +225,6 @@ async fn reingest_jobs_runs_entries_concurrently() {
             None,
             false,
             4,
-            10,
             |e| {
                 if matches!(e, ReingestEvent::ItemStart { .. }) {
                     starts += 1;
@@ -242,29 +240,46 @@ async fn reingest_jobs_runs_entries_concurrently() {
     .await;
 }
 
-/// A run that fails entry after entry is hitting an upstream limit: it stops
-/// sending instead of spending the rest of the list against the account
-/// (2026-10-15: 505 YouTube failures in four minutes on the operator's cookies).
+fn seed_ledger(n: usize) {
+    let ledger_path = ledger::ledger_path().expect("ledger path");
+    for i in 0..n {
+        ledger::append_entry(
+            &ledger_path,
+            &ledger::LedgerEntry {
+                date: "2026-10-05".to_string(),
+                time: "10:00".to_string(),
+                method: vault::schema::Method::Http,
+                filename: Some(format!("n{i}.md")),
+                source: format!("https://example.com/{i}"),
+                trace_id: None,
+            },
+        )
+        .expect("append");
+    }
+}
+
+fn failed_ingest(reason: &str) -> String {
+    serde_json::to_string(&types::IngestResult {
+        status: types::IngestStatus::Failed {
+            reason: reason.to_string(),
+        },
+        ..Default::default()
+    })
+    .expect("serialize")
+}
+
+/// When the daemon has paused YouTube fetches, every further entry would fail
+/// fast too: the run stops at the first one instead of walking the list.
 #[tokio::test]
-async fn reingest_halts_after_a_failure_streak() {
+async fn reingest_halts_when_the_daemon_pauses_youtube() {
     let data_home = tempfile::TempDir::new().expect("tempdir");
     with_xdg_data_home(data_home.path(), || async {
-        let ledger_path = ledger::ledger_path().expect("ledger path");
-        for n in 0..6 {
-            ledger::append_entry(
-                &ledger_path,
-                &ledger::LedgerEntry {
-                    date: "2026-10-05".to_string(),
-                    time: "10:00".to_string(),
-                    method: vault::schema::Method::Http,
-                    filename: Some(format!("n{n}.md")),
-                    source: format!("https://example.com/{n}"),
-                    trace_id: None,
-                },
-            )
-            .expect("append");
-        }
-        let (port, _) = crate::stub::serve(crate::stub::Behavior::Silent).await;
+        seed_ledger(4);
+        let body = failed_ingest(&format!(
+            "fetch-failed: {} for another 1700s after a streak of failed fetches",
+            crate::youtube::breaker::PAUSED
+        ));
+        let (port, _) = crate::stub::serve(crate::stub::Behavior::Json(body)).await;
         let mut halted = None;
         let mut starts = 0;
         let err = reingest(
@@ -276,18 +291,45 @@ async fn reingest_halts_after_a_failure_streak() {
             None,
             false,
             1,
-            2,
             |e| match e {
                 ReingestEvent::ItemStart { .. } => starts += 1,
-                ReingestEvent::Halted { consecutive } => halted = Some(*consecutive),
+                ReingestEvent::Halted { reason } => halted = Some(reason.clone()),
                 _ => {}
             },
         )
         .await
-        .expect_err("a failure streak stops the run");
-        assert!(err.to_string().contains("2 failures in a row"), "{err}");
-        assert_eq!(halted, Some(2));
-        assert_eq!(starts, 2, "nothing is sent after the streak");
+        .expect_err("a paused breaker stops the run");
+        assert!(err.to_string().contains("reingest stopped"), "{err}");
+        assert!(halted.is_some_and(|r| r.contains(crate::youtube::breaker::PAUSED)));
+        assert_eq!(starts, 1, "nothing is sent after the pause");
+    })
+    .await;
+}
+
+/// Dead videos sort to the head of a re-run (a failed entry gets no new ledger
+/// row). A run of them is not a reason to stop: 2026-10-16 a 5-in-a-row halt
+/// stopped a 350-entry run on its first five entries.
+#[tokio::test]
+async fn reingest_keeps_going_past_dead_videos() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        seed_ledger(6);
+        let body = failed_ingest("fetch-failed: yt-dlp failed: ERROR: [youtube] x: Video unavailable");
+        let (port, _) = crate::stub::serve(crate::stub::Behavior::Json(body)).await;
+        let report = reingest(
+            config_for_daemon(port, DAEMON_TIMEOUT),
+            true,
+            None,
+            None,
+            None,
+            None,
+            false,
+            1,
+            |_| {},
+        )
+        .await
+        .expect("dead videos are reported, not fatal");
+        assert_eq!(report.processed.len(), 6);
     })
     .await;
 }
@@ -328,7 +370,6 @@ async fn reingest_sends_each_source_once() {
             None,
             true,
             1,
-            5,
             |_| {},
         )
         .await
