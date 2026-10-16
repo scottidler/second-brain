@@ -221,3 +221,36 @@ fn attachment_paths_walks_ignored_folders_and_skips_dot_dirs_notes_and_bare_file
     found.sort();
     assert_eq!(found, vec!["assets/b.pdf", "system/attachments/images/a.jpg"]);
 }
+
+#[test]
+fn sync_conflict_copies_are_not_notes() {
+    assert!(is_note_file(Path::new("notes/flannel.md")));
+    assert!(is_note_file(Path::new("notes/sync-conflict-resolution-guide.md")));
+    assert!(!is_note_file(Path::new(
+        "notes/flannel.sync-conflict-20261015-150430-ID3CBXW.md"
+    )));
+    assert!(
+        !is_note_file(Path::new("notes/flannelsync-conflict-20261015-150430-id3cbxw.md")),
+        "a copy cortex already renamed is still a conflict copy"
+    );
+    assert!(!is_note_file(Path::new("notes/flannel.txt")));
+}
+
+/// cortex renamed, enriched and linked 30 conflict copies on 2026-10-15
+/// because the scan handed them over as notes.
+#[test]
+fn scan_vault_skips_sync_conflict_copies() {
+    let dir = setup_temp_vault();
+    fs::write(
+        dir.path().join("test-note.sync-conflict-20261015-150430-ID3CBXW.md"),
+        "---\ntitle: Test Note\n---\nOther device's edit.\n",
+    )
+    .expect("write");
+    let notes = scan_vault(dir.path(), &ScanConfig::default()).expect("scan");
+    assert!(
+        !notes.iter().any(|n| n.path.to_string_lossy().contains("sync-conflict")),
+        "{:?}",
+        notes.iter().map(|n| &n.path).collect::<Vec<_>>()
+    );
+    assert!(notes.iter().any(|n| n.path.to_string_lossy() == "test-note.md"));
+}

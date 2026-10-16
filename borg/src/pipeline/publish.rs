@@ -102,7 +102,7 @@ pub(crate) fn find_note_by_source_recursive(dir: &std::path::Path, needle: &str)
             if let Some(found) = find_note_by_source_recursive(&path, needle) {
                 return Some(found);
             }
-        } else if path.extension().is_some_and(|ext| ext == "md") {
+        } else if vault::note::is_note_file(&path) {
             // Quick check: read first 2KB (frontmatter is always at the top)
             if let Ok(file) = std::fs::File::open(&path) {
                 use std::io::Read;

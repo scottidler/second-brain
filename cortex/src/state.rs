@@ -125,7 +125,7 @@ impl VaultManifest {
                 continue;
             }
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            if !vault::note::is_note_file(path) {
                 continue;
             }
 

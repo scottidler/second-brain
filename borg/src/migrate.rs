@@ -235,7 +235,7 @@ fn collect_md_recursive(current: &Path, root: &Path, skip_folders: &[String], fi
                 continue;
             }
             collect_md_recursive(&path, root, skip_folders, files)?;
-        } else if path.extension().is_some_and(|ext| ext == "md") {
+        } else if vault::note::is_note_file(&path) {
             files.push(path);
         }
     }

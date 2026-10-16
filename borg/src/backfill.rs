@@ -92,7 +92,7 @@ fn walk(current: &Path, root: &Path, skip_folders: &[String], out: &mut Vec<Path
                 continue;
             }
             walk(&path, root, skip_folders, out)?;
-        } else if path.extension().is_some_and(|e| e == "md") {
+        } else if vault::note::is_note_file(&path) {
             out.push(path);
         }
     }

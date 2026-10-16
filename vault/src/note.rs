@@ -2,6 +2,7 @@ use eyre::{Context, ContextCompat, Result};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use walkdir::WalkDir;
 
 use crate::config::ScanConfig;
@@ -34,6 +35,25 @@ pub fn parse_note(vault_root: &Path, path: &Path) -> Result<Note> {
     })
 }
 
+/// A Syncthing conflict copy: `<stem>.sync-conflict-<YYYYMMDD>-<HHMMSS>-<DEVICE>.md`.
+/// Also matches the copies cortex's slug rule renamed before this existed
+/// (`<stem>sync-conflict-…-<device>.md`, dot dropped and lowercased).
+static SYNC_CONFLICT: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"sync-conflict-\d{8}-\d{6}-[A-Za-z0-9]{7}").expect("valid regex"));
+
+/// Whether `path` is a vault note: a `.md` file that is not a Syncthing
+/// conflict copy. A conflict copy is a second writer's version of a note,
+/// waiting for a human to merge it; every tool that treated it as a note
+/// renamed it, enriched it, or linked to it, and it then synced everywhere.
+/// Every vault walker filters through this one predicate.
+pub fn is_note_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("md")
+        && !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| SYNC_CONFLICT.is_match(n))
+}
+
 /// Collect the absolute paths of every `.md` file in the vault, respecting `ignore` directories.
 ///
 /// Sequential by design: WalkDir is fast and the I/O is cheap (directory enumeration only).
@@ -62,7 +82,7 @@ fn collect_md_paths(vault_root: &Path, scan_config: &ScanConfig) -> Result<Vec<P
             continue;
         }
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+        if !is_note_file(path) {
             continue;
         }
         paths.push(path.to_path_buf());

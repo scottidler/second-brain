@@ -148,7 +148,7 @@ async fn debounce_loop(
 
                 // Collect .md file paths from this event (O(1) dedup via `seen`)
                 for path in &event.paths {
-                    if path.extension().and_then(|e| e.to_str()) == Some("md")
+                    if crate::note::is_note_file(path)
                         && seen.insert(path.clone())
                     {
                         pending.push(path.clone());
