@@ -406,7 +406,7 @@ pub(crate) async fn try_extract_slides(
     //    dropped slide ever reaches the pattern).
     let pattern_input = slides::render_pattern_input(&manifest);
     let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
-    let summary = slides::parse_summary_output(&raw);
+    let summary = slides::parse_summary_output(&raw)?;
     Ok(Some((manifest, summary, guard.keep())))
 }
 

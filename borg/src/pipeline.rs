@@ -109,6 +109,26 @@ pub(crate) fn append_distilled_below_slides(mut slide_body: String, distilled_bo
 /// `## Links`/`## Transcript` sections are spliced beneath the slide body
 /// (the current behavior); when false the slide body stands alone (the
 /// legacy slide-only shape).
+/// The body and `slides:` list for a slide-aware publish. A text-only result
+/// embeds no slide, so its slide body only repeats the distilled sections; on
+/// 2026-07-19 it was the pattern's own "no transcript was provided" commentary.
+/// It publishes the distilled body alone, the same as a video whose Stage 1
+/// proposed text-only and never ran the slides pattern.
+pub(crate) fn slide_publish_body(
+    result: crate::slides::publish::PublishResult,
+    distilled_body: &str,
+    append: bool,
+) -> (String, Vec<String>) {
+    if matches!(result.shape, crate::slides::NoteShape::TextOnly) {
+        log::info!("slide_publish_body: text-only shape; publishing the distilled body alone");
+        return (distilled_body.to_string(), Vec::new());
+    }
+    // APPEND the distilled sections below the slide body rather than
+    // REPLACING them. Gate: distill.slide-append; when off, the slide body
+    // stands alone (the legacy slide-only shape).
+    (compose_slide_body(result.body, distilled_body, append), result.slides)
+}
+
 pub(crate) fn compose_slide_body(slide_body: String, distilled_body: &str, append: bool) -> String {
     log::debug!(
         "compose_slide_body: append={append} distilled_len={}",
@@ -964,17 +984,7 @@ async fn process_url_inner(
                     result.shape,
                     result.slides.len(),
                 );
-                // APPEND the distilled sections below the
-                // slide body rather than REPLACING them. Frontmatter is
-                // untouched here - `rendered_distilled.frontmatter_additions` is
-                // consumed below. Gate: distill.slide-append — when off, the
-                // slide body stands alone (the legacy slide-only shape).
-                let body = compose_slide_body(
-                    result.body,
-                    &rendered_distilled.body_markdown,
-                    config.distill.slide_append,
-                );
-                (body, result.slides)
+                slide_publish_body(result, &rendered_distilled.body_markdown, config.distill.slide_append)
             }
             Err(e) => {
                 log::warn!("[{trace_id}] Slide publish failed: {e:#} - using rendered Distilled body");

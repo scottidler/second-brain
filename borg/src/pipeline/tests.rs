@@ -994,6 +994,37 @@ fn compose_slide_body_on_appends_distilled_sections() {
     assert!(composed.contains("## Summary"), "distilled sections appended when on");
 }
 
+/// 2026-07-19: a text-only slide body ("no transcript segments were provided")
+/// was published above the distilled sections, doubling `## Key Ideas`.
+#[test]
+fn slide_publish_body_text_only_publishes_the_distilled_body_alone() {
+    let distilled_body = "## Summary\n\nThe distilled summary.\n\n";
+    let result = crate::slides::publish::PublishResult {
+        shape: crate::slides::NoteShape::TextOnly,
+        slides: Vec::new(),
+        body: "## What This Is About\n\nNo transcript was provided.\n".to_string(),
+    };
+    for append in [true, false] {
+        let (body, slides) = slide_publish_body(result.clone(), distilled_body, append);
+        assert_eq!(body, distilled_body, "append={append}");
+        assert!(slides.is_empty());
+    }
+}
+
+#[test]
+fn slide_publish_body_hero_keeps_its_slide_body() {
+    let distilled_body = "## Summary\n\nThe distilled summary.\n\n";
+    let result = crate::slides::publish::PublishResult {
+        shape: crate::slides::NoteShape::Hero,
+        slides: vec!["system/attachments/images/2026-10/x-slide-001.jpg".to_string()],
+        body: "![[x-slide-001.jpg]]\n\n## What This Is About\n".to_string(),
+    };
+    let (body, slides) = slide_publish_body(result, distilled_body, true);
+    assert!(body.starts_with("![[x-slide-001.jpg]]"));
+    assert!(body.contains("## Summary"));
+    assert_eq!(slides.len(), 1);
+}
+
 #[test]
 fn gate_capture_note_off_returns_none() {
     // capture-note OFF: dropped at the single seam even when a note is present.

@@ -858,25 +858,43 @@ pub struct SummaryOutput {
     pub body: String,
 }
 
+/// Why a slides-pattern reply is not a usable slide summary. Either one sends
+/// the ingest down the distilled-body path, so no unparsed reply reaches a note.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SummaryParseError {
+    #[error("slides pattern output has no `---` frontmatter block naming shape/embed_slides/sections")]
+    NoFrontmatter,
+    #[error("slides pattern frontmatter is not valid YAML: {0}")]
+    BadFrontmatter(String),
+}
+
 /// Parse the LLM output produced by the `obsidian-youtube-slides` pattern.
-/// Tolerant: when no leading `---` frontmatter is present, treats the whole
-/// thing as body with a default `text-only` frontmatter (the pattern output
-/// for shape `text-only` may legitimately be just prose).
-pub fn parse_summary_output(text: &str) -> SummaryOutput {
-    let trimmed = text.trim_start_matches('\n');
-    if let Some(rest) = trimmed.strip_prefix("---\n")
-        && let Some(end_idx) = rest.find("\n---")
-    {
-        let yaml = &rest[..end_idx];
-        let after_close = &rest[end_idx + "\n---".len()..];
-        let body = after_close.trim_start_matches('\n').to_string();
-        let frontmatter = serde_yaml::from_str::<SummaryFrontmatter>(yaml).unwrap_or_default();
-        return SummaryOutput { frontmatter, body };
+///
+/// The pattern must return its frontmatter first. Models sometimes reason
+/// aloud before it ("Looking at the input: only 2 unique slides..."), and
+/// that text was published verbatim into two notes (2026-07-19,
+/// 2026-10-15). So the block is found wherever it starts, even glued to the
+/// end of a sentence, and everything before it is dropped with a WARN. A
+/// reply with no block, or a block that is not YAML, is an error rather than
+/// a body: there is no way to tell its summary from its reasoning.
+pub fn parse_summary_output(text: &str) -> Result<SummaryOutput, SummaryParseError> {
+    static OPEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let open = OPEN.get_or_init(|| regex::Regex::new(r"---\n(?:shape|embed_slides|sections):").expect("static regex"));
+    let start = open.find(text).ok_or(SummaryParseError::NoFrontmatter)?.start();
+    let preamble = text[..start].trim();
+    if !preamble.is_empty() {
+        log::warn!(
+            "slides pattern wrote {} bytes before its frontmatter; dropped: {:?}",
+            preamble.len(),
+            preamble.chars().take(120).collect::<String>()
+        );
     }
-    SummaryOutput {
-        frontmatter: SummaryFrontmatter::default(),
-        body: text.to_string(),
-    }
+    let rest = &text[start + "---\n".len()..];
+    let end = rest.find("\n---").ok_or(SummaryParseError::NoFrontmatter)?;
+    let frontmatter = serde_yaml::from_str::<SummaryFrontmatter>(&rest[..end])
+        .map_err(|e| SummaryParseError::BadFrontmatter(e.to_string()))?;
+    let body = rest[end + "\n---".len()..].trim_start_matches('\n').to_string();
+    Ok(SummaryOutput { frontmatter, body })
 }
 
 /// Stage 3 enforcement gate: validate the LLM's `embed_slides` against

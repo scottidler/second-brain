@@ -381,7 +381,7 @@ fn test_render_pattern_input_includes_shape_and_slides() {
 #[test]
 fn test_parse_summary_output_with_frontmatter() {
     let raw = "---\nshape: slide-section\nembed_slides: [s001, s002, s005]\nsections:\n  - slide: s001\n    title: Introduction\n  - slide: s002\n    title: How the pipeline works\n  - slide: s005\n    title: Cost and limits\n---\n\n## Introduction\nThe talk opens.\n\n## How the pipeline works\nThe presenter walks through.\n";
-    let parsed = parse_summary_output(raw);
+    let parsed = parse_summary_output(raw).expect("frontmatter parses");
     assert_eq!(parsed.frontmatter.shape, "slide-section");
     assert_eq!(parsed.frontmatter.embed_slides, vec!["s001", "s002", "s005"]);
     assert_eq!(parsed.frontmatter.sections.len(), 3);
@@ -390,24 +390,51 @@ fn test_parse_summary_output_with_frontmatter() {
     assert!(parsed.body.starts_with("## Introduction"));
 }
 
+/// 2026-07-19: the model reasoned on its own lines before the block, and the
+/// whole reply, reasoning and YAML included, became the note body.
 #[test]
-fn test_parse_summary_output_no_frontmatter() {
-    let raw = "## What This Is About\n\nA prose summary.\n";
-    let parsed = parse_summary_output(raw);
-    // Default text-only frontmatter; body unchanged.
+fn test_parse_summary_output_drops_reasoning_before_frontmatter() {
+    let raw = "Looking at the input: only 2 unique slides. I must downgrade to `text-only`.\n\n---\nshape: text-only\nembed_slides: []\nsections: []\n---\n\n## What This Is About\nThe talk.\n";
+    let parsed = parse_summary_output(raw).expect("frontmatter parses");
     assert_eq!(parsed.frontmatter.shape, "text-only");
-    assert!(parsed.frontmatter.embed_slides.is_empty());
-    assert!(parsed.body.contains("## What This Is About"));
+    assert_eq!(parsed.body, "## What This Is About\nThe talk.\n");
+}
+
+/// 2026-10-15: the reasoning ran straight into the opening `---` with no
+/// newline between them.
+#[test]
+fn test_parse_summary_output_drops_reasoning_glued_to_frontmatter() {
+    let raw = "Let me write the full transcript context... I'll work with what's given.---\nshape: hero\nembed_slides: [s001]\nsections: []\n---\n\n> [!tldr]\n> A memory layer.\n";
+    let parsed = parse_summary_output(raw).expect("frontmatter parses");
+    assert_eq!(parsed.frontmatter.shape, "hero");
+    assert_eq!(parsed.frontmatter.embed_slides, vec!["s001"]);
+    assert!(!parsed.body.contains("Let me"));
+    assert!(parsed.body.starts_with("> [!tldr]"));
 }
 
 #[test]
-fn test_parse_summary_output_garbled_frontmatter_falls_back_to_default() {
-    // Malformed YAML inside the frontmatter - we tolerate it and default to text-only.
-    let raw = "---\n!!! not yaml :: ?? \n---\n\nbody\n";
-    let parsed = parse_summary_output(raw);
-    assert_eq!(parsed.frontmatter.shape, "text-only");
-    assert!(parsed.frontmatter.embed_slides.is_empty());
-    assert!(parsed.body.contains("body"));
+fn test_parse_summary_output_finds_frontmatter_whatever_its_first_key() {
+    let raw = "---\nembed_slides: [s001]\nshape: hero\nsections: []\n---\nbody\n";
+    let parsed = parse_summary_output(raw).expect("frontmatter parses");
+    assert_eq!(parsed.frontmatter.shape, "hero");
+}
+
+#[test]
+fn test_parse_summary_output_without_frontmatter_is_an_error() {
+    assert_eq!(
+        parse_summary_output("## What This Is About\n\nA prose summary.\n").unwrap_err(),
+        SummaryParseError::NoFrontmatter
+    );
+    assert_eq!(
+        parse_summary_output("---\nshape: hero\nno closing delimiter\n").unwrap_err(),
+        SummaryParseError::NoFrontmatter
+    );
+}
+
+#[test]
+fn test_parse_summary_output_garbled_frontmatter_is_an_error() {
+    let err = parse_summary_output("---\nshape: [unclosed\n---\n\nbody\n").unwrap_err();
+    assert!(matches!(err, SummaryParseError::BadFrontmatter(_)), "{err:?}");
 }
 
 #[test]
