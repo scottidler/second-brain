@@ -199,6 +199,7 @@ async fn process_session_inner_publishes_note_with_trace_and_source() {
         false,
         ResolveIntent::NewNote,
         None,
+        false,
         &config,
         "harvest-test-trace",
     )
@@ -249,6 +250,7 @@ async fn process_session_inner_writes_redacted_key_when_any_member_redacted() {
         false,
         ResolveIntent::NewNote,
         None,
+        false,
         &config,
         "harvest-test-redacted",
     )
@@ -293,6 +295,7 @@ async fn session_governance_is_keys_not_tags() {
         false,
         ResolveIntent::NewNote,
         None,
+        false,
         &config,
         "harvest-test-governance-keys",
     )
@@ -444,6 +447,7 @@ async fn process_session_inner_names_file_from_title_slug_on_distiller_fallback(
         false,
         ResolveIntent::NewNote,
         None,
+        false,
         &config,
         "harvest-test-slug-fallback",
     )
@@ -487,6 +491,7 @@ async fn process_session_inner_fails_loudly_when_primary_id_missing() {
         false,
         ResolveIntent::NewNote,
         None,
+        false,
         &config,
         "harvest-test-missing-primary",
     )
@@ -513,7 +518,7 @@ async fn publish_session(
     intent: ResolveIntent,
     force: bool,
 ) -> Result<IngestResult> {
-    publish_session_with_follows(config, title, primary_id, trace_id, intent, force, None).await
+    publish_session_with_follows(config, title, primary_id, trace_id, intent, force, None, false).await
 }
 
 /// [`publish_session`] plus an explicit `follows_prior` - the follow-up
@@ -529,6 +534,7 @@ async fn publish_session_with_follows(
     intent: ResolveIntent,
     force: bool,
     follows_prior: Option<watermark::PublishedEntry>,
+    retire_prior: bool,
 ) -> Result<IngestResult> {
     let mut member = session_record(primary_id, "2026-07-02T04:51:21+00:00", "2026-07-02T06:08:39+00:00", 42);
     member.title = Some(title.to_string());
@@ -542,6 +548,7 @@ async fn publish_session_with_follows(
         force,
         intent,
         follows_prior,
+        retire_prior,
         config,
         trace_id,
     )
@@ -907,7 +914,7 @@ async fn a_follow_up_publishes_a_second_distinct_note() {
     assert_eq!(all_notes(vault_dir.path()).len(), 2);
 }
 
-/// Acceptance: "a `--force` re-harvest ... produces a second, distinct note."
+/// `--force --fork`: a re-harvest produces a second, distinct note.
 ///
 /// This is the dangerous one: `classify_reappearance` returns `FollowUp` on
 /// `--force` BEFORE consulting the body hash, so an unchanged `--force`
@@ -952,6 +959,47 @@ async fn a_force_reharvest_of_an_unchanged_session_still_forks_a_new_note() {
         "--force must fork, never overwrite: the prior note stays as published"
     );
     assert_eq!(all_notes(vault_dir.path()).len(), 2);
+}
+
+/// `--force` without `--fork` is a replace: the fresh note lands under its new
+/// id and the session's older note is removed, so the vault never holds two
+/// notes for one session.
+#[tokio::test]
+async fn a_force_reharvest_without_fork_replaces_the_prior_note() {
+    let _sandbox = XdgSandbox::new().await;
+    let vault_dir = TempDir::new().unwrap();
+    let staging_dir = TempDir::new().unwrap();
+    let config = test_config(vault_dir.path(), staging_dir.path());
+
+    let first = publish_session(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-r3place1",
+        ResolveIntent::NewNote,
+        false,
+    )
+    .await
+    .unwrap();
+    let first_path = std::path::PathBuf::from(first.note_path.unwrap());
+
+    let forced = publish_session_with_follows(
+        &config,
+        "Review CI Workflow",
+        "8d6b6ef3",
+        "hv-r3place2",
+        ResolveIntent::FollowUp,
+        false,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+    let forced_path = std::path::PathBuf::from(forced.note_path.unwrap());
+
+    assert_ne!(first_path, forced_path, "the fresh note lands under its new id");
+    assert!(!first_path.exists(), "the prior note is retired");
+    assert_eq!(all_notes(vault_dir.path()), vec![forced_path]);
 }
 
 /// Acceptance: "A trace whose note was deleted republishes cleanly as new."
@@ -1082,6 +1130,7 @@ async fn a_follow_up_back_links_to_the_prior_notes_current_path_even_after_a_cor
         ResolveIntent::FollowUp,
         false,
         Some(prior_entry),
+        false,
     )
     .await
     .unwrap();
@@ -1126,6 +1175,7 @@ async fn an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish()
         ResolveIntent::FollowUp,
         false,
         Some(no_trace_entry),
+        false,
     )
     .await
     .expect("an unresolvable prior note must never block the publish");
@@ -1147,6 +1197,7 @@ async fn an_unresolvable_prior_note_omits_follows_and_never_blocks_the_publish()
         ResolveIntent::FollowUp,
         false,
         Some(unknown_trace_entry),
+        false,
     )
     .await
     .expect("an unresolvable prior trace must never block the publish");
@@ -1201,6 +1252,7 @@ async fn follows_survives_a_replace() {
         ResolveIntent::FollowUp,
         false,
         Some(prior_entry),
+        false,
     )
     .await
     .unwrap();
@@ -1222,6 +1274,7 @@ async fn follows_survives_a_replace() {
             ResolveIntent::Replay,
             true,
             None,
+            false,
         )
         .await
         .unwrap();

@@ -21,6 +21,8 @@ pub struct ReplayOptions {
     pub bootstrap_from_vault: bool,
     pub note: Option<PathBuf>,
     pub dry_run: bool,
+    /// Session replay: keep the older notes beside the fresh one.
+    pub fork: bool,
 }
 
 /// Parse a duration expression ("7d", "24h", "30m") into a Duration.
@@ -166,7 +168,15 @@ pub async fn run(
 
     // Next: specific trace
     if let Some(trace_id) = &opts.trace_id {
-        return replay_trace_top(&config, trace_id, opts.from_stage, opts.dry_run, &mut progress).await;
+        return replay_trace_top(
+            &config,
+            trace_id,
+            opts.from_stage,
+            opts.dry_run,
+            opts.fork,
+            &mut progress,
+        )
+        .await;
     }
 
     // Next: filter over traces in the store
@@ -378,9 +388,10 @@ async fn replay_trace_top(
     trace_id: &str,
     from_stage: u8,
     dry_run: bool,
+    fork: bool,
     progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
 ) -> Result<ReplayReport> {
-    let (succeeded, failed) = replay_one(config, trace_id, from_stage, dry_run, progress).await?;
+    let (succeeded, failed) = replay_one(config, trace_id, from_stage, dry_run, fork, progress).await?;
     Ok(ReplayReport {
         mode: ReplayMode::Trace,
         dry_run,
@@ -397,6 +408,7 @@ async fn replay_one(
     trace_id: &str,
     from_stage: u8,
     dry_run: bool,
+    fork: bool,
     progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
 ) -> Result<(usize, usize)> {
     if !config.staging.enabled {
@@ -414,7 +426,7 @@ async fn replay_one(
     // re-derives directly from the staged transcript + member records. Every
     // other kind's `--from-stage > 0` stays explicitly unsupported.
     if from_stage == 2 && matches!(envelope.kind, IngestKind::Session) {
-        return replay_session_stage2(config, &store, trace_id, dry_run, progress).await;
+        return replay_session_stage2(config, &store, trace_id, dry_run, fork, progress).await;
     }
     if from_stage > 0 {
         bail!(
@@ -459,6 +471,7 @@ async fn replay_session_stage2(
     store: &FsArtifactStore,
     trace_id: &str,
     dry_run: bool,
+    fork: bool,
     progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
 ) -> Result<(usize, usize)> {
     let state_path = vault::paths::borg_harvest_state();
@@ -509,6 +522,7 @@ async fn replay_session_stage2(
         true,
         crate::harvest::identity::ResolveIntent::Replay,
         None,
+        !fork,
         config,
         trace_id,
     )
@@ -553,7 +567,7 @@ async fn replay_matching(
     let mut failed_total = 0usize;
     for trace_id in &matches {
         attempted += 1;
-        match replay_one(config, trace_id, opts.from_stage, opts.dry_run, progress).await {
+        match replay_one(config, trace_id, opts.from_stage, opts.dry_run, opts.fork, progress).await {
             Ok((s, f)) => {
                 succeeded_total += s;
                 failed_total += f;

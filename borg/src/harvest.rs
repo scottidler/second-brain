@@ -62,10 +62,12 @@ pub struct HarvestOpts {
     pub selection: SelectionConfig,
     pub thread_window: Duration,
     pub force: bool,
+    /// With `force`: keep the older notes beside the fresh one.
+    pub fork: bool,
 }
 
 impl HarvestOpts {
-    pub fn from_config(config: &HarvestConfig, force: bool) -> Result<Self> {
+    pub fn from_config(config: &HarvestConfig, force: bool, fork: bool) -> Result<Self> {
         log::debug!(
             "harvest::HarvestOpts::from_config: min_msgs={} thread_window={:?} force={force}",
             config.min_msgs,
@@ -84,6 +86,7 @@ impl HarvestOpts {
             selection,
             thread_window,
             force,
+            fork,
         })
     }
 }
@@ -132,6 +135,8 @@ pub struct HarvestPlan {
     pub rejections: Vec<RejectionOutcome>,
     /// The export cursor this run consumed - the watermark advances to it.
     pub new_cursor: i64,
+    /// `--force` without `--fork`: each publish removes the session's older notes.
+    pub retire_prior: bool,
 }
 
 impl HarvestPlan {
@@ -258,6 +263,7 @@ pub async fn plan_harvest<R: ExportReader>(
         threads: decisions,
         rejections,
         new_cursor,
+        retire_prior: opts.force && !opts.fork,
     })
 }
 
@@ -494,6 +500,7 @@ pub async fn run(
     since: Option<String>,
     limit: Option<usize>,
     force: bool,
+    fork: bool,
     dry_run: bool,
     dormant_after: Option<String>,
 ) -> Result<HarvestReport> {
@@ -502,7 +509,7 @@ pub async fn run(
     // config (whose default matches clyde's own 7d).
     let dormant_after = dormant_after.unwrap_or_else(|| config.harvest.dormant_after.clone());
     let reader = reader::ClydeExportReader::new(config.harvest.clyde_binary.clone()).with_dormant_after(dormant_after);
-    run_with(&reader, config, &state_path, since, limit, force, dry_run).await
+    run_with(&reader, config, &state_path, since, limit, force, fork, dry_run).await
 }
 
 /// The injectable core behind [`run`] (generic over the reader + explicit
@@ -516,6 +523,7 @@ pub async fn run_with<R: ExportReader>(
     since: Option<String>,
     limit: Option<usize>,
     force: bool,
+    fork: bool,
     dry_run: bool,
 ) -> Result<HarvestReport> {
     log::debug!(
@@ -540,7 +548,7 @@ pub async fn run_with<R: ExportReader>(
     let parsed = reader.export_bulk(cursor, since_arg.as_deref(), limit).await?;
     let parse_rejections = parsed.rejections;
 
-    let opts = HarvestOpts::from_config(&config.harvest, force)?;
+    let opts = HarvestOpts::from_config(&config.harvest, force, fork)?;
     let plan = plan_harvest(reader, parsed.export, &opts, &state).await?;
 
     if dry_run {

@@ -88,6 +88,7 @@ fn opts() -> HarvestOpts {
         selection: SelectionConfig::compile(6, &[]).unwrap(),
         thread_window: chrono::Duration::hours(2),
         force: false,
+        fork: false,
     }
 }
 
@@ -331,7 +332,7 @@ async fn per_thread_save_is_durable_and_the_cursor_stays_unadvanced_until_end_of
     let mut state = state;
     // Publish ONLY the first thread - simulating the process stopping right
     // here, before the second thread or the end-of-run bookkeeping ever run.
-    let outcome1 = publish_thread(&reader, &config, &plan.threads[0], &mut state, &state_path).await;
+    let outcome1 = publish_thread(&reader, &config, &plan.threads[0], false, &mut state, &state_path).await;
     assert!(
         matches!(outcome1.result.status, crate::types::IngestStatus::Completed),
         "{:?}",
@@ -351,7 +352,7 @@ async fn per_thread_save_is_durable_and_the_cursor_stays_unadvanced_until_end_of
     // Publish the second thread too - the cursor is STILL unadvanced, proving
     // the cursor bump really does live only in the end-of-run step, not
     // anywhere in this per-thread loop.
-    let outcome2 = publish_thread(&reader, &config, &plan.threads[1], &mut state, &state_path).await;
+    let outcome2 = publish_thread(&reader, &config, &plan.threads[1], false, &mut state, &state_path).await;
     assert!(
         matches!(outcome2.result.status, crate::types::IngestStatus::Completed),
         "{:?}",

@@ -65,6 +65,9 @@ pub enum ContentKind {
         body_truncated: bool,
         intent: crate::harvest::identity::ResolveIntent,
         follows_prior: Option<crate::harvest::watermark::PublishedEntry>,
+        /// After the fresh note lands, remove every other note for the same
+        /// session (`--force` without `--fork`: a re-harvest replaces).
+        retire_prior: bool,
     },
 }
 

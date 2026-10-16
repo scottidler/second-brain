@@ -72,6 +72,7 @@ fn test_content_kind_session() {
         body_truncated: false,
         intent: crate::harvest::identity::ResolveIntent::NewNote,
         follows_prior: None,
+        retire_prior: false,
     };
     assert!(matches!(kind, ContentKind::Session { ref body, .. } if body.starts_with("human:")));
 }

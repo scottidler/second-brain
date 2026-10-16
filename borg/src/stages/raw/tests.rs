@@ -97,6 +97,7 @@ fn classify_session() {
         body_truncated: false,
         intent: crate::harvest::identity::ResolveIntent::NewNote,
         follows_prior: None,
+        retire_prior: false,
     });
     assert_eq!(kind, IngestKind::Session);
 }

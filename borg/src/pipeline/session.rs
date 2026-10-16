@@ -375,6 +375,7 @@ pub(crate) async fn process_session(
     force: bool,
     intent: ResolveIntent,
     follows_prior: Option<watermark::PublishedEntry>,
+    retire_prior: bool,
     config: &Config,
     trace_id: &str,
 ) -> IngestResult {
@@ -389,6 +390,7 @@ pub(crate) async fn process_session(
         force,
         intent,
         follows_prior,
+        retire_prior,
         config,
         trace_id,
     )
@@ -431,6 +433,7 @@ pub(crate) async fn process_session_inner(
     force: bool,
     intent: ResolveIntent,
     follows_prior: Option<watermark::PublishedEntry>,
+    retire_prior: bool,
     config: &Config,
     trace_id: &str,
 ) -> Result<IngestResult> {
@@ -714,6 +717,16 @@ pub(crate) async fn process_session_inner(
         members.len(),
         prior_note.is_some()
     );
+    if retire_prior {
+        let retired = identity::retire_other_notes(&vault_root, &source_url, &note_path)
+            .context("retire the session's older notes after a replace")?;
+        if !retired.is_empty() {
+            log::info!(
+                "[{trace_id}] replace retired {} older note(s) for {source_url}",
+                retired.len()
+            );
+        }
+    }
 
     // Repair the trace's recorded note_path (terminal-state-safe, so it works
     // for a replay too, which never reaches `process_content`'s receipts

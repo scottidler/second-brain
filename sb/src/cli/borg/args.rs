@@ -231,6 +231,10 @@ pub struct HarvestCliArgs {
     /// contract surface, not a hidden flag.
     #[arg(long)]
     pub force: bool,
+    /// With --force: keep each session's older notes beside the fresh one
+    /// instead of replacing them
+    #[arg(long, requires = "force")]
+    pub fork: bool,
     /// Install the nightly systemd user timer (writes sb-harvest.{service,timer}
     /// to ~/.config/systemd/user/) and exit. OnCalendar comes from
     /// harvest.schedule; every other knob stays in borg.yml.
@@ -453,6 +457,10 @@ pub struct ReplayCliArgs {
     /// List what would be replayed and exit without writing
     #[arg(long)]
     pub dry_run: bool,
+    /// Session replay: keep the session's older notes beside the fresh one
+    /// instead of replacing them
+    #[arg(long)]
+    pub fork: bool,
 }
 
 #[derive(Args)]

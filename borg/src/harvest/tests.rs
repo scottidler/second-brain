@@ -99,6 +99,7 @@ fn opts(min_msgs: usize, patterns: &[&str], force: bool) -> HarvestOpts {
             .unwrap(),
         thread_window: Duration::hours(2),
         force,
+        fork: false,
     }
 }
 
@@ -459,7 +460,7 @@ async fn run_with_dry_run_writes_nothing_and_reports_selection() {
     let tmp = TempDir::new().unwrap();
     let state_path = tmp.path().join("harvest-state.json");
 
-    let report = run_with(&reader, &config, &state_path, None, None, false, true)
+    let report = run_with(&reader, &config, &state_path, None, None, false, false, true)
         .await
         .expect("dry-run");
 
@@ -488,7 +489,7 @@ async fn dry_run_surfaces_parse_rejections_but_writes_no_receipt() {
     let tmp = TempDir::new().unwrap();
     let state_path = tmp.path().join("harvest-state.json");
 
-    let report = run_with(&reader, &config, &state_path, None, None, false, true)
+    let report = run_with(&reader, &config, &state_path, None, None, false, false, true)
         .await
         .expect("dry-run");
 
@@ -536,7 +537,7 @@ async fn live_run_writes_parse_skip_receipt_before_cursor_advances() {
     let state_path = tmp.path().join("harvest-state.json");
     assert!(!state_path.exists(), "no watermark yet");
 
-    let report = run_with(&reader, &config, &state_path, None, None, false, false)
+    let report = run_with(&reader, &config, &state_path, None, None, false, false, false)
         .await
         .expect("live run");
     assert_eq!(report.parse_rejections.len(), 1);

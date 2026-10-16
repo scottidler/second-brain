@@ -54,7 +54,7 @@ pub async fn publish_plan<R: ExportReader>(
     log::debug!("harvest::publish::publish_plan: publishable={}", publishable.len());
     let mut outcomes = Vec::with_capacity(publishable.len());
     for thread in publishable {
-        outcomes.push(publish_thread(reader, config, thread, &mut state, state_path).await);
+        outcomes.push(publish_thread(reader, config, thread, plan.retire_prior, &mut state, state_path).await);
     }
     log::debug!(
         "harvest::publish::publish_plan: done outcomes={} published={}",
@@ -71,6 +71,7 @@ async fn publish_thread<R: ExportReader>(
     reader: &R,
     config: &Config,
     thread: &ThreadDecision,
+    retire_prior: bool,
     state: &mut WatermarkState,
     state_path: &Path,
 ) -> PublishOutcome {
@@ -80,7 +81,7 @@ async fn publish_thread<R: ExportReader>(
         thread.trace_id,
         thread.member_ids.len()
     );
-    match publish_thread_inner(reader, config, thread, state, state_path).await {
+    match publish_thread_inner(reader, config, thread, retire_prior, state, state_path).await {
         Ok(result) => PublishOutcome {
             primary_id: thread.primary_id.clone(),
             trace_id: thread.trace_id.clone(),
@@ -121,6 +122,7 @@ async fn publish_thread_inner<R: ExportReader>(
     reader: &R,
     config: &Config,
     thread: &ThreadDecision,
+    retire_prior: bool,
     state: &mut WatermarkState,
     state_path: &Path,
 ) -> Result<IngestResult> {
@@ -192,6 +194,7 @@ async fn publish_thread_inner<R: ExportReader>(
         body_truncated,
         intent,
         follows_prior,
+        retire_prior,
     };
     // `force` stays false here regardless of `--force`: `--force` (design
     // doc API) means "re-distill this in-scope published id", which planning

@@ -104,6 +104,32 @@ struct VaultIndex {
 /// vs. per-test tempdirs) never share state.
 static INDEX_CACHE: LazyLock<Mutex<HashMap<PathBuf, VaultIndex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Remove every vault note whose `source:` is `source`, except `keep`.
+///
+/// A forced re-harvest or a session replay publishes a fresh note under a new
+/// id; without `--fork` that is a replace, so the older notes for the same
+/// session go (through `rkvr`, recoverable). Scans the vault fresh rather than
+/// trusting the memoized index: it only adds paths, so it can name a file
+/// cortex already moved.
+pub fn retire_other_notes(vault_root: &Path, source: &str, keep: &Path) -> Result<Vec<PathBuf>> {
+    let notes = note::scan_vault(vault_root, &ScanConfig::default())
+        .with_context(|| format!("harvest::identity: scan_vault {}", vault_root.display()))?;
+    let keep = canonical_or(keep);
+    let stale: Vec<PathBuf> = notes
+        .iter()
+        .filter(|n| n.frontmatter.source.as_deref() == Some(source))
+        .map(|n| vault_root.join(&n.path))
+        .filter(|p| canonical_or(p) != keep)
+        .collect();
+    log::debug!(
+        "harvest::identity::retire_other_notes: source={source} keep={} stale={}",
+        keep.display(),
+        stale.len()
+    );
+    crate::rkvr::remove(&stale)?;
+    Ok(stale)
+}
+
 /// Resolve the note this publish should REPLACE, if any. Absolute path or
 /// `None`. See the module doc for the four-branch resolution order.
 ///

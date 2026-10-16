@@ -216,6 +216,7 @@ impl BorgCli {
                     bootstrap_from_vault: args.bootstrap_from_vault,
                     note: args.note,
                     dry_run: args.dry_run,
+                    fork: args.fork,
                 };
                 let report = borg::replay::run(config, opts, |event| {
                     print_replay_event(event);
@@ -427,9 +428,16 @@ impl BorgCli {
                     // neither, the harvest.mode config default decides (DryRun
                     // out of the box, per Rollout Plan).
                     let dry_run = config.harvest.mode.resolve_dry_run(args.dry_run, args.live);
-                    let report =
-                        borg::harvest::run(&config, args.since, args.limit, args.force, dry_run, args.dormant_after)
-                            .await?;
+                    let report = borg::harvest::run(
+                        &config,
+                        args.since,
+                        args.limit,
+                        args.force,
+                        args.fork,
+                        dry_run,
+                        args.dormant_after,
+                    )
+                    .await?;
                     print_harvest_report(&report);
                     Ok(())
                 }

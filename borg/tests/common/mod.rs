@@ -191,6 +191,7 @@ pub async fn publish_one_thread(vault_root: &std::path::Path, staging_root: &std
         selection: SelectionConfig::compile(6, &[]).unwrap(),
         thread_window: chrono::Duration::hours(2),
         force: false,
+        fork: false,
     };
     let plan = plan_harvest(&reader, export, &opts, &WatermarkState::default())
         .await
