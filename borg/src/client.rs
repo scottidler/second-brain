@@ -202,6 +202,12 @@ pub enum ReingestEvent {
     SkippedNonUrl {
         count: usize,
     },
+    /// The run stopped sending after this many failures in a row: the
+    /// signature of an upstream rate limit, where every further entry fails
+    /// too and each one is another request against the account.
+    Halted {
+        consecutive: usize,
+    },
     Complete {
         dry_run: bool,
     },
@@ -304,6 +310,7 @@ pub async fn reingest(
     after: Option<String>,
     dry_run: bool,
     jobs: usize,
+    stop_after_failures: usize,
     mut progress: impl FnMut(&ReingestEvent) + Send,
 ) -> Result<ReingestReport> {
     use ledger::{EntryFilter, QueriedEntry};
@@ -397,6 +404,7 @@ pub async fn reingest(
     let mut results = futures::stream::iter(entries.iter().enumerate())
         .map(|(i, entry)| async move { (i, entry, reingest_one(config_ref, daemon_ref, &entry.source).await) })
         .buffer_unordered(jobs.max(1));
+    let mut failure_streak = 0usize;
     while let Some((i, entry, outcome)) = results.next().await {
         progress(&ReingestEvent::ItemStart {
             index: i,
@@ -412,10 +420,23 @@ pub async fn reingest(
             ReingestEntryStatus::Other(s) => ReingestEvent::ItemOther(s.clone()),
             ReingestEntryStatus::Error(e) => ReingestEvent::ItemError(e.clone()),
         });
+        let failed = matches!(
+            status,
+            ReingestEntryStatus::Failed { .. } | ReingestEntryStatus::Error(_)
+        );
         report.processed.push(ReingestEntry {
             source: entry.source.clone(),
             status,
         });
+        failure_streak = if failed { failure_streak + 1 } else { 0 };
+        if failure_streak >= stop_after_failures.max(1) {
+            progress(&ReingestEvent::Halted {
+                consecutive: failure_streak,
+            });
+            eyre::bail!(
+                "reingest stopped after {failure_streak} failures in a row; check the failures before re-running (a re-run skips finished entries)"
+            );
+        }
     }
 
     progress(&ReingestEvent::Complete { dry_run });

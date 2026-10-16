@@ -120,6 +120,12 @@ youtube:
       model: ""               # empty = inherit llm.model
       max-vision-concurrency: 4
       min-confidence: 0.6
+  # YouTube's session rate limit answers every video "Video unavailable".
+  # After this many failed metadata fetches in a row, every YouTube fetch
+  # fails fast for `pause-for` (humantime) instead of hitting the account
+  # again. Defaults shown.
+  pause-after-failures: 5
+  pause-for: 30m
 
 # Where first-party clients (sb borg ingest/reingest/replay/queue/wait, the
 # oracle ingest_queue tool) reach the daemon. `request-timeout` (humantime)

@@ -161,6 +161,7 @@ impl BorgCli {
                 after,
                 dry_run,
                 jobs,
+                stop_after_failures,
             }) => {
                 let _report = borg::reingest(
                     config,
@@ -171,6 +172,7 @@ impl BorgCli {
                     after,
                     dry_run,
                     jobs,
+                    stop_after_failures as usize,
                     |event| match event {
                         borg::ReingestEvent::NoMatches => println!("No matching entries found."),
                         borg::ReingestEvent::Matched { count, dry_run } => println!(
@@ -196,6 +198,9 @@ impl BorgCli {
                         borg::ReingestEvent::ItemError(e) => eprintln!("    -> Error: {e}"),
                         borg::ReingestEvent::SkippedNonUrl { count } => println!(
                             "Skipping {count} non-http(s) entries (session notes: use `sb borg replay <trace> --from-stage 2`)"
+                        ),
+                        borg::ReingestEvent::Halted { consecutive } => eprintln!(
+                            "Stopped: {consecutive} failures in a row (an upstream rate limit fails every entry)"
                         ),
                         borg::ReingestEvent::Complete { dry_run } => {
                             if !*dry_run {

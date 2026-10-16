@@ -240,6 +240,7 @@ pub(crate) async fn try_extract_slides(
     //    frames are reasonable and disk usage stays small.
     let video_path = work_dir.join(format!("{video_id}.mp4"));
     let output_template = video_path.to_string_lossy().to_string();
+    youtube::breaker::check(url)?;
     let dl_fut = tokio::process::Command::new("yt-dlp")
         .args([
             // Verbose for the same 403 diagnostics as audio extraction

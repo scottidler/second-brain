@@ -110,6 +110,7 @@ async fn reingest_against_a_silent_daemon_reports_the_item_error_within_twice_th
             None,
             false,
             1,
+            5,
             |_| {},
         )
         .await
@@ -225,6 +226,7 @@ async fn reingest_jobs_runs_entries_concurrently() {
             None,
             false,
             4,
+            10,
             |e| {
                 if matches!(e, ReingestEvent::ItemStart { .. }) {
                     starts += 1;
@@ -236,6 +238,56 @@ async fn reingest_jobs_runs_entries_concurrently() {
         assert_eq!(report.processed.len(), 4);
         assert_eq!(starts, 4);
         assert!(started.elapsed() < DAEMON_TIMEOUT * 2, "took {:?}", started.elapsed());
+    })
+    .await;
+}
+
+/// A run that fails entry after entry is hitting an upstream limit: it stops
+/// sending instead of spending the rest of the list against the account
+/// (2026-10-15: 505 YouTube failures in four minutes on the operator's cookies).
+#[tokio::test]
+async fn reingest_halts_after_a_failure_streak() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let ledger_path = ledger::ledger_path().expect("ledger path");
+        for n in 0..6 {
+            ledger::append_entry(
+                &ledger_path,
+                &ledger::LedgerEntry {
+                    date: "2026-10-05".to_string(),
+                    time: "10:00".to_string(),
+                    method: vault::schema::Method::Http,
+                    filename: Some(format!("n{n}.md")),
+                    source: format!("https://example.com/{n}"),
+                    trace_id: None,
+                },
+            )
+            .expect("append");
+        }
+        let (port, _) = crate::stub::serve(crate::stub::Behavior::Silent).await;
+        let mut halted = None;
+        let mut starts = 0;
+        let err = reingest(
+            config_for_daemon(port, DAEMON_TIMEOUT),
+            true,
+            None,
+            None,
+            None,
+            None,
+            false,
+            1,
+            2,
+            |e| match e {
+                ReingestEvent::ItemStart { .. } => starts += 1,
+                ReingestEvent::Halted { consecutive } => halted = Some(*consecutive),
+                _ => {}
+            },
+        )
+        .await
+        .expect_err("a failure streak stops the run");
+        assert!(err.to_string().contains("2 failures in a row"), "{err}");
+        assert_eq!(halted, Some(2));
+        assert_eq!(starts, 2, "nothing is sent after the streak");
     })
     .await;
 }
@@ -276,6 +328,7 @@ async fn reingest_sends_each_source_once() {
             None,
             true,
             1,
+            5,
             |_| {},
         )
         .await

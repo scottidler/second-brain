@@ -158,6 +158,7 @@ pub fn parse_metadata(stdout: &[u8]) -> Result<VideoMetadata> {
 
 pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
     log::debug!("yt-dlp: fetching metadata for {url} (timeout={timeout_secs}s)");
+    breaker::check(url)?;
     let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args(["--dump-json", "--no-download", "--no-warnings", url])
         .stdout(std::process::Stdio::piped())
@@ -175,8 +176,10 @@ pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadat
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::error!("yt-dlp metadata failed (exit {}): {stderr}", output.status);
+        breaker::record_failure(url);
         bail!("yt-dlp failed: {stderr}");
     }
+    breaker::record_success();
     log::debug!(
         "yt-dlp: metadata fetch succeeded ({} bytes stdout)",
         output.stdout.len()
@@ -200,6 +203,10 @@ pub async fn fetch_subtitles(url: &str, pipeline: &PipelineConfig) -> Result<Opt
 /// terminated when the timeout future is dropped.
 pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {
     log::debug!("yt-dlp: fetching subtitles for {url}");
+    if let Err(e) = breaker::check(url) {
+        log::warn!("yt-dlp subtitles skipped: {e}");
+        return Ok(None);
+    }
     let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args([
             "--write-auto-sub",
@@ -440,6 +447,7 @@ async fn run_audio_extraction(
     attempt: u32,
 ) -> Result<std::process::Output> {
     log::debug!("yt-dlp: audio extraction attempt {attempt} for {url}");
+    breaker::check(url)?;
     let output_template = format!("{output_dir}/%(id)s.%(ext)s");
     let postprocessor_args = format!("ffmpeg:-threads {ffmpeg_threads} -vn -ac 1 -ar 16000 -b:a 64k");
 
@@ -733,6 +741,7 @@ fn clean_vtt(vtt: &str) -> String {
     result
 }
 
+pub mod breaker;
 pub(crate) mod diagnostics;
 pub mod search;
 use diagnostics::{download_diagnostics, error_summary, is_http_403};

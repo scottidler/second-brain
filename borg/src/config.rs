@@ -214,6 +214,10 @@ impl Default for QueueConfig {
     }
 }
 
+fn deserialize_pause_for<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "pause-for")
+}
+
 fn deserialize_wedged_after<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Duration, D::Error> {
     deserialize_humantime(deserializer, "wedged-after")
 }
@@ -564,6 +568,12 @@ pub struct YoutubeConfig {
     /// Applied only to direct ffmpeg invocations that use a filter graph.
     #[serde(default = "default_ffmpeg_filter_threads")]
     pub ffmpeg_filter_threads: ThreadCount,
+    /// Consecutive failed metadata fetches that pause all YouTube fetches
+    /// (`youtube::breaker`): the signature of YouTube's session rate limit.
+    pub pause_after_failures: u32,
+    /// How long the pause lasts, a humantime string (`30m`).
+    #[serde(deserialize_with = "deserialize_pause_for", serialize_with = "serialize_humantime")]
+    pub pause_for: Duration,
 }
 
 impl Default for YoutubeConfig {
@@ -572,6 +582,8 @@ impl Default for YoutubeConfig {
             slides: YoutubeSlidesConfig::default(),
             ffmpeg_threads: default_ffmpeg_threads(),
             ffmpeg_filter_threads: default_ffmpeg_filter_threads(),
+            pause_after_failures: crate::youtube::breaker::DEFAULT_PAUSE_AFTER_FAILURES,
+            pause_for: crate::youtube::breaker::DEFAULT_PAUSE_FOR,
         }
     }
 }

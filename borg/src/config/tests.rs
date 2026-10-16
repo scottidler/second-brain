@@ -159,6 +159,7 @@ fn test_youtube_config_ffmpeg_thread_args_shape() {
         slides: YoutubeSlidesConfig::default(),
         ffmpeg_threads: ThreadCount::absolute(3),
         ffmpeg_filter_threads: ThreadCount::absolute(5),
+        ..YoutubeConfig::default()
     };
     let args = cfg.ffmpeg_thread_args();
     assert_eq!(args[0], "-threads");
@@ -173,6 +174,7 @@ fn test_youtube_config_yt_dlp_postprocessor_threads_matches_ffmpeg_threads() {
         slides: YoutubeSlidesConfig::default(),
         ffmpeg_threads: ThreadCount::absolute(3),
         ffmpeg_filter_threads: ThreadCount::absolute(5),
+        ..YoutubeConfig::default()
     };
     assert_eq!(cfg.yt_dlp_postprocessor_threads(), 3);
 }
@@ -1164,4 +1166,18 @@ fn tags_canonical_path_is_tilde_expanded_at_load() {
 fn tags_canonical_path_defaults_to_the_shared_location() {
     let cfg: Config = serde_yaml::from_str("{}\n").expect("parse");
     assert_eq!(cfg.tags.canonical_path, vault::paths::canonical_tags());
+}
+
+#[test]
+fn youtube_pause_settings_parse_from_yaml_and_default() {
+    let cfg: YoutubeConfig = serde_yaml::from_str("pause-after-failures: 8\npause-for: 45m\n").expect("parse");
+    assert_eq!(cfg.pause_after_failures, 8);
+    assert_eq!(cfg.pause_for, std::time::Duration::from_secs(45 * 60));
+    let default: YoutubeConfig = serde_yaml::from_str("{}").expect("parse");
+    assert_eq!(
+        default.pause_after_failures,
+        crate::youtube::breaker::DEFAULT_PAUSE_AFTER_FAILURES
+    );
+    assert_eq!(default.pause_for, crate::youtube::breaker::DEFAULT_PAUSE_FOR);
+    assert!(serde_yaml::from_str::<YoutubeConfig>("pause-for: soon\n").is_err());
 }
