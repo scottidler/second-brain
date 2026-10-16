@@ -1431,3 +1431,20 @@ async fn process_url_rejects_a_session_source_at_the_door() {
     assert_eq!(result.failure_stage, Some(FailureStage::IntakeRejected));
     assert!(result.note_path.is_none());
 }
+
+/// A text-only video returned early and left its mp4 and frames in /tmp:
+/// 688 dirs, 40G, in one day of reingest (2026-10-15).
+#[test]
+fn frames_work_dir_is_removed_on_every_early_return() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("vid");
+    std::fs::create_dir_all(dir.join("frames")).expect("mkdir");
+    std::fs::write(dir.join("vid.mp4"), b"x").expect("write");
+    drop(handlers::WorkDirGuard::new(dir.clone()));
+    assert!(!dir.exists(), "dropped guard removes the work dir");
+
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let kept = handlers::WorkDirGuard::new(dir.clone()).keep();
+    assert_eq!(kept, dir);
+    assert!(dir.exists(), "a kept dir is the slide publisher's to remove");
+}

@@ -220,6 +220,37 @@ pub(crate) async fn process_youtube(
 /// All heavy work happens in tempdir under `borg/youtube-frames/<video_id>/`
 /// for replay-friendly debug; the directory survives the function so the
 /// caller can copy slides out of it.
+/// Removes a YouTube frames work dir (the <=720p mp4 plus every extracted
+/// frame) when dropped, unless [`WorkDirGuard::keep`] hands it on. Every early
+/// return of [`try_extract_slides`] used to leave it behind: content filtering
+/// makes most videos text-only, so nearly every ingest leaked one, 40G of
+/// /tmp in a day, until the per-user tmpfs quota failed downloads and writes.
+pub(crate) struct WorkDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl WorkDirGuard {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Hand the dir to a caller that removes it itself (slide publish).
+    pub(crate) fn keep(mut self) -> PathBuf {
+        self.path.take().expect("guard holds its path until kept")
+    }
+}
+
+impl Drop for WorkDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take()
+            && let Err(e) = std::fs::remove_dir_all(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("could not remove frames work dir {}: {e}", path.display());
+        }
+    }
+}
+
 pub(crate) async fn try_extract_slides(
     url: &str,
     _transcript: &str,
@@ -235,6 +266,7 @@ pub(crate) async fn try_extract_slides(
     let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(&video_id);
     let _ = std::fs::remove_dir_all(&work_dir);
     std::fs::create_dir_all(&work_dir).context("create youtube-frames work dir")?;
+    let guard = WorkDirGuard::new(work_dir.clone());
 
     // 1. Download the video. yt-dlp `-f` picks the best mp4 under 720p so
     //    frames are reasonable and disk usage stays small.
@@ -375,7 +407,7 @@ pub(crate) async fn try_extract_slides(
     let pattern_input = slides::render_pattern_input(&manifest);
     let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
     let summary = slides::parse_summary_output(&raw);
-    Ok(Some((manifest, summary, work_dir)))
+    Ok(Some((manifest, summary, guard.keep())))
 }
 
 /// Content-filter Stage-1 path (vision-gated). Runs the pure prefix
