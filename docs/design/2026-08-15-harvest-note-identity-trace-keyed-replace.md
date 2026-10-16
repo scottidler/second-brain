@@ -5,6 +5,15 @@
 **Status:** Implemented
 **Review Passes Completed:** review-panel rounds 1-3 (Architect + Staff Engineer, cross-model). Round 1: 5 must-fix, folded. Round 2: 7 must-fix, folded. Round 3 (delta review of the un-deferrals): 2 must-fix + 3 approved-with-edits, folded. Nothing deferred; no open questions.
 
+> **Amended 2026-10-15 (2667c2e):** `--force` no longer forks. A forced
+> re-harvest, and `sb borg replay --from-stage 2`, still publish under the new
+> id, then remove every other note carrying the same `source:` through rkvr.
+> `--fork` (which requires `--force` on harvest) keeps the old notes, the
+> behavior this doc specified. A month of forced re-harvests had left 96
+> sessions with 2-5 notes each. The nightly harvest's own `FollowUp` notes are
+> unchanged. Lines below that say `--force` forks describe the pre-amendment
+> design.
+
 ## Summary
 
 Every `sb borg replay` of a harvest session trace writes a NEW vault note
@@ -148,8 +157,8 @@ Path staleness is the common case.
 - Replacement preserves cortex-owned frontmatter and user-owned state (`status:`).
 - Replacement preserves the existing filename, so wikilinks keep resolving.
 - Resolution survives cortex having moved the note between directories.
-- A genuine `FollowUp`, and `--force`, still fork a new note. Notes are immutable
-  once published; only a replay of the SAME trace replaces.
+- A genuine `FollowUp` still forks a new note. `--force` replaces the session's
+  older notes unless `--fork` is passed (amended 2026-10-15, 2667c2e).
 - A crash between "note landed" and "watermark saved" does not fork on the next run.
 - Retire the surplus notes by an identity rule, not a similarity rule, without
   breaking a single inbound wikilink.
@@ -421,7 +430,7 @@ Acceptance:
 - [ ] Filename unchanged when the model emits a different slug; `slug:` equals
       the filename stem afterwards.
 - [ ] A note moved `inbox/` -> `notes/` is resolved and its receipts row updated.
-- [ ] A `FollowUp` and a `--force` re-harvest each produce a second, distinct note.
+- [ ] A `FollowUp` and a `--force --fork` re-harvest each produce a second, distinct note.
 - [ ] A trace whose note was deleted republishes cleanly as new.
 
 **Regression guards (required, not optional).** Prior attempt 1 was killed by a
