@@ -248,7 +248,7 @@ fn repo_metadata_from_fetch_copies_relevant_fields() {
 }
 
 #[test]
-fn video_metadata_from_yt_dlp_maps_uploader_and_duration() {
+fn video_metadata_from_youtube_maps_uploader_and_duration() {
     let src = crate::youtube::VideoMetadata {
         title: "Talk title".to_string(),
         uploader: "Some Channel".to_string(),
@@ -260,14 +260,14 @@ fn video_metadata_from_yt_dlp_maps_uploader_and_duration() {
         channel_url: None,
         published_at: None,
     };
-    let mapped = video_metadata_from_yt_dlp(&src);
+    let mapped = video_metadata_from_youtube(&src);
     assert_eq!(mapped.channel.as_deref(), Some("Some Channel"));
     assert_eq!(mapped.duration_seconds, Some(612));
     assert!(mapped.published_at.is_none());
 }
 
 #[test]
-fn video_metadata_from_yt_dlp_drops_sentinel_uploader() {
+fn video_metadata_from_youtube_drops_sentinel_uploader() {
     let src = crate::youtube::VideoMetadata {
         title: String::new(),
         uploader: "Unknown".to_string(),
@@ -279,7 +279,7 @@ fn video_metadata_from_yt_dlp_drops_sentinel_uploader() {
         channel_url: None,
         published_at: None,
     };
-    let mapped = video_metadata_from_yt_dlp(&src);
+    let mapped = video_metadata_from_youtube(&src);
     assert!(mapped.channel.is_none());
     assert!(mapped.duration_seconds.is_none());
 }
@@ -749,7 +749,7 @@ fn persist_thread_transcript_writes_md_and_yml() {
 async fn fixture_video_renders_channel_handle_frontmatter() {
     let src = crate::youtube::parse_metadata(include_bytes!("../../youtube/fixtures/dump-json-53xycpcgqwe.json"))
         .expect("parse fixture");
-    let mapped = video_metadata_from_yt_dlp(&src);
+    let mapped = video_metadata_from_youtube(&src);
     assert_eq!(mapped.published_at.as_deref(), Some("2025-11-21"));
 
     let fake = Arc::new(FakeFabric::new());

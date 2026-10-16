@@ -1076,7 +1076,7 @@ pub struct MigrationConfig {
 #[serde(default, rename_all = "kebab-case")]
 pub struct TextCaptureConfig {}
 
-fn default_links() -> Vec<LinkConfig> {
+pub(crate) fn default_links() -> Vec<LinkConfig> {
     vec![
         LinkConfig {
             name: "shorts".to_string(),

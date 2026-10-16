@@ -45,6 +45,16 @@ impl FetchError {
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::NotFound(_) | Self::NotLive(_))
     }
+
+    /// The error as the pipeline's `eyre::Report`. A yt-dlp arm error comes
+    /// back as the original report, so its receipt reason reads as it did
+    /// before the engine seam (`yt-dlp metadata failed: ...`).
+    pub fn into_report(self) -> eyre::Report {
+        match self {
+            Self::YtDlp(report) => report,
+            other => eyre::Report::new(other),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -106,7 +106,10 @@ pub fn generate_embed_code(video_id: &str, width: usize, height: usize) -> Strin
     )
 }
 
-#[derive(Debug)]
+/// One video's metadata, from either engine: yt-dlp `--dump-json`
+/// ([`parse_metadata`]) or the Data API ([`dataapi`]). Field docs name the
+/// yt-dlp key; `dataapi` documents its own mapping.
+#[derive(Debug, Clone)]
 pub struct VideoMetadata {
     pub title: String,
     pub uploader: String,
@@ -181,14 +184,8 @@ pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadat
 /// One `yt-dlp --dump-json` run, bounded by `timeout_secs`. No breaker
 /// bookkeeping, so the breaker's own canary fetch can use it.
 async fn run_metadata(url: &str, timeout_secs: u64) -> Result<std::process::Output> {
-    let yt_dlp_fut = TokioCommand::new("yt-dlp")
-        .args(["--dump-json", "--no-download", "--no-warnings", url])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("Failed to spawn yt-dlp - is it installed?")?
-        .wait_with_output();
+    let yt_dlp_fut = spawn::yt_dlp(&["--dump-json", "--no-download", "--no-warnings", url])
+        .context("Failed to spawn yt-dlp - is it installed?")?;
 
     match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
         Ok(res) => res.context("Failed to wait for yt-dlp"),
@@ -196,14 +193,10 @@ async fn run_metadata(url: &str, timeout_secs: u64) -> Result<std::process::Outp
     }
 }
 
-pub async fn fetch_subtitles(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {
-    let raw = fetch_subtitles_raw(url, pipeline).await?;
-    Ok(raw.map(|v| clean_vtt(&v)))
-}
-
-/// Fetch the raw VTT for a video (timestamps preserved). Used by the
-/// frame-aware slide pipeline to bind transcript snippets to per-slide
-/// time ranges. Returns None when no English captions are available.
+/// Fetch the raw VTT for a video (timestamps preserved). The yt-dlp engine
+/// arm calls it once per ingest: its segments bind slides and anchor claims,
+/// and its cleaned text is the transcript when fabric has none. Returns None
+/// when no English captions are available.
 ///
 /// Bounded by `pipeline.yt_dlp_timeout_secs` (yt-dlp child) and
 /// `pipeline.subtitle_fetch_timeout_secs` (the subtitle-URL HTTP fetch).
@@ -215,24 +208,19 @@ pub async fn fetch_subtitles_raw(url: &str, pipeline: &PipelineConfig) -> Result
         log::warn!("yt-dlp subtitles skipped: {e}");
         return Ok(None);
     }
-    let yt_dlp_fut = TokioCommand::new("yt-dlp")
-        .args([
-            "--write-auto-sub",
-            "--sub-lang",
-            &SUBTITLE_LANG_PREFERENCE.join(","),
-            "--sub-format",
-            "vtt",
-            "--skip-download",
-            "--print",
-            "%(requested_subtitles)j",
-            url,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("Failed to spawn yt-dlp - is it installed?")?
-        .wait_with_output();
+    let sub_langs = SUBTITLE_LANG_PREFERENCE.join(",");
+    let yt_dlp_fut = spawn::yt_dlp(&[
+        "--write-auto-sub",
+        "--sub-lang",
+        &sub_langs,
+        "--sub-format",
+        "vtt",
+        "--skip-download",
+        "--print",
+        "%(requested_subtitles)j",
+        url,
+    ])
+    .context("Failed to spawn yt-dlp - is it installed?")?;
 
     let output = match tokio::time::timeout(Duration::from_secs(pipeline.yt_dlp_timeout_secs), yt_dlp_fut).await {
         Ok(res) => res.context("Failed to wait for yt-dlp")?,
@@ -464,26 +452,20 @@ async fn run_audio_extraction(
     // std::process::Command::output() here could not be interrupted even by
     // the pipeline hard timeout, since that only cancels the future, not a
     // blocked OS thread.
-    let yt_dlp_fut = TokioCommand::new("yt-dlp")
-        .args([
-            "-v",
-            "-x",
-            "--audio-format",
-            "mp3",
-            // Whisper-tuned ffmpeg args: drop video, mono, 16kHz, 64kbps.
-            // `-threads` capped per youtube.ffmpeg-threads config.
-            "--postprocessor-args",
-            &postprocessor_args,
-            "-o",
-            &output_template,
-            url,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("Failed to spawn yt-dlp for audio extraction")?
-        .wait_with_output();
+    let yt_dlp_fut = spawn::yt_dlp(&[
+        "-v",
+        "-x",
+        "--audio-format",
+        "mp3",
+        // Whisper-tuned ffmpeg args: drop video, mono, 16kHz, 64kbps.
+        // `-threads` capped per youtube.ffmpeg-threads config.
+        "--postprocessor-args",
+        &postprocessor_args,
+        "-o",
+        &output_template,
+        url,
+    ])
+    .context("Failed to spawn yt-dlp for audio extraction")?;
 
     let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
         Ok(res) => res.context("Failed to run yt-dlp for audio extraction")?,
@@ -752,10 +734,13 @@ fn clean_vtt(vtt: &str) -> String {
 pub mod breaker;
 pub mod dataapi;
 pub(crate) mod diagnostics;
+pub mod engine;
 pub mod error;
 pub mod gemini;
 pub mod search;
+pub(crate) mod spawn;
 use diagnostics::{download_diagnostics, error_summary, is_http_403};
+pub use engine::VideoFetch;
 pub use error::FetchError;
 pub use search::{ChannelSearchError, search_channel};
 

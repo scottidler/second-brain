@@ -65,6 +65,9 @@ pub(crate) struct YouTubeResult {
     /// successfully and produced a non-text-only shape. Stage 3 publish
     /// happens in `process_url_inner` so the slug is known.
     slide_payload: Option<SlidePayload>,
+    /// The `youtube.fallback` engine produced the fetch: the primary engine
+    /// errored, so the receipt is degraded.
+    fell_back: bool,
 }
 
 #[derive(Debug)]
@@ -738,9 +741,11 @@ async fn process_url_inner(
     // whose `Distilled.transcript` does not carry it: the repo README and the
     // thread markdown. Video and article leave it `None`.
     let mut archive_source_md: Option<String> = None;
+    let mut youtube_fell_back = false;
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
+        youtube_fell_back = yt_result.fell_back;
         let yt_title = yt_result.title;
         (
             yt_title.clone(),
@@ -1206,12 +1211,17 @@ async fn process_url_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
-        // Degraded when the L2 distiller fell back, an enumeration fell short
-        // of its declared count (a resolved design decision), OR
-        // the tag classifier errored and the receipt needs to say so (tags-only design doc:
-        // "the receipt is degraded=true, and the note is still published").
-        degraded: distilled.meta.validation.is_degraded() || tags_degraded,
+        degraded: receipt_degraded(&distilled, tags_degraded, youtube_fell_back),
     })
+}
+
+/// A URL receipt is degraded when the L2 distiller fell back, an enumeration
+/// fell short of its declared count (a resolved design decision), the tag
+/// classifier errored (tags-only design doc: "the receipt is degraded=true,
+/// and the note is still published"), OR the YouTube fetch came from the
+/// `youtube.fallback` engine (youtube-gemini-engine design doc).
+pub(crate) fn receipt_degraded(distilled: &vault::distilled::Distilled, tags_degraded: bool, fell_back: bool) -> bool {
+    distilled.meta.validation.is_degraded() || tags_degraded || fell_back
 }
 
 /// Whether a file-based document is a PDF or a generic document (docx, pptx, etc.).

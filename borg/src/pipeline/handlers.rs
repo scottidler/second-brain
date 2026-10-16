@@ -71,95 +71,30 @@ pub(crate) fn extract_article_title(article_md: &str, url: &str) -> String {
     url.to_string()
 }
 
-/// Unified YouTube processing: yt-dlp for metadata, fabric for transcript+summary.
-/// Metadata and transcript run concurrently. Fabric is optional (gates transcript+summary).
-/// See docs/design/2026-03-22-youtube-metadata-pipeline-redesign.md.
+/// Unified YouTube processing: one engine fetch (`youtube::engine`) for
+/// metadata and transcript, then the optional slides path, then the video
+/// distiller. Nothing downstream fetches the video's metadata or captions again.
+/// See docs/design/2026-10-16-youtube-gemini-engine.md.
 pub(crate) async fn process_youtube(
     url: &str,
     config: &Config,
     trace_id: &str,
     capture_note: Option<&str>,
 ) -> Result<YouTubeResult> {
-    // Heavy permit: yt-dlp + fabric + (optional) ffmpeg slides + vision all run
-    // under this handler. Held for the lifetime of the function.
+    // Heavy permit: yt-dlp + fabric + gemini + (optional) ffmpeg slides +
+    // vision all run under this handler. Held for the lifetime of the function.
     log::debug!("process_youtube: acquiring heavy permit (url={url})");
     let _heavy_permit = permits::HEAVY_PERMITS.acquire().await;
     log::debug!("process_youtube: heavy permit acquired (url={url})");
 
-    let use_fabric = fabric::is_available(&config.fabric);
-
-    // Run metadata (yt-dlp) and transcript (fabric) concurrently.
-    // These are independent - yt-dlp scrapes the page, fabric calls the captions API.
-    let url_owned = url.to_string();
-    let yt_dlp_timeout = config.pipeline.yt_dlp_timeout_secs;
-    let metadata_future = youtube::fetch_metadata(&url_owned, yt_dlp_timeout);
-
-    let transcript_future = async {
-        if use_fabric {
-            let config_fabric = config.fabric.clone();
-            let config_pipeline = config.pipeline.clone();
-            let url = url_owned.clone();
-            let result =
-                tokio::task::spawn_blocking(move || fabric::fetch_transcript(&url, &config_fabric, &config_pipeline))
-                    .await
-                    .unwrap_or_else(|e| {
-                        log::warn!("Fabric transcript task panicked: {e}");
-                        Ok(String::new())
-                    });
-            result.unwrap_or_else(|e| {
-                log::warn!("Fabric transcript failed: {e:#}");
-                String::new()
-            })
-        } else {
-            String::new()
-        }
-    };
-
-    let (metadata_result, fabric_transcript) = tokio::join!(metadata_future, transcript_future);
-    let metadata = metadata_result.context("yt-dlp metadata failed")?;
-
-    // Transcript fallback chain: fabric -> yt-dlp subtitles -> audio extraction + Groq
-    let transcript = if !fabric_transcript.is_empty() {
-        fabric_transcript
-    } else {
-        if use_fabric {
-            log::warn!("Fabric returned empty transcript, falling back to yt-dlp subtitles");
-        }
-        match youtube::fetch_subtitles(url, &config.pipeline).await? {
-            Some(subs) => subs,
-            None => {
-                log::warn!("No subtitles available, falling back to audio extraction + Groq");
-                let temp_dir = std::env::temp_dir().join("obsidian-borg");
-                std::fs::create_dir_all(&temp_dir)?;
-                let audio_path = youtube::extract_audio(
-                    url,
-                    &temp_dir.to_string_lossy(),
-                    config.youtube.yt_dlp_postprocessor_threads(),
-                    config.pipeline.yt_dlp_timeout_secs,
-                )
-                .await?;
-                let audio_bytes = std::fs::read(&audio_path)?;
-                let _ = std::fs::remove_file(&audio_path);
-
-                let groq_key = crate::config::resolve_secret(&config.groq.api_key).ok();
-                let client = TranscriptionClient::new(
-                    &config.transcriber.url,
-                    groq_key,
-                    &config.groq.model,
-                    config.transcriber.timeout_secs,
-                )?;
-                let response = client.transcribe(audio_bytes, AudioFormat::Mp3, None).await?;
-                response.text
-            }
-        }
-    };
+    let video = fetch_video(url, config, trace_id).await?;
 
     // Frame-aware path: when enabled, download the video, extract frames,
     // segment slides, and (when the proposed shape is non-text-only) run
     // the slide-aware Fabric pattern instead of the flat summarizer.
     let mut slide_payload: Option<SlidePayload> = None;
     if config.youtube.slides.enabled {
-        match try_extract_slides(url, &transcript, metadata.duration_secs, config).await {
+        match try_extract_slides(url, &video.segments, video.metadata.duration_secs, config).await {
             Ok(Some((manifest, summary, slides_source_root))) => {
                 slide_payload = Some(SlidePayload {
                     manifest,
@@ -176,26 +111,25 @@ pub(crate) async fn process_youtube(
         }
     }
 
-    // Replace the legacy `fabric::summarize` prose
-    // path with the structured video distiller. The distiller re-fetches
-    // raw VTT internally so claims carry real timestamp anchors; the
-    // `transcript` we already have above is the fallback when VTT fetch
-    // fails. When the slide-aware path produced a body, we still run the
-    // distiller (to populate `cortex-video-*` frontmatter, tags, and the
-    // summary used by the quality gate) but the slide body wins at render
-    // time - that decision lives in `process_url_inner`.
+    // The structured video distiller. It reads the fetch above (timestamped
+    // segments when there are any, else the plain transcript), so claims
+    // carry real timestamp anchors without a second fetch. When the
+    // slide-aware path produced a body, we still run the distiller (to
+    // populate `cortex-video-*` frontmatter, tags, and the summary used by the
+    // quality gate) but the slide body wins at render time - that decision
+    // lives in `process_url_inner`.
     let distilled = crate::stages::distill::distill_for_publish_video(
         &config.fabric,
-        &config.pipeline,
         &config.staging,
         trace_id,
         url,
-        &transcript,
-        Some(metadata.title.as_str()),
+        &video,
         capture_note,
     )
     .await;
 
+    let fell_back = video.fell_back;
+    let metadata = video.metadata;
     let content_type = ContentType::YouTube {
         uploader: metadata.uploader,
         duration_secs: metadata.duration_secs,
@@ -208,7 +142,52 @@ pub(crate) async fn process_youtube(
         description: metadata.description,
         yt_tags: metadata.tags,
         slide_payload,
+        fell_back,
     })
+}
+
+/// Fetch through `youtube.engine`, applying `youtube.fallback`:
+/// - a permanent error (`NotFound`, `NotLive`) fails with no fallback;
+/// - any other error runs the fallback when one is set, and marks the fetch
+///   `fell_back` so the receipt is degraded;
+/// - otherwise the error fails the ingest (`fetch-failed`).
+pub(crate) async fn fetch_video(url: &str, config: &Config, trace_id: &str) -> Result<youtube::VideoFetch> {
+    let engine = config.youtube.engine;
+    log::debug!(
+        "[{trace_id}] fetch_video: engine={} fallback={:?} url={url}",
+        engine.as_str(),
+        config.youtube.fallback.map(|f| f.as_str())
+    );
+    let primary_err = match youtube::engine::fetch(engine, url, config).await {
+        Ok(video) => return Ok(video),
+        Err(e) => e,
+    };
+    if primary_err.is_permanent() {
+        log::warn!(
+            "[{trace_id}] youtube engine {} failed permanently, no fallback: {primary_err}",
+            engine.as_str()
+        );
+        return Err(primary_err.into_report());
+    }
+    let Some(fallback) = config.youtube.fallback else {
+        return Err(primary_err.into_report());
+    };
+    log::warn!(
+        "[{trace_id}] youtube engine {} failed: {primary_err}; falling back to {}",
+        engine.as_str(),
+        fallback.as_str()
+    );
+    match youtube::engine::fetch(fallback, url, config).await {
+        Ok(mut video) => {
+            video.fell_back = true;
+            Ok(video)
+        }
+        Err(fallback_err) => Err(fallback_err.into_report().wrap_err(format!(
+            "youtube engine {} failed ({primary_err}); fallback {} failed",
+            engine.as_str(),
+            fallback.as_str()
+        ))),
+    }
 }
 
 /// Frame-aware ingestion path. Downloads the video, extracts frames, runs
@@ -253,7 +232,7 @@ impl Drop for WorkDirGuard {
 
 pub(crate) async fn try_extract_slides(
     url: &str,
-    _transcript: &str,
+    transcript_pairs: &[(f64, String)],
     duration_secs: f64,
     config: &Config,
 ) -> Result<Option<(crate::slides::SlideManifest, crate::slides::SummaryOutput, PathBuf)>> {
@@ -273,26 +252,20 @@ pub(crate) async fn try_extract_slides(
     let video_path = work_dir.join(format!("{video_id}.mp4"));
     let output_template = video_path.to_string_lossy().to_string();
     youtube::breaker::check(url)?;
-    let dl_fut = tokio::process::Command::new("yt-dlp")
-        .args([
-            // Verbose for the same 403 diagnostics as audio extraction
-            // (youtube::diagnostics); this download 403'd on most ingests
-            // 2026-09-02..09-22 and the log only ever showed the ERROR line.
-            "-v",
-            "-f",
-            "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
-            "--merge-output-format",
-            "mp4",
-            "-o",
-            &output_template,
-            url,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("Failed to spawn yt-dlp for video download")?
-        .wait_with_output();
+    let dl_fut = youtube::spawn::yt_dlp(&[
+        // Verbose for the same 403 diagnostics as audio extraction
+        // (youtube::diagnostics); this download 403'd on most ingests
+        // 2026-09-02..09-22 and the log only ever showed the ERROR line.
+        "-v",
+        "-f",
+        "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        &output_template,
+        url,
+    ])
+    .context("Failed to spawn yt-dlp for video download")?;
     let yt_dlp_timeout = config.pipeline.yt_dlp_timeout_secs;
     let dl = match tokio::time::timeout(std::time::Duration::from_secs(yt_dlp_timeout), dl_fut).await {
         Ok(res) => res.context("yt-dlp video download")?,
@@ -336,22 +309,12 @@ pub(crate) async fn try_extract_slides(
         return Ok(None);
     }
 
-    // 3. Fetch RAW VTT subtitles (timestamps preserved) and parse into pairs
-    //    so transcript binding can match each cue to its slide's time range.
-    //    The Fabric `--transcript` output that Stage 0 fetched is already
-    //    timestamp-stripped; we need the raw form here.
-    let transcript_pairs = match youtube::fetch_subtitles_raw(url, &config.pipeline).await {
-        Ok(Some(vtt)) => youtube::parse_vtt_segments(&vtt),
-        Ok(None) => {
-            log::warn!("No raw VTT available - slides will lack transcript context");
-            Vec::new()
-        }
-        Err(e) => {
-            log::warn!("VTT fetch for slide binding failed: {e:#}");
-            Vec::new()
-        }
-    };
-    log::debug!("Parsed {} VTT cues for slide binding", transcript_pairs.len());
+    // 3. Transcript binding uses the engine fetch's timestamped segments, the
+    //    same under both engines; no second caption fetch.
+    if transcript_pairs.is_empty() {
+        log::warn!("No timestamped transcript - slides will lack transcript context");
+    }
+    log::debug!("{} transcript segments for slide binding", transcript_pairs.len());
 
     // 4. Segment. Two paths:
     //    - content-filter DISABLED: `segment_with_pairs` runs exactly as before
@@ -368,7 +331,7 @@ pub(crate) async fn try_extract_slides(
             url,
             duration_secs,
             &frames,
-            &transcript_pairs,
+            transcript_pairs,
             &work_dir,
             config,
         )
@@ -379,7 +342,7 @@ pub(crate) async fn try_extract_slides(
             url,
             duration_secs,
             &frames,
-            &transcript_pairs,
+            transcript_pairs,
             &work_dir,
             &config.youtube.slides,
             config.pipeline.ocr_timeout_secs,

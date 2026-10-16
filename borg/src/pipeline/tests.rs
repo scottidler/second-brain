@@ -1479,3 +1479,5 @@ fn frames_work_dir_is_removed_on_every_early_return() {
     assert_eq!(kept, dir);
     assert!(dir.exists(), "a kept dir is the slide publisher's to remove");
 }
+
+mod youtube;

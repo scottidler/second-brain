@@ -64,6 +64,10 @@ Systemd unit files are NOT in the repo. They are written into `~/.config/systemd
 - **Build scripts:** `sb/build.rs` is the only build script in the workspace; it emits `GIT_DESCRIBE` per the scaffold pattern (`~/repos/scottidler/scaffold/build.rs`). Library crates (`borg`, `cortex`, `oracle`, `vault`, `distillers`) have no build script. sb threads its versions into the libraries through public APIs (`borg::serve_init(config, env!("GIT_DESCRIBE"))` for `/health`; `extension::{stage, sign, install, show}(..., env!("CARGO_PKG_VERSION"), ...)` for the .xpi).
 - **Binary name:** `sb` (one binary, subcommands `borg`/`cortex`/`oracle`/`status`/`doctor`/`bootstrap`). The borg/cortex/oracle crates are lib-only.
 
+## YouTube fetch engine
+
+`youtube.engine: yt-dlp | gemini` (default `yt-dlp`) selects how borg gets a video's metadata and transcript; `youtube.fallback` (default none, must differ) runs the other engine when the selected one errors (`docs/design/2026-10-16-youtube-gemini-engine.md`). The seam is `borg::youtube::engine::fetch`, called once per ingest by `pipeline::process_youtube`; its `VideoFetch` feeds both the slides transcript binding and `distill_for_publish_video`, so nothing re-fetches metadata or captions downstream. The `gemini` engine is the YouTube Data API (`videos.list` + `channels.list`) plus Gemini's Interactions API over clip windows, with zero yt-dlp calls; it **never touches the yt-dlp breaker** (`youtube/breaker.rs` stays yt-dlp's). A permanent error (Data API `items: []` -> `NotFound`, live/upcoming -> `NotLive`) fails `fetch-failed` with no fallback; any other error runs the fallback and the receipt is `degraded`. Under `engine: gemini` the only yt-dlp call left is the slides mp4 download (best-effort, as before). Channel backfill (`sb borg channels --backfill`) still uses yt-dlp metadata.
+
 ## Hybrid retrieval (Doc 2)
 
 Oracle's `knowledge_search` accepts an optional per-call `mode` parameter (the legacy single-path override):

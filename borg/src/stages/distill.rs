@@ -17,7 +17,7 @@
 //! value that Stage 3 (publish) renders into the vault markdown file via
 //! `distillers::render`; VaultWatcher then triggers `index_vault`.
 
-use crate::config::{FabricConfig, PipelineConfig, StagingConfig};
+use crate::config::{FabricConfig, StagingConfig};
 use crate::github::{GitHubFetcher, RepoFetch};
 use crate::stages::artifact::{ArtifactStore, FsArtifactStore};
 use crate::types::{IngestKind, TraceMeta};
@@ -43,10 +43,10 @@ pub fn repo_metadata_from_fetch(meta: &crate::github::RepoMetadata) -> RepoMetad
     }
 }
 
-/// Translate borg's yt-dlp metadata into the distillers-crate `VideoMetadata`.
-/// `channel` is yt-dlp's `uploader`; sentinel "Unknown" maps to None so the
+/// Translate borg's YouTube metadata (either engine) into the distillers-crate
+/// `VideoMetadata`. `channel` is the `uploader`; sentinel "Unknown" maps to None so the
 /// distiller doesn't write that into frontmatter.
-pub fn video_metadata_from_yt_dlp(meta: &crate::youtube::VideoMetadata) -> VideoMetadata {
+pub fn video_metadata_from_youtube(meta: &crate::youtube::VideoMetadata) -> VideoMetadata {
     let channel = match meta.uploader.as_str() {
         "" | "Unknown" => None,
         other => Some(other.to_string()),
@@ -63,7 +63,7 @@ pub fn video_metadata_from_yt_dlp(meta: &crate::youtube::VideoMetadata) -> Video
         channel_id: meta.channel_id.clone(),
         channel_handle: meta.channel_handle.clone(),
         channel_url: meta.channel_url.clone(),
-        // Stays empty here: this is a pure yt-dlp field mapper. The
+        // Stays empty here: this is a pure field mapper. The
         // description scan that populates `repos` runs at the
         // `distill_for_publish_video` seam where `metadata.description` is in
         // scope (see borg::github::extract_repo_slugs).
@@ -716,75 +716,41 @@ pub async fn distill_for_publish_repo(
     }
 }
 
-/// Run the YouTube distiller. Fetches yt-dlp metadata
-/// and raw VTT subtitles in parallel so the distiller sees real timestamps,
-/// rather than the legacy transcript that strips them. Persists
-/// `distilled.yml` on success. On any error returns a `fallback_distilled`
-/// using the supplied `transcript_fallback` so publish always has a payload
-/// even when yt-dlp / VTT parsing fails.
+/// Run the YouTube distiller over the ingest's one engine fetch. The
+/// timestamped segments are the distiller's transcript, so claims carry real
+/// timestamp anchors; with no segments the plain `video.transcript` stands in.
+/// Persists `distilled.yml` on success. On a dispatch error returns a
+/// `fallback_distilled` so publish always has a payload.
 pub async fn distill_for_publish_video(
     fabric: &FabricConfig,
-    pipeline: &PipelineConfig,
     staging: &StagingConfig,
     trace_id: &str,
     url: &str,
-    transcript_fallback: &str,
-    title_hint: Option<&str>,
+    video: &crate::youtube::VideoFetch,
     capture_note: Option<&str>,
 ) -> Distilled {
-    log::debug!("distill_for_publish_video: trace={trace_id} url={url}");
+    log::debug!(
+        "distill_for_publish_video: trace={trace_id} url={url} engine={} segments={}",
+        video.engine.as_str(),
+        video.segments.len()
+    );
 
-    let yt_dlp_timeout = pipeline.yt_dlp_timeout_secs;
-    let metadata_future = crate::youtube::fetch_metadata(url, yt_dlp_timeout);
-    let subtitles_future = crate::youtube::fetch_subtitles_raw(url, pipeline);
-    let (metadata_result, subs_result) = tokio::join!(metadata_future, subtitles_future);
-
-    let metadata = match metadata_result {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("[{trace_id}] distill_for_publish_video: yt-dlp metadata failed: {e:#}; using fallback");
-            return distillers::fallback_distilled(
-                "distill-video-v1",
-                "yt-dlp-metadata-error",
-                transcript_fallback,
-                None,
-                &fabric.model,
-            );
-        }
-    };
-    let mut video_metadata = video_metadata_from_yt_dlp(&metadata);
+    let metadata = &video.metadata;
+    let mut video_metadata = video_metadata_from_youtube(metadata);
     // Harvest owner/repo slugs from the description here, at the seam where
-    // `metadata.description` is in scope - keeping video_metadata_from_yt_dlp a
-    // pure yt-dlp field mapper (see borg::github::extract_repo_slugs).
+    // `metadata.description` is in scope - keeping video_metadata_from_youtube a
+    // pure field mapper (see borg::github::extract_repo_slugs).
     video_metadata.repos = crate::github::extract_repo_slugs(&metadata.description);
-    let transcript = match subs_result {
-        Ok(Some(vtt)) => {
-            let segments = crate::youtube::parse_vtt_segments(&vtt);
-            if segments.is_empty() {
-                log::warn!("[{trace_id}] distill_for_publish_video: empty VTT segments; using transcript_fallback");
-                transcript_fallback.to_string()
-            } else {
-                render_timestamped_transcript(&segments)
-            }
-        }
-        Ok(None) => {
-            log::warn!("[{trace_id}] distill_for_publish_video: no subtitles available; using transcript_fallback");
-            transcript_fallback.to_string()
-        }
-        Err(e) => {
-            log::warn!(
-                "[{trace_id}] distill_for_publish_video: subtitle fetch failed: {e:#}; using transcript_fallback"
-            );
-            transcript_fallback.to_string()
-        }
+    let transcript = if video.segments.is_empty() {
+        log::warn!("[{trace_id}] distill_for_publish_video: no timestamped segments; using the plain transcript");
+        video.transcript.clone()
+    } else {
+        render_timestamped_transcript(&video.segments)
     };
 
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
-    let resolved_title = title_hint
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| metadata.title.clone());
+    let resolved_title = metadata.title.clone();
     let mut distilled = match stage
         .distill_with_video_metadata(
             IngestKind::YoutubeUrl,
