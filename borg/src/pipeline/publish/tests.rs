@@ -249,3 +249,88 @@ fn preserved_cortex_bool_and_float_scalars_survive_reingest_typed() {
         std::fs::write(&note, &written).unwrap();
     }
 }
+
+#[test]
+fn test_find_note_by_source_in_notes_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    let notes = vault.join("notes");
+    std::fs::create_dir_all(&notes).expect("mkdir");
+
+    let note_content = "---\ntitle: Test\nsource: \"https://example.com/article\"\n---\nBody.\n";
+    std::fs::write(notes.join("test-article.md"), note_content).expect("write");
+
+    let found = find_note_by_source(vault, "https://example.com/article");
+    assert!(found.is_some(), "should find note by source URL");
+    assert_eq!(found.unwrap().file_name().unwrap().to_str().unwrap(), "test-article.md");
+}
+
+/// 2,073 vault notes store `source:` bare. A reingest that missed them published
+/// `-2` copies beside the originals (2026-10-15).
+#[test]
+fn test_find_note_by_source_matches_bare_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    let notes = vault.join("notes");
+    std::fs::create_dir_all(&notes).expect("mkdir");
+    std::fs::write(
+        notes.join("shorts.md"),
+        "---\ntitle: Shorts\nsource: https://www.youtube.com/shorts/RmmQRV3tdmY\n---\nBody.\n",
+    )
+    .expect("write");
+    std::fs::write(
+        notes.join("decoy.md"),
+        "---\ntitle: Decoy\nsource: https://www.youtube.com/shorts/RmmQRV3tdmY-other\n---\nsource: https://example.com/body-only\n",
+    )
+    .expect("write");
+
+    let found = find_note_by_source(vault, "https://www.youtube.com/shorts/RmmQRV3tdmY").expect("bare source found");
+    assert_eq!(found.file_name().unwrap(), "shorts.md");
+    assert!(
+        find_note_by_source(vault, "https://example.com/body-only").is_none(),
+        "a source: line in the body is not the note's source"
+    );
+}
+
+#[test]
+fn test_find_note_by_source_in_inbox() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    let inbox = vault.join("inbox");
+    std::fs::create_dir_all(&inbox).expect("mkdir");
+
+    let note_content = "---\ntitle: Inbox Note\nsource: \"https://example.com/inbox-item\"\n---\nBody.\n";
+    std::fs::write(inbox.join("inbox-item.md"), note_content).expect("write");
+
+    let found = find_note_by_source(vault, "https://example.com/inbox-item");
+    assert!(found.is_some(), "should find note in inbox/");
+    assert!(found.unwrap().starts_with(&inbox), "found path should be in inbox/");
+}
+
+#[test]
+fn test_find_note_by_source_not_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    let notes = vault.join("notes");
+    std::fs::create_dir_all(&notes).expect("mkdir");
+
+    let note_content = "---\ntitle: Other\nsource: \"https://other.com\"\n---\nBody.\n";
+    std::fs::write(notes.join("other.md"), note_content).expect("write");
+
+    let found = find_note_by_source(vault, "https://example.com/missing");
+    assert!(found.is_none(), "should not find non-matching source");
+}
+
+#[test]
+fn test_find_note_by_source_skips_dotfiles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = dir.path();
+    let hidden = vault.join(".obsidian");
+    std::fs::create_dir_all(&hidden).expect("mkdir");
+
+    let note_content = "---\nsource: \"https://example.com/hidden\"\n---\n";
+    std::fs::write(hidden.join("config.md"), note_content).expect("write");
+
+    let found = find_note_by_source(vault, "https://example.com/hidden");
+    assert!(found.is_none(), "should skip dot-prefixed directories");
+}

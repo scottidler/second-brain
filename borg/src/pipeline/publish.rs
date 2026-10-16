@@ -84,12 +84,14 @@ pub fn expand_vault_root(path: &str) -> PathBuf {
 /// Scan the vault for a note whose `source:` frontmatter matches the given URL.
 /// Returns the path to the note file if found. This is more reliable than the
 /// ledger's stored path because cortex may have moved the file after ingestion.
+/// The vault note whose frontmatter `source:` is `source_url`, written quoted or
+/// bare. Matching only the quoted form missed the 2,073 notes that store it bare,
+/// so a reingest of one published a `-2` copy beside it.
 pub(crate) fn find_note_by_source(vault_root: &std::path::Path, source_url: &str) -> Option<PathBuf> {
-    let needle = format!("source: \"{source_url}\"");
-    find_note_by_source_recursive(vault_root, &needle)
+    find_note_by_source_recursive(vault_root, source_url)
 }
 
-pub(crate) fn find_note_by_source_recursive(dir: &std::path::Path, needle: &str) -> Option<PathBuf> {
+pub(crate) fn find_note_by_source_recursive(dir: &std::path::Path, source_url: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -99,21 +101,11 @@ pub(crate) fn find_note_by_source_recursive(dir: &std::path::Path, needle: &str)
             if name.starts_with('.') || name == "templates" {
                 continue;
             }
-            if let Some(found) = find_note_by_source_recursive(&path, needle) {
+            if let Some(found) = find_note_by_source_recursive(&path, source_url) {
                 return Some(found);
             }
-        } else if vault::note::is_note_file(&path) {
-            // Quick check: read first 2KB (frontmatter is always at the top)
-            if let Ok(file) = std::fs::File::open(&path) {
-                use std::io::Read;
-                let mut buf = vec![0u8; 2048];
-                let mut reader = std::io::BufReader::new(file);
-                let n = reader.read(&mut buf).unwrap_or(0);
-                let header = String::from_utf8_lossy(&buf[..n]);
-                if header.contains(needle) {
-                    return Some(path);
-                }
-            }
+        } else if vault::note::is_note_file(&path) && read_note_source(&path).as_deref() == Some(source_url) {
+            return Some(path);
         }
     }
     None
@@ -161,16 +153,21 @@ pub(crate) fn find_note_by_ledger_filename(
     Ok(None)
 }
 
-/// Read the `source:` field from a note's frontmatter, quoted or bare.
+/// Read the `source:` field from a note's frontmatter, quoted or bare. Only the
+/// frontmatter block counts: a `source:` line in the body is not the note's.
 fn read_note_source(path: &Path) -> Option<String> {
     use std::io::Read;
     let mut buf = vec![0u8; 4096];
     let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
     let header = String::from_utf8_lossy(&buf[..n]);
-    header
-        .lines()
+    let mut lines = header.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| line.trim_end() != "---")
         .find_map(|line| line.strip_prefix("source:"))
-        .map(|value| value.trim().trim_matches('"').to_string())
+        .map(|value| value.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
 }
 
 /// Read the `date:` field from a note's frontmatter.
