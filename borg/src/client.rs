@@ -321,6 +321,11 @@ pub async fn reingest(
     // Only http(s) sources go back through `/ingest`. A `clyde://` session
     // note is rebuilt by `sb borg replay <hv-trace> --from-stage 2`; posting
     // it here once overwrote 24 session notes with a fetch error's summary.
+    // The ledger appends a row per (re)ingest, so one source can appear many
+    // times; reingest each source once (first row wins: the ledger is newest-first).
+    let mut seen = std::collections::HashSet::new();
+    let entries: Vec<QueriedEntry> = entries.into_iter().filter(|e| seen.insert(e.source.clone())).collect();
+
     let (entries, skipped): (Vec<QueriedEntry>, Vec<QueriedEntry>) = entries
         .into_iter()
         .partition(|e| crate::pipeline::is_fetchable_scheme(&e.source));

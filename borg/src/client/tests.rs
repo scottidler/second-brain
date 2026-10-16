@@ -239,3 +239,50 @@ async fn reingest_jobs_runs_entries_concurrently() {
     })
     .await;
 }
+
+/// The ledger holds one row per (re)ingest; a source listed twice is sent once.
+#[tokio::test]
+async fn reingest_sends_each_source_once() {
+    let data_home = tempfile::TempDir::new().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let ledger_path = ledger::ledger_path().expect("ledger path");
+        for (n, src) in [
+            "https://example.com/a",
+            "https://example.com/a",
+            "https://example.com/b",
+        ]
+        .iter()
+        .enumerate()
+        {
+            ledger::append_entry(
+                &ledger_path,
+                &ledger::LedgerEntry {
+                    date: "2026-10-05".to_string(),
+                    time: "10:00".to_string(),
+                    method: vault::schema::Method::Http,
+                    filename: Some(format!("n{n}.md")),
+                    source: src.to_string(),
+                    trace_id: None,
+                },
+            )
+            .expect("append");
+        }
+        let report = reingest(
+            config_for_daemon(1, DAEMON_TIMEOUT),
+            true,
+            None,
+            None,
+            None,
+            None,
+            true,
+            1,
+            |_| {},
+        )
+        .await
+        .expect("dry run");
+        let sources: Vec<_> = report.would_process.iter().map(|c| c.source.as_str()).collect();
+        assert_eq!(sources.len(), 2, "{sources:?}");
+        assert!(sources.contains(&"https://example.com/a") && sources.contains(&"https://example.com/b"));
+    })
+    .await;
+}
