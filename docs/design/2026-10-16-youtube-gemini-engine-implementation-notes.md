@@ -117,3 +117,17 @@
 - Gemini 5xx twice + `fallback: yt-dlp`: 2 `/interactions` hits, the yt-dlp arm ran (`--dump-json` = 1), `fell_back = true`, and `receipt_degraded` is true. `gemini_5xx_twice_falls_back_to_yt_dlp`.
 - Data API `items: []` + `fallback: yt-dlp`, through `process_content`: receipt `failed` / `fetch-failed`, reason contains `not found`, spawn counter 0, `/interactions` 0. `data_api_not_found_fails_the_receipt_without_fallback`. Mutation check: disabling the permanent-error early return makes this test fail (the fallback published a note).
 - Existing YouTube and distill tests pass, modified only by the `video_metadata_from_youtube` rename.
+
+## Finalization: acceptance-criteria amendment
+
+### Design decisions
+- None.
+
+### Deviations
+- Phase 1 success criterion amended from `cargo test -p borg config::tests::youtube_engine` to `cargo test -p borg --features vault/search --lib config::tests::youtube_engine`. Doc defect, not a code failure: the bare command fails to compile on main 34b6012 because `borg/src/pipeline/tests.rs` uses `vault::search`, gated behind vault's `search` feature (reproduced by the Phase 1 worker with its changes stashed). With the feature, all 14 tests pass.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- None.

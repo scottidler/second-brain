@@ -316,7 +316,8 @@ youtube:
   - `validate`: `window: 0s` errors
   - `validate`: gemini engine + no fallback + empty key errors
 - **Success criteria:**
-  - `cargo test -p borg config::tests::youtube_engine` passes.
+  - `cargo test -p borg --features vault/search --lib config::tests::youtube_engine` passes.
+    - Amended at finalization: the bare `cargo test -p borg ...` does not compile on main (34b6012). `borg/src/pipeline/tests.rs` uses `vault::search`, which sits behind vault's `search` feature. The doc defect is in the command, not the code.
   - `XDG_CONFIG_HOME=<tmp> sb borg log --limit 1`, with `youtube.engine: bogus`, exits non-zero naming the variants.
 
 #### Phase 2: Data API metadata client
