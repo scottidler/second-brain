@@ -129,6 +129,25 @@ youtube:
   pause-after-failures: 5
   pause-for: 30m
   canary-url: https://www.youtube.com/watch?v=jNQXAC9IVRw
+  # Which implementation fetches a video's metadata and transcript.
+  #   engine: yt-dlp | gemini     (default yt-dlp: today's behavior)
+  #   fallback: yt-dlp | gemini   (default none; must differ from engine)
+  # `gemini` reads metadata from the YouTube Data API and the timestamped
+  # transcript from Gemini, with no yt-dlp call. When it errors and `fallback`
+  # is set, the other engine runs and the receipt is marked degraded.
+  # `api-key` is an env var NAME (the daemon gets the values from borg.env),
+  # never the key itself. Durations are humantime. Defaults shown, except
+  # engine/fallback, which are the opt-in.
+  # engine: gemini
+  # fallback: yt-dlp
+  # gemini:
+  #   model: gemini-3.8-flash
+  #   api-key: GEMINI_API_KEY
+  #   window: 30m     # clip length per call, at least 5m
+  #   timeout: 5m     # one call, at least 30s
+  #   budget: 15m     # all windows plus retries, at least timeout
+  # data-api:
+  #   api-key: YOUTUBE_API_KEY
 
 # Where first-party clients (sb borg ingest/reingest/replay/queue/wait, the
 # oracle ingest_queue tool) reach the daemon. `request-timeout` (humantime)

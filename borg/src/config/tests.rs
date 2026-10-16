@@ -1182,3 +1182,154 @@ fn youtube_pause_settings_parse_from_yaml_and_default() {
     assert_eq!(default.canary_url, crate::youtube::breaker::DEFAULT_CANARY_URL);
     assert!(serde_yaml::from_str::<YoutubeConfig>("pause-for: soon\n").is_err());
 }
+
+// ---- youtube.engine (docs/design/2026-10-16-youtube-gemini-engine.md) ----
+
+const UNSET_KEY_A: &str = "SB_TEST_YOUTUBE_ENGINE_UNSET_KEY_A";
+const UNSET_KEY_B: &str = "SB_TEST_YOUTUBE_ENGINE_UNSET_KEY_B";
+
+fn youtube_engine_config(yaml: &str) -> Config {
+    serde_yaml::from_str(yaml).expect("config should parse")
+}
+
+#[test]
+fn youtube_engine_defaults_preserve_yt_dlp_behavior() {
+    let config = youtube_engine_config("{}");
+    assert_eq!(config.youtube.engine, YoutubeEngine::YtDlp);
+    assert_eq!(config.youtube.fallback, None);
+    assert_eq!(config.youtube.gemini.model, "gemini-3.8-flash");
+    assert_eq!(config.youtube.gemini.api_key, "GEMINI_API_KEY");
+    assert_eq!(config.youtube.gemini.window, Duration::from_secs(30 * 60));
+    assert_eq!(config.youtube.gemini.timeout, Duration::from_secs(5 * 60));
+    assert_eq!(config.youtube.gemini.budget, Duration::from_secs(15 * 60));
+    assert_eq!(config.youtube.data_api.api_key, "YOUTUBE_API_KEY");
+    config.validate().expect("defaults must validate");
+}
+
+#[test]
+fn youtube_engine_gemini_with_fallback_parses() {
+    let config = youtube_engine_config(
+        "youtube:\n  engine: gemini\n  fallback: yt-dlp\n  gemini:\n    model: gemini-3.8-flash\n    window: 20m\n",
+    );
+    assert_eq!(config.youtube.engine, YoutubeEngine::Gemini);
+    assert_eq!(config.youtube.fallback, Some(YoutubeEngine::YtDlp));
+    assert_eq!(config.youtube.gemini.window, Duration::from_secs(20 * 60));
+    // untouched siblings keep their defaults
+    assert_eq!(config.youtube.gemini.timeout, Duration::from_secs(5 * 60));
+}
+
+#[test]
+fn youtube_engine_bogus_value_names_the_variants() {
+    let err = serde_yaml::from_str::<Config>("youtube:\n  engine: bogus\n")
+        .expect_err("bogus engine must fail the load")
+        .to_string();
+    assert!(err.contains("yt-dlp"), "{err}");
+    assert!(err.contains("gemini"), "{err}");
+    let err = serde_yaml::from_str::<Config>("youtube:\n  fallback: bogus\n")
+        .expect_err("bogus fallback must fail the load")
+        .to_string();
+    assert!(err.contains("yt-dlp") && err.contains("gemini"), "{err}");
+}
+
+#[test]
+fn youtube_engine_unknown_youtube_key_is_rejected() {
+    let err = serde_yaml::from_str::<Config>("youtube:\n  engin: gemini\n")
+        .expect_err("typo'd youtube key must fail the load")
+        .to_string();
+    assert!(err.contains("engin"), "{err}");
+    let err = serde_yaml::from_str::<Config>("youtube:\n  gemini:\n    modle: x\n")
+        .expect_err("typo'd gemini key must fail the load");
+    assert!(err.to_string().contains("modle"));
+}
+
+#[test]
+fn youtube_engine_validate_rejects_fallback_equal_to_engine() {
+    let config = youtube_engine_config("youtube:\n  engine: yt-dlp\n  fallback: yt-dlp\n");
+    let err = config.validate().expect_err("fallback == engine must fail").to_string();
+    assert!(err.contains("youtube.fallback"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_window_below_minimum() {
+    let config = youtube_engine_config("youtube:\n  gemini:\n    window: 0s\n");
+    let err = config.validate().expect_err("window 0s must fail").to_string();
+    assert!(err.contains("youtube.gemini.window"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_accepts_window_at_minimum() {
+    youtube_engine_config("youtube:\n  gemini:\n    window: 5m\n")
+        .validate()
+        .expect("5m is the floor and legal");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_timeout_below_minimum() {
+    let config = youtube_engine_config("youtube:\n  gemini:\n    timeout: 29s\n");
+    let err = config.validate().expect_err("timeout 29s must fail").to_string();
+    assert!(err.contains("youtube.gemini.timeout"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_budget_below_timeout() {
+    let config = youtube_engine_config("youtube:\n  gemini:\n    timeout: 5m\n    budget: 4m\n");
+    let err = config.validate().expect_err("budget < timeout must fail").to_string();
+    assert!(err.contains("youtube.gemini.budget"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_gemini_without_fallback_when_key_empty() {
+    let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
+    config.youtube.gemini.api_key = UNSET_KEY_A.to_string();
+    config.youtube.data_api.api_key = UNSET_KEY_B.to_string();
+    let err = config.validate().expect_err("empty keys must fail").to_string();
+    assert!(err.contains("youtube.gemini.api-key"), "{err}");
+    assert!(err.contains("youtube.data-api.api-key"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_rejects_empty_key_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key_file = dir.path().join("gemini-key");
+    fs::write(&key_file, "  \n").expect("write");
+    let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
+    config.youtube.gemini.api_key = key_file.to_string_lossy().into_owned();
+    config.youtube.data_api.api_key = key_file.to_string_lossy().into_owned();
+    let err = config.validate().expect_err("a blank secret file resolves empty");
+    assert!(err.to_string().contains("resolve empty"), "{err}");
+}
+
+#[test]
+fn youtube_engine_validate_accepts_resolvable_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key_file = dir.path().join("key");
+    fs::write(&key_file, "not-a-real-key\n").expect("write");
+    let mut config = youtube_engine_config("youtube:\n  engine: gemini\n");
+    config.youtube.gemini.api_key = key_file.to_string_lossy().into_owned();
+    config.youtube.data_api.api_key = key_file.to_string_lossy().into_owned();
+    config.validate().expect("resolvable keys validate");
+}
+
+#[test]
+fn youtube_engine_validate_warns_when_gemini_fallback_key_empty() {
+    vault::capture::install();
+    let mut config = youtube_engine_config("youtube:\n  engine: yt-dlp\n  fallback: gemini\n");
+    config.youtube.gemini.api_key = "SB_TEST_YOUTUBE_ENGINE_WARN_KEY".to_string();
+    config.youtube.data_api.api_key = UNSET_KEY_B.to_string();
+    config
+        .validate()
+        .expect("a gemini fallback with empty keys still starts the daemon");
+    assert_eq!(
+        vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_WARN_KEY").len(),
+        1
+    );
+}
+
+#[test]
+fn youtube_engine_validate_yt_dlp_default_ignores_gemini_keys() {
+    vault::capture::install();
+    let mut config = youtube_engine_config("{}");
+    config.youtube.gemini.api_key = "SB_TEST_YOUTUBE_ENGINE_QUIET_KEY".to_string();
+    config.validate().expect("yt-dlp only needs no gemini keys");
+    assert!(vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_QUIET_KEY").is_empty());
+}
