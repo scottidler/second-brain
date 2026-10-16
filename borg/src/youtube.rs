@@ -159,6 +159,28 @@ pub fn parse_metadata(stdout: &[u8]) -> Result<VideoMetadata> {
 pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadata> {
     log::debug!("yt-dlp: fetching metadata for {url} (timeout={timeout_secs}s)");
     breaker::check(url)?;
+    let output = run_metadata(url, timeout_secs).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("yt-dlp metadata failed (exit {}): {stderr}", output.status);
+        if let breaker::Verdict::Canary(canary) = breaker::record_failure(url, &stderr) {
+            let ok = matches!(run_metadata(&canary, timeout_secs).await, Ok(o) if o.status.success());
+            breaker::canary_result(&canary, ok);
+        }
+        bail!("yt-dlp failed: {stderr}");
+    }
+    breaker::record_success(url);
+    log::debug!(
+        "yt-dlp: metadata fetch succeeded ({} bytes stdout)",
+        output.stdout.len()
+    );
+
+    parse_metadata(&output.stdout)
+}
+
+/// One `yt-dlp --dump-json` run, bounded by `timeout_secs`. No breaker
+/// bookkeeping, so the breaker's own canary fetch can use it.
+async fn run_metadata(url: &str, timeout_secs: u64) -> Result<std::process::Output> {
     let yt_dlp_fut = TokioCommand::new("yt-dlp")
         .args(["--dump-json", "--no-download", "--no-warnings", url])
         .stdout(std::process::Stdio::piped())
@@ -168,24 +190,10 @@ pub async fn fetch_metadata(url: &str, timeout_secs: u64) -> Result<VideoMetadat
         .context("Failed to spawn yt-dlp - is it installed?")?
         .wait_with_output();
 
-    let output = match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
-        Ok(res) => res.context("Failed to wait for yt-dlp")?,
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), yt_dlp_fut).await {
+        Ok(res) => res.context("Failed to wait for yt-dlp"),
         Err(_) => bail!("yt-dlp metadata timed out after {timeout_secs}s for {url}"),
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::error!("yt-dlp metadata failed (exit {}): {stderr}", output.status);
-        breaker::record_failure(url);
-        bail!("yt-dlp failed: {stderr}");
     }
-    breaker::record_success();
-    log::debug!(
-        "yt-dlp: metadata fetch succeeded ({} bytes stdout)",
-        output.stdout.len()
-    );
-
-    parse_metadata(&output.stdout)
 }
 
 pub async fn fetch_subtitles(url: &str, pipeline: &PipelineConfig) -> Result<Option<String>> {
