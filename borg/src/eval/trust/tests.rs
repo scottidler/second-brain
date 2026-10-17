@@ -157,6 +157,31 @@ fn a_class_never_measured_is_untrusted_and_another_judges_rows_do_not_count() {
     assert_eq!(failures[0].reason, "never measured");
 }
 
+/// An LLM check with no model ran under fabric's default model: untrusted
+/// on every class it can see, even when a row for `""` claims a perfect
+/// measurement. Ungated belongs to deterministic checks only.
+#[test]
+fn an_llm_check_with_an_empty_judge_model_is_untrusted() {
+    for check in [CHECK_JUDGE_DISTILLATION, CHECK_JUDGE_CLAIMS] {
+        for model in ["", "  "] {
+            let perfect: Vec<TrustRow> = every_class(check, 1.0, 100)
+                .into_iter()
+                .map(|r| TrustRow {
+                    judge_model: model.to_string(),
+                    ..r
+                })
+                .collect();
+            let state = judge_check_trust(model, check, &perfect, &policy());
+            let TrustState::Untrusted(failures) = &state else {
+                panic!("{check} with model {model:?}: expected untrusted, got {state:?}")
+            };
+            assert!(!failures.is_empty());
+            assert!(failures.iter().all(|f| f.reason.contains("fabric's default model")));
+            assert!(!state.may_act());
+        }
+    }
+}
+
 #[test]
 fn a_deterministic_check_is_ungated() {
     let state = judge_check_trust("", crate::eval::scores::CHECK_QUOTE_GROUNDING, &[], &policy());

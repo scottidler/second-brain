@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS remediations (
   trigger_check        TEXT NOT NULL,
   trigger_rubric       TEXT NOT NULL,
   trigger_content_hash TEXT NOT NULL,
+  -- The trigger row's metrics_json, copied at claim time: the frozen "before".
+  -- An eval_scores row on the same key can be overwritten later (a rescore,
+  -- `--inject --rebuild-cache`); this copy never is. NULL only on a claim
+  -- made before the column existed.
+  trigger_metrics_json TEXT,
   -- Set when the POST's outcome is unknown (timeout, unreadable answer).
   post_error           TEXT
 );

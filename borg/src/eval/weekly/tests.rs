@@ -185,8 +185,9 @@ impl Env {
         self.receipts
             .execute(
                 "INSERT INTO remediations (source_url, original_trace, claimed_at, remediation_trace,
-                    trigger_judge_model, trigger_check, trigger_rubric, trigger_content_hash, post_error)
-                 VALUES (?1, ?2, '2026-10-16T00:00:00Z', ?3, '', ?4, ?5, ?6, ?7)",
+                    trigger_judge_model, trigger_check, trigger_rubric, trigger_content_hash, post_error,
+                    trigger_metrics_json)
+                 VALUES (?1, ?2, '2026-10-16T00:00:00Z', ?3, '', ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     source,
                     original,
@@ -194,7 +195,8 @@ impl Env {
                     CHECK_QUOTE_GROUNDING,
                     DETERMINISTIC_RUBRIC_VERSION,
                     h,
-                    post_error
+                    post_error,
+                    serde_json::json!({ "grounded": 0, "quoted": 1 }).to_string()
                 ],
             )
             .unwrap();
@@ -576,6 +578,46 @@ fn outcome_passed_when_the_remediated_trace_passes_every_required_check() {
         "{}",
         r.before
     );
+}
+
+/// The "before" is the claim's frozen copy: overwriting the trigger's own
+/// `eval_scores` key (what `--inject --rebuild-cache` does to an unmutated
+/// original) leaves it unchanged.
+#[test]
+fn the_before_score_survives_an_overwrite_of_the_trigger_row() {
+    let env = remediated_env(Some(Scores::AllPass));
+    let h = hash(&env.root, "orig");
+    let mut rescored = env
+        .store
+        .rows_for("orig")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.check_name == CHECK_QUOTE_GROUNDING && r.run_kind == RUN_KIND_BASELINE && r.content_hash == h)
+        .unwrap();
+    rescored.metrics_json = serde_json::json!({ "grounded": 1, "quoted": 1 }).to_string();
+    rescored.scored_at = "2026-10-18T00:00:00Z".to_string();
+    env.store.put(&rescored).unwrap();
+    let live = env
+        .store
+        .rows_for("orig")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.check_name == CHECK_QUOTE_GROUNDING && r.content_hash == h)
+        .unwrap();
+    assert_eq!(live.metrics_json, rescored.metrics_json, "the key was overwritten");
+    let r = &remediated(&env)[0];
+    assert!(r.before.contains("0 of 1 quotes grounded"), "{}", r.before);
+}
+
+/// A claim made before the column existed says so, never reads the live row.
+#[test]
+fn a_claim_without_frozen_metrics_says_it_was_not_frozen() {
+    let env = remediated_env(Some(Scores::AllPass));
+    env.receipts
+        .execute("UPDATE remediations SET trigger_metrics_json = NULL", [])
+        .unwrap();
+    let r = &remediated(&env)[0];
+    assert!(r.before.contains("was not frozen"), "{}", r.before);
 }
 
 #[test]

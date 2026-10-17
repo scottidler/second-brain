@@ -9,7 +9,9 @@
 //!
 //! A class the check cannot see never counts against it. Deterministic checks
 //! (no model) are not gated: they make no model call. Their rows are still
-//! written so the report shows their rates.
+//! written so the report shows their rates. Whether a check is deterministic
+//! comes from the check's name, never from an empty model string: an LLM
+//! check with no model ran under fabric's default and is untrusted.
 
 use std::path::Path;
 
@@ -17,7 +19,7 @@ use eyre::{Context, Result};
 use rusqlite::{Connection, params};
 
 use super::inject::{PlantedClass, applicable_classes};
-use super::scores::rubric_version_of;
+use super::scores::{DETERMINISTIC_CHECKS, rubric_version_of};
 use crate::config::TrustConfig;
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS judge_trust (
@@ -171,11 +173,27 @@ impl TrustState {
 
 /// Apply the trust rule to `check` for `judge_model` over `rows` (any set of
 /// `judge_trust` rows; the matching ones are picked out here).
+///
+/// `Ungated` is decided by the CHECK, never by the model string: only a
+/// deterministic check makes no model call. An LLM check with an empty model
+/// ran under fabric's own default model (no `-m`), which no `--inject`
+/// measured, so it is untrusted on every class it can see.
 pub fn judge_check_trust(judge_model: &str, check: &str, rows: &[TrustRow], policy: &TrustConfig) -> TrustState {
-    if judge_model.is_empty() {
+    if DETERMINISTIC_CHECKS.contains(&check) {
         return TrustState::Ungated;
     }
     let classes = applicable_classes(check);
+    if judge_model.trim().is_empty() {
+        return TrustState::Untrusted(
+            classes
+                .into_iter()
+                .map(|class| TrustFailure {
+                    class,
+                    reason: "no judge model named: fabric's default model is never trusted".to_string(),
+                })
+                .collect(),
+        );
+    }
     let Some(current) = rubric_version_of(check) else {
         return TrustState::Untrusted(
             classes

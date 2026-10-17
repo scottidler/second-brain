@@ -89,9 +89,57 @@ fn the_default_judge_is_gemini_and_a_flag_or_config_overrides_it() {
     // A run that judges nothing names no judge.
     let unjudged = EvalHarness::try_parse_from(["sb", "--staged", "--no-judge"]).unwrap();
     assert_eq!(eval_opts(&defaults, &unjudged.eval).unwrap().judge_model, "");
-    // An explicitly emptied list falls back to fabric's own default model.
+    // An explicitly emptied list resolves no model, and the judges refuse to
+    // run on it rather than fall back to fabric's own default model.
     let emptied: borg::config::Config = serde_yaml::from_str("eval:\n  judge-models: []\n").unwrap();
-    assert_eq!(eval_opts(&emptied, &staged.eval).unwrap().judge_model, "");
+    let opts = eval_opts(&emptied, &staged.eval).unwrap();
+    assert_eq!(opts.judge_model, "");
+    let err = borg::eval::fabric_judges(&opts).unwrap_err().to_string();
+    assert!(err.contains("no judge model"), "{err}");
+}
+
+/// `--judge-model ''` would judge with fabric's default model under a trust
+/// gate that cannot name it: refused before anything runs.
+#[test]
+fn a_blank_judge_model_flag_is_refused() {
+    let defaults = borg::config::Config::default();
+    for blank in ["", "  "] {
+        let h = EvalHarness::try_parse_from(["sb", "--staged", "--judge-model", blank]).unwrap();
+        let err = eval_opts(&defaults, &h.eval).unwrap_err().to_string();
+        assert!(err.contains("--judge-model is blank"), "{blank:?}: {err}");
+    }
+}
+
+/// `--synth-intents` writes fixtures and judges nothing: with no
+/// `--judge-model` it keeps fabric's own default model (its v0.17.7
+/// behavior), not the Gemini judge default; a flag still names one.
+#[test]
+fn synth_intents_keeps_fabric_default_model_unless_a_flag_names_one() {
+    let defaults = borg::config::Config::default();
+    let synth = EvalHarness::try_parse_from(["sb", "--synth-intents"]).unwrap();
+    assert_eq!(eval_opts(&defaults, &synth.eval).unwrap().judge_model, "");
+    let flagged = EvalHarness::try_parse_from(["sb", "--synth-intents", "--judge-model", "gpt-4o"]).unwrap();
+    assert_eq!(eval_opts(&defaults, &flagged.eval).unwrap().judge_model, "gpt-4o");
+}
+
+/// `--staged` reads borg.yml's `staging.root` (where ingest writes), unless
+/// `--staging-root` names another.
+#[test]
+fn staged_reads_the_configured_staging_root_unless_a_flag_overrides_it() {
+    let config: borg::config::Config = serde_yaml::from_str("staging:\n  root: /srv/borg-stages\n").unwrap();
+    let staged = EvalHarness::try_parse_from(["sb", "--staged", "--no-judge"]).unwrap();
+    assert_eq!(
+        eval_opts(&config, &staged.eval).unwrap().staged_root,
+        Some(std::path::PathBuf::from("/srv/borg-stages"))
+    );
+    let flagged =
+        EvalHarness::try_parse_from(["sb", "--staged", "--no-judge", "--staging-root", "/tmp/other"]).unwrap();
+    assert_eq!(
+        eval_opts(&config, &flagged.eval).unwrap().staged_root,
+        Some(std::path::PathBuf::from("/tmp/other"))
+    );
+    let fixtures = EvalHarness::try_parse_from(["sb", "--no-judge"]).unwrap();
+    assert_eq!(eval_opts(&config, &fixtures.eval).unwrap().staged_root, None);
 }
 
 #[test]
@@ -372,4 +420,26 @@ fn candidate_search_refuses_while_its_claim_judge_is_untrusted() {
 fn candidate_search_runs_once_its_claim_judge_is_trusted() {
     let policy = borg::config::TrustConfig::default();
     candidate::search_gate("gemini-2.5-pro", &[claims_trust_row(0.90, 30)], &policy).unwrap();
+}
+
+/// The split carries `llm.api-keys` as fabric var -> reference, so the GEPA
+/// reflection child exports the same keys the Rust judges do.
+#[test]
+fn candidate_split_json_carries_the_api_key_references_under_fabric_names() {
+    let split = borg::eval::candidate::Split {
+        pattern: "distill-video".to_string(),
+        kind: "video".to_string(),
+        eligible: 8,
+        train: vec!["a".to_string()],
+        holdout: vec!["b".to_string()],
+    };
+    let keys = vault::fabric::ApiKeys::default()
+        .with(vault::fabric::Vendor::Gemini, "ESCOTE_GEMINI_API_KEY")
+        .with(vault::fabric::Vendor::Anthropic, "~/.keys/anthropic");
+    let json = candidate::split_json(&split, &keys).unwrap();
+    assert_eq!(json["fabric-env"]["GEMINI_API_KEY"], "ESCOTE_GEMINI_API_KEY");
+    assert_eq!(json["fabric-env"]["ANTHROPIC_API_KEY"], "~/.keys/anthropic");
+    assert_eq!(json["train"], serde_json::json!(["a"]));
+    let empty = candidate::split_json(&split, &vault::fabric::ApiKeys::default()).unwrap();
+    assert_eq!(empty["fabric-env"], serde_json::json!({}));
 }

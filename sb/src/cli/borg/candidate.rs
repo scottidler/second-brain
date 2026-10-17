@@ -40,6 +40,21 @@ pub(super) fn search_gate(
         .context("refusing the candidate search (python -m propose starts with --candidate-split)")
 }
 
+/// The `--candidate-split` JSON: the split plus `fabric-env`, fabric's var
+/// name for each vendor in borg.yml's `llm.api-keys` mapped to its configured
+/// reference (an env var name or a file path, never a value), so the search's
+/// reflection call exports the same keys the Rust judges do.
+pub(super) fn split_json(split: &candidate::Split, keys: &vault::fabric::ApiKeys) -> Result<serde_json::Value> {
+    let mut json = serde_json::to_value(split).context("serializing the split")?;
+    let fabric_env: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .filter(|(_, reference)| !reference.is_empty())
+        .map(|(vendor, reference)| (vendor.fabric_env().to_string(), reference.into()))
+        .collect();
+    json["fabric-env"] = serde_json::Value::Object(fabric_env);
+    Ok(json)
+}
+
 /// `--candidate-split N --pattern P`: the frozen train/holdout pair, as JSON.
 /// Gated on judge trust: this is the search's first call.
 pub(super) fn run_split(
@@ -50,10 +65,10 @@ pub(super) fn run_split(
 ) -> Result<()> {
     let trust_rows = borg::eval::trust::TrustStore::open(&vault::paths::borg_eval_cache_path())?.all()?;
     search_gate(&opts.judge_model, &trust_rows, &config.eval.trust)?;
-    let split = candidate::load_split(&vault::paths::borg_stages_dir(), pattern_of(a)?, n)?;
+    let split = candidate::load_split(&config.staging.root, pattern_of(a)?, n)?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&split).context("serializing the split")?
+        serde_json::to_string_pretty(&split_json(&split, &config.llm.api_keys)?).context("serializing the split")?
     );
     Ok(())
 }
@@ -78,7 +93,7 @@ pub(super) async fn run_score(
 ) -> Result<()> {
     let pattern = pattern_of(a)?;
     borg::eval::backlog::preflight_keys(&opts.api_keys)?;
-    let staged_root = vault::paths::borg_stages_dir();
+    let staged_root = config.staging.root.clone();
     let baseline = Arm::load(pattern, &baseline_file(opts, pattern))?;
     let proposal = Arm::load(pattern, &vault::paths::expand_tilde(file_path))?;
     let cache_path = vault::paths::borg_eval_cache_path();
@@ -217,7 +232,7 @@ pub(super) async fn run_apply(
     };
     let model = distill_model(config);
     let scored_at = now();
-    let staged_root = vault::paths::borg_stages_dir();
+    let staged_root = config.staging.root.clone();
     let applied = file::apply(
         &record,
         &file::ApplyRequest {

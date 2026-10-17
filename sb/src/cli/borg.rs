@@ -391,6 +391,12 @@ impl BorgCli {
                             args::EvalFormat::Json => eprintln!("report written to {}", path.display()),
                         }
                     }
+                    if report.all_judged_errored() {
+                        let (errored, total) = report.errored_of_total();
+                        eyre::bail!(
+                            "every judged trace errored on --regenerate ({errored} of {total}); see the per-trace errors"
+                        );
+                    }
                     return Ok(());
                 }
                 if let Some(n) = a.candidate_split {
@@ -521,7 +527,7 @@ impl BorgCli {
 /// Judge keys named by `llm.api-keys` must resolve here before anything is
 /// judged, so a timer run missing a var fails as one clear error.
 fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a: &args::EvalArgs) -> Result<()> {
-    let staged_root = vault::paths::borg_stages_dir();
+    let staged_root = &config.staging.root;
     let receipts = borg::receipts::open_default().context("opening the receipts db")?;
     let store = borg::eval::scores::ScoreStore::open(&vault::paths::borg_eval_cache_path())?;
     let required = borg::eval::scores::required_checks(&config.eval.judge_models);
@@ -530,7 +536,7 @@ fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts,
         if config.eval.judge_models.is_empty() {
             eyre::bail!("eval.judge-models is empty: the required-check set is derived from it");
         }
-        let backlog = borg::eval::backlog::find_backlog(&receipts, &store, &staged_root, &required, None)?;
+        let backlog = borg::eval::backlog::find_backlog(&receipts, &store, staged_root, &required, None)?;
         for (trace, reason) in &backlog.unreadable {
             eprintln!("unreadable staged trace {trace}: {reason}");
         }
@@ -553,7 +559,7 @@ fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts,
         &store,
         &cache,
         opts,
-        &staged_root,
+        staged_root,
         &config.eval.judge_models,
         a.limit.or(config.eval.limit),
         &factory,
@@ -590,7 +596,7 @@ fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a
     }
     borg::eval::backlog::preflight_keys(&opts.api_keys)?;
     let sample = a.sample.unwrap_or(config.eval.trust.min_samples);
-    let fixtures = borg::eval::inject::sample_fixtures(&vault::paths::borg_stages_dir(), sample)?;
+    let fixtures = borg::eval::inject::sample_fixtures(&config.staging.root, sample)?;
     let cache_path = vault::paths::borg_eval_cache_path();
     let scores = borg::eval::scores::ScoreStore::open(&cache_path)?;
     let trust = borg::eval::trust::TrustStore::open(&cache_path)?;
@@ -632,7 +638,7 @@ async fn run_eval_remediate(config: &borg::config::Config, apply: bool) -> Resul
     let plan = remediate::plan(
         &receipts,
         &store,
-        &vault::paths::borg_stages_dir(),
+        &config.staging.root,
         &config.eval.judge_models,
         &trust_rows,
         &config.eval.trust,
@@ -655,12 +661,21 @@ async fn run_eval_remediate(config: &borg::config::Config, apply: bool) -> Resul
 /// The `sb borg eval` options for `a`: the CLI flags plus the eval's
 /// credential vars, which come from borg.yml's `llm.api-keys`, never a flag.
 /// With no `--judge-model`, a judged run uses the default judge (the first of
-/// `eval.judge-models`, Gemini unless configured); only an explicitly emptied
-/// list leaves it to fabric's own default model. A run that judges nothing
-/// (`--no-judge`) names no model, so its records never claim a judge that did
-/// not run.
+/// `eval.judge-models`, Gemini unless configured). An explicitly emptied list
+/// resolves no model, and `borg::eval::fabric_judges` refuses to judge with
+/// none. A run that judges nothing (`--no-judge`) names no model, so its
+/// records never claim a judge that did not run. `--synth-intents` writes
+/// fixtures, it judges nothing: with no `--judge-model` it keeps fabric's own
+/// default model, as before the Gemini judge default. `--staged` reads
+/// borg.yml's `staging.root` unless `--staging-root` names another.
 fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::eval::EvalOpts> {
-    let judges = !a.no_judge;
+    if a.judge_model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+        eyre::bail!(
+            "--judge-model is blank: name a model, or omit the flag for the default judge \
+             (a blank model runs fabric's default model, which is never trusted)"
+        );
+    }
+    let judges = !a.no_judge && !a.synth_intents;
     let judge_model = a
         .judge_model
         .clone()
@@ -678,6 +693,12 @@ fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::
             .as_deref()
             .map(borg::eval::resolve_patterns_dir)
             .transpose()?,
+        staged_root: a.staged.then(|| {
+            a.staging_root
+                .as_ref()
+                .map(vault::paths::expand_tilde)
+                .unwrap_or_else(|| config.staging.root.clone())
+        }),
         ..borg::eval::EvalOpts::from(a)
     })
 }

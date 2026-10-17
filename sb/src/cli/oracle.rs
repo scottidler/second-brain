@@ -195,8 +195,12 @@ impl OracleCli {
                 }
                 let opts = oracle::eval::EvalOpts::from(&a);
                 if a.target == EvalTarget::Answerability {
+                    // Borg owns the staging root: read it from borg.yml, the
+                    // same `staging.root` ingest writes through.
+                    let borg_config = borg::config::load_config::<borg::config::Config>(None)
+                        .context("loading borg.yml for its staging.root")?;
                     let reader = StagedSourceReader {
-                        root: vault::paths::borg_stages_dir(),
+                        root: borg_config.staging.root,
                     };
                     let report = oracle::eval::answerability::run(&config, &opts, &reader)?;
                     let rendered = report.render();

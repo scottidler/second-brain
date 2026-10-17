@@ -27,7 +27,7 @@ pub(super) async fn run(config: &borg::config::Config, opts: &borg::eval::EvalOp
     let store = borg::eval::scores::ScoreStore::open(&cache_path)?;
     let trust_rows = borg::eval::trust::TrustStore::open(&cache_path)?.all()?;
     let reports_dir = vault::paths::borg_eval_reports_dir();
-    let staged_root = vault::paths::borg_stages_dir();
+    let staged_root = config.staging.root.clone();
     let inputs = weekly::Inputs {
         receipts: &receipts,
         store: &store,

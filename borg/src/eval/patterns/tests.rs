@@ -134,6 +134,7 @@ fn judges_and_intent_writer_resolve_from_the_override_dir() {
     let dir = resolve_patterns_dir(tmp.path()).expect("dir");
     let opts = crate::eval::EvalOpts {
         patterns_dir: Some(dir.clone()),
+        judge_model: "gemini-2.5-pro".to_string(),
         ..crate::eval::EvalOpts::default()
     };
     let (judge, claim_judge) = crate::eval::fabric_judges(&opts).expect("judges");
@@ -142,6 +143,10 @@ fn judges_and_intent_writer_resolve_from_the_override_dir() {
     let writer = crate::eval::fabric_intent_writer(&opts).expect("writer");
     assert_eq!(writer.pattern, dir.join("synth-capture-intent.md").to_string_lossy());
 
-    let (judge, _) = crate::eval::fabric_judges(&crate::eval::EvalOpts::default()).expect("default");
+    let deployed = crate::eval::EvalOpts {
+        judge_model: "gemini-2.5-pro".to_string(),
+        ..crate::eval::EvalOpts::default()
+    };
+    let (judge, _) = crate::eval::fabric_judges(&deployed).expect("default");
     assert_eq!(judge.pattern, "judge-distillation");
 }

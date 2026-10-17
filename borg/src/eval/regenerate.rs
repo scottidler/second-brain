@@ -55,6 +55,21 @@ impl RegenerateReport {
         .collect()
     }
 
+    /// True when the judges ran and every judged trace of both arms carries
+    /// an error: the `--regenerate` twin of
+    /// [`EvalReport::all_judged_errored`], the one case the run exits non-zero.
+    pub fn all_judged_errored(&self) -> bool {
+        self.without_note.all_judged_errored() && self.with_note.all_judged_errored()
+    }
+
+    /// Errored traces over both arms, and the traces judged.
+    pub fn errored_of_total(&self) -> (usize, usize) {
+        (
+            self.without_note.errored_traces() + self.with_note.errored_traces(),
+            self.without_note.traces.len() + self.with_note.traces.len(),
+        )
+    }
+
     /// Plain-text report: one header, then each arm's full eval report.
     pub fn render(&self) -> String {
         format!(

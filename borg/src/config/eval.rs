@@ -161,10 +161,16 @@ impl EvalConfig {
         self.judge_models.first().map(String::as_str)
     }
 
-    /// Structural checks, run at config load: a rate outside 0..=1, a zero
-    /// sample floor, or zero inject workers is a load error, never a silent
-    /// clamp.
+    /// Structural checks, run at config load: a blank judge model, a rate
+    /// outside 0..=1, a zero sample floor, or zero inject workers is a load
+    /// error, never a silent clamp.
     pub fn validate(&self) -> eyre::Result<()> {
+        if let Some(i) = self.judge_models.iter().position(|m| m.trim().is_empty()) {
+            eyre::bail!(
+                "eval.judge-models[{i}] is blank: a blank model runs fabric's default model, which no trust \
+                 measurement can name; list each judge model explicitly"
+            );
+        }
         let rate = self.trust.min_paired_catch_rate;
         if !(0.0..=1.0).contains(&rate) {
             eyre::bail!("eval.trust.min-paired-catch-rate must be within 0..=1, got {rate}");

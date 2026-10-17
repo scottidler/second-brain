@@ -76,7 +76,9 @@ pub struct EvalOpts {
     /// Hand-labeled calibration file (`fixture -> human axis scores`). Optional;
     /// absent file = uncalibrated run.
     pub calibration_path: PathBuf,
-    /// Judge model name; empty = fabric's default model.
+    /// Judge model name. Empty only when nothing is judged (`no_judge`) or
+    /// for `--synth-intents`, where it means fabric's default model:
+    /// [`fabric_judges`] refuses an empty model for a judged run.
     pub judge_model: String,
     /// Per-vendor credential vars (borg's `llm.api-keys`) every eval fabric
     /// call (both judges, the intent writer) exports under fabric's names on
@@ -205,7 +207,17 @@ pub fn run_fixtures(opts: &EvalOpts, fixtures: &[Fixture]) -> Result<EvalOutcome
 
 /// The production judges for `opts`: its model and credential vars, with each
 /// pattern resolved from `opts.patterns_dir` when set.
+///
+/// A judged run (`!opts.no_judge`) with a blank model is refused here, the
+/// one place every LLM judge is built: no `-m` runs fabric's default model,
+/// which no trust measurement names, so its verdicts could never be gated.
 pub fn fabric_judges(opts: &EvalOpts) -> Result<(FabricJudge, FabricClaimJudge)> {
+    if !opts.no_judge && opts.judge_model.trim().is_empty() {
+        eyre::bail!(
+            "no judge model: pass --judge-model or name one in eval.judge-models (borg.yml); \
+             a blank model would judge with fabric's default model, which is never trusted"
+        );
+    }
     let mut judge = FabricJudge::new(opts.judge_model.clone(), opts.api_keys.clone());
     judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &judge.pattern)?;
     let mut claim_judge = FabricClaimJudge::new(opts.judge_model.clone(), opts.api_keys.clone());

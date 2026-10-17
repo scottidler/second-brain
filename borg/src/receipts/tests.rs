@@ -1395,3 +1395,32 @@ fn v6_migration_adds_replay_origin_and_the_remediation_claims_to_a_v5_db() {
     let row = get(&conn, "old-1").expect("get").expect("row survives");
     assert_eq!((row.status.as_str(), row.replay_origin), ("succeeded", None));
 }
+
+#[test]
+fn v7_migration_adds_the_frozen_trigger_metrics_to_a_v6_claim_table() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("receipts.db");
+    {
+        let conn = open_at(&path).expect("open");
+        // Back to the v6 claim table: no trigger_metrics_json.
+        conn.execute_batch(
+            "DROP TABLE remediations;
+             CREATE TABLE remediations (
+               source_url TEXT NOT NULL PRIMARY KEY, original_trace TEXT NOT NULL,
+               claimed_at TEXT NOT NULL, remediation_trace TEXT,
+               trigger_judge_model TEXT NOT NULL, trigger_check TEXT NOT NULL,
+               trigger_rubric TEXT NOT NULL, trigger_content_hash TEXT NOT NULL, post_error TEXT
+             );
+             INSERT INTO remediations VALUES ('https://x.com', 'old-1', '2026-10-16T00:00:00Z',
+               NULL, '', 'quote-grounding', 'v1', 'h', NULL);",
+        )
+        .expect("seed v6 claim table");
+        assert!(!has_column(&conn, "remediations", "trigger_metrics_json").expect("probe"));
+    }
+    let conn = open_at(&path).expect("reopen migrates v6 to v7");
+    assert!(has_column(&conn, "remediations", "trigger_metrics_json").expect("probe"));
+    let frozen: Option<String> = conn
+        .query_row("SELECT trigger_metrics_json FROM remediations", [], |r| r.get(0))
+        .expect("old claim survives");
+    assert_eq!(frozen, None);
+}

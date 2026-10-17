@@ -54,6 +54,9 @@ pub struct Failure {
     pub rubric_version: String,
     /// The trace's distill hash the row was scored at (its current hash).
     pub content_hash: String,
+    /// The row's `metrics_json`, frozen onto the claim when this failure
+    /// triggers a remediation.
+    pub metrics_json: String,
     /// What failed, in words.
     pub reason: String,
     /// `Ungated` (deterministic), `Trusted`, or `Untrusted` with each
@@ -231,6 +234,7 @@ pub fn plan(
                 check: row.check_name,
                 rubric_version: row.rubric_version,
                 content_hash: row.content_hash,
+                metrics_json: row.metrics_json,
                 reason,
             });
         }
@@ -304,8 +308,8 @@ pub fn claim(conn: &Connection, candidate: &Candidate, trigger: &Failure, claime
     tx.execute(
         "INSERT INTO remediations
          (source_url, original_trace, claimed_at, trigger_judge_model, trigger_check,
-          trigger_rubric, trigger_content_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          trigger_rubric, trigger_content_hash, trigger_metrics_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             candidate.source,
             candidate.trace,
@@ -313,7 +317,8 @@ pub fn claim(conn: &Connection, candidate: &Candidate, trigger: &Failure, claime
             trigger.judge_model,
             trigger.check,
             trigger.rubric_version,
-            trigger.content_hash
+            trigger.content_hash,
+            trigger.metrics_json
         ],
     )
     .with_context(|| format!("claiming the remediation of {}", candidate.source))?;

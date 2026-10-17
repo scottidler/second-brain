@@ -174,3 +174,28 @@ fn both_judges_export_the_configured_key_map_on_their_fabric_child() {
         assert_eq!(child_env(&cmd, "OPENAI_API_KEY").as_deref(), Some("openai-from-config"));
     }
 }
+
+/// Every LLM judge is built through `fabric_judges`, which refuses a blank
+/// model for a judged run: no `-m` would judge with fabric's default model.
+#[test]
+fn fabric_judges_refuses_a_blank_model_for_a_judged_run() {
+    for model in ["", "   "] {
+        let opts = crate::eval::EvalOpts {
+            judge_model: model.to_string(),
+            ..Default::default()
+        };
+        let err = crate::eval::fabric_judges(&opts).unwrap_err().to_string();
+        assert!(err.contains("no judge model"), "{model:?}: {err}");
+    }
+    // A run that judges nothing names no model and still builds (never called).
+    let unjudged = crate::eval::EvalOpts {
+        no_judge: true,
+        ..Default::default()
+    };
+    crate::eval::fabric_judges(&unjudged).expect("--no-judge builds without a model");
+    let named = crate::eval::EvalOpts {
+        judge_model: "gemini-2.5-pro".to_string(),
+        ..Default::default()
+    };
+    crate::eval::fabric_judges(&named).expect("a named model builds");
+}

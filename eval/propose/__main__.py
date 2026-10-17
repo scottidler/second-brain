@@ -54,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"split: {split['eligible']} eligible {split['kind']} traces; train {train}; holdout {holdout}", flush=True)
     seed = (args.patterns_dir / f"{args.pattern}.md").read_text()
     adapter = PatternAdapter(sb, args.pattern, work)
-    proposer = FabricProposer(model=args.reflection_model, fabric=args.fabric)
+    # The same llm.api-keys map the Rust judges export, so the rewrite call
+    # reaches the vendor with the configured key, not fabric's own .env.
+    proposer = FabricProposer(model=args.reflection_model, fabric=args.fabric, fabric_env=split["fabric-env"])
     result = gepa.optimize(
         seed_candidate={args.pattern: seed},
         trainset=train,

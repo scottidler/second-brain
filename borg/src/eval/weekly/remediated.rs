@@ -5,8 +5,9 @@
 //! The outcome comes from the remediation receipt's status, never from the POST
 //! response: intake returns `Queued` and runs the ingest detached, so a lost
 //! response is `pending` until the receipt settles. The "before" is the row the
-//! claim froze (`trigger_*` columns), so a later rescore of the original trace
-//! never rewrites it.
+//! claim froze (`trigger_*` columns, including a copy of its metrics), so a
+//! later rescore of the original trace, which can overwrite the same
+//! `eval_scores` key, never rewrites it.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -71,6 +72,7 @@ struct Claim {
     trigger_check: String,
     trigger_rubric: String,
     trigger_content_hash: String,
+    trigger_metrics_json: Option<String>,
     post_error: Option<String>,
 }
 
@@ -86,7 +88,7 @@ pub fn collect(
     let mut stmt = receipts
         .prepare(
             "SELECT source_url, original_trace, remediation_trace, trigger_judge_model, trigger_check,
-                    trigger_rubric, trigger_content_hash, post_error
+                    trigger_rubric, trigger_content_hash, post_error, trigger_metrics_json
              FROM remediations ORDER BY claimed_at, source_url",
         )
         .context("preparing the remediations read")?;
@@ -101,6 +103,7 @@ pub fn collect(
                 trigger_rubric: r.get(5)?,
                 trigger_content_hash: r.get(6)?,
                 post_error: r.get(7)?,
+                trigger_metrics_json: r.get(8)?,
             })
         })
         .context("reading remediations")?
@@ -119,7 +122,7 @@ fn classify(
     required: &[RequiredCheck],
     claim: &Claim,
 ) -> Result<Remediation> {
-    let before = before_text(store, claim)?;
+    let before = before_text(claim)?;
     let remediation_trace = match &claim.remediation_trace {
         Some(trace) => Some(trace.clone()),
         None => receipts
@@ -243,21 +246,28 @@ fn check_label(row: &ScoreRow) -> String {
     }
 }
 
-/// The frozen trigger row, in words. Reads the exact row the claim recorded.
-fn before_text(store: &ScoreStore, claim: &Claim) -> Result<String> {
-    let row = store.rows_for(&claim.original_trace)?.into_iter().find(|r| {
-        r.run_kind == RUN_KIND_BASELINE
-            && r.run_id.is_empty()
-            && r.judge_model == claim.trigger_judge_model
-            && r.check_name == claim.trigger_check
-            && r.rubric_version == claim.trigger_rubric
-            && r.content_hash == claim.trigger_content_hash
-    });
-    let Some(row) = row else {
+/// The frozen trigger row, in words. Reads only the claim's own copy, never
+/// `eval_scores`: a later write to the trigger's key (a rescore,
+/// `--inject --rebuild-cache`) must not change what "before" says.
+fn before_text(claim: &Claim) -> Result<String> {
+    let Some(metrics_json) = &claim.trigger_metrics_json else {
         return Ok(format!(
-            "{}: the trigger row is no longer in eval_scores",
+            "{}: the trigger row was not frozen (claimed before the claim carried its metrics)",
             claim.trigger_check
         ));
+    };
+    let row = ScoreRow {
+        trace: claim.original_trace.clone(),
+        run_kind: RUN_KIND_BASELINE.to_string(),
+        run_id: String::new(),
+        kind: String::new(),
+        judge_model: claim.trigger_judge_model.clone(),
+        check_name: claim.trigger_check.clone(),
+        rubric_version: claim.trigger_rubric.clone(),
+        content_hash: claim.trigger_content_hash.clone(),
+        scored_at: String::new(),
+        metrics_json: metrics_json.clone(),
+        error: None,
     };
     let reason = row_failure(&row)?.unwrap_or_else(|| "passes".to_string());
     Ok(format!("{}: {reason}", check_label(&row)))

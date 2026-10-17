@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -358,6 +358,18 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         log::debug!("receipts::run_migrations: adding replay_origin column (v6)");
         conn.execute("ALTER TABLE receipts ADD COLUMN replay_origin TEXT DEFAULT NULL", [])
             .context("add replay_origin column")?;
+    }
+    // v7: `remediations.trigger_metrics_json` freezes the trigger row's
+    // metrics on the claim, so a later overwrite of that eval_scores key never
+    // rewrites the weekly report's "before". The table itself comes from the
+    // baseline schema batch above, so it exists here.
+    if !has_column(conn, "remediations", "trigger_metrics_json")? {
+        log::debug!("receipts::run_migrations: adding remediations.trigger_metrics_json column (v7)");
+        conn.execute(
+            "ALTER TABLE remediations ADD COLUMN trigger_metrics_json TEXT DEFAULT NULL",
+            [],
+        )
+        .context("add remediations.trigger_metrics_json column")?;
     }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read

@@ -174,3 +174,40 @@ fn grade_rejects_emit_calibration() {
     .expect_err("emit-calibration");
     assert!(err.to_string().contains("--emit-calibration"));
 }
+
+/// A distillation judge whose every call fails, as when the vendor is down.
+struct DownJudge;
+
+impl DistillationJudge for DownJudge {
+    fn judge(&self, _kind: &str, _source: &str, _note: &str) -> Result<AxisScores> {
+        eyre::bail!("fabric -p judge-distillation failed: vendor 503")
+    }
+}
+
+/// `--regenerate` exits non-zero exactly as the main eval does: when every
+/// judged trace of both arms errored; one good trace keeps the run green.
+#[tokio::test]
+async fn regenerate_reports_all_judged_errored_only_when_every_trace_errored() {
+    let fixtures = vec![
+        fixture("video", "v", "a talk", Some("the tokio part")),
+        fixture("repo", "r", "a repo", Some("want a faster grep")),
+    ];
+    let regenerated = redistill(&fixtures, &FakeDispatch::default()).await.expect("redistill");
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let claim_judge = MockClaimJudge::new(ClaimVerdict::Supported);
+
+    let down = grade(&regenerated, &cache, &DownJudge, &claim_judge, &EvalOpts::default()).expect("grade");
+    assert!(down.all_judged_errored());
+    assert_eq!(down.errored_of_total(), (4, 4));
+
+    let up = grade(
+        &regenerated,
+        &cache,
+        &MockJudge::new(scores()),
+        &claim_judge,
+        &EvalOpts::default(),
+    )
+    .expect("grade");
+    assert!(!up.all_judged_errored());
+    assert_eq!(up.errored_of_total(), (0, 4));
+}

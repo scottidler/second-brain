@@ -38,7 +38,7 @@ fn read_health(config: &borg::config::Config, cache_path: &std::path::Path) -> e
     let store = borg::eval::scores::ScoreStore::open(cache_path)?;
     let trust_rows = borg::eval::trust::TrustStore::open(cache_path)?.all()?;
     let reports_dir = vault::paths::borg_eval_reports_dir();
-    let staged_root = vault::paths::borg_stages_dir();
+    let staged_root = config.staging.root.clone();
     weekly::health(&weekly::Inputs {
         receipts: &receipts,
         store: &store,

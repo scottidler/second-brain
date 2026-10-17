@@ -275,7 +275,8 @@ pub struct EvalArgs {
     /// golden fixtures
     #[arg(long)]
     pub staged: bool,
-    /// With --staged, read this staging root instead of borg's default
+    /// With --staged, read this staging root instead of borg.yml's
+    /// `staging.root`
     #[arg(long, value_name = "DIR", requires = "staged")]
     pub staging_root: Option<PathBuf>,
     /// With --staged, score at most N traces; with --inject, plant errors
@@ -455,12 +456,9 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
             patterns_dir: None,
             rebuild_cache: a.rebuild_cache,
             emit_calibration: a.emit_calibration.as_ref().map(vault::paths::expand_tilde),
-            staged_root: a.staged.then(|| {
-                a.staging_root
-                    .as_ref()
-                    .map(vault::paths::expand_tilde)
-                    .unwrap_or_else(vault::paths::borg_stages_dir)
-            }),
+            // Resolved by the caller, which holds borg.yml's `staging.root`
+            // (the default when `--staging-root` is absent).
+            staged_root: None,
             sample: a.sample,
             no_judge: a.no_judge,
         }

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from propose.adapter import PatternAdapter, feedback_text
-from propose.reflect import FabricProposer, extract, render
+from propose.reflect import FabricProposer, child_env, extract, render
 from propose.sb import Sb, SbError
 
 
@@ -15,11 +15,13 @@ class FakeRun:
     def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
         self.calls: list[list[str]] = []
         self.inputs: list[str | None] = []
+        self.envs: list[dict[str, str] | None] = []
         self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
         self.inputs.append(kwargs.get("input"))
+        self.envs.append(kwargs.get("env"))
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
@@ -118,6 +120,33 @@ def test_the_proposer_sends_the_prompt_to_fabric_and_takes_the_tagged_pattern():
     assert proposer.proposed == 1
     assert run.calls == [["fabric", "-m", "gemini-2.5-pro"]]
     assert "# OLD" in run.inputs[0] and "claim 1 judged unsupported" in run.inputs[0]
+
+
+def test_the_proposer_exports_the_configured_vendor_keys_under_fabric_names(tmp_path):
+    """The reflection child gets borg.yml's llm.api-keys the way the Rust
+    judges do: an env var reference or a key file, under fabric's var name."""
+    key_file = tmp_path / "openai.key"
+    key_file.write_text("openai-from-file\n")
+    run = FakeRun("<pattern>\n# NEW\n</pattern>\n")
+    proposer = FabricProposer(
+        model="gemini-2.5-pro",
+        run=run,
+        fabric_env={"GEMINI_API_KEY": "ESCOTE_GEMINI_API_KEY", "OPENAI_API_KEY": str(key_file)},
+        environ={"ESCOTE_GEMINI_API_KEY": "gemini-from-env", "PATH": "/bin"},
+    )
+    proposer({"p": "# OLD"}, {"p": []}, ["p"])
+    env = run.envs[0]
+    assert env["GEMINI_API_KEY"] == "gemini-from-env"
+    assert env["OPENAI_API_KEY"] == "openai-from-file"
+    assert env["PATH"] == "/bin"
+
+
+def test_an_unresolvable_key_reference_leaves_fabric_on_its_own_env(capsys):
+    env = child_env({"ANTHROPIC_API_KEY": "MISSING_VAR"}, {"ANTHROPIC_API_KEY": "fabric-own"})
+    assert env["ANTHROPIC_API_KEY"] == "fabric-own"
+    err = capsys.readouterr().err
+    assert "MISSING_VAR" in err and "fabric-own" not in err
+    assert child_env({}, {"PATH": "/bin"}) == {"PATH": "/bin"}
 
 
 def test_a_reply_without_a_pattern_block_is_an_error_not_an_empty_pattern():

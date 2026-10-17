@@ -393,17 +393,22 @@ fn a_deterministic_check_failure_triggers_a_remediation_even_when_no_judge_check
         (trigger.check.as_str(), trigger.judge_model.as_str()),
         (CHECK_QUOTE_GROUNDING, "")
     );
-    // The frozen "before" row is the trigger's eval_scores key.
+    // The frozen "before" is the trigger's eval_scores key plus a copy of its
+    // metrics, so a later overwrite of that key cannot rewrite it.
     let conn = receipts::open_at(&env.receipts_path).unwrap();
-    let (check, hash): (String, String) = conn
+    let (check, hash, metrics): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT trigger_check, trigger_content_hash FROM remediations WHERE source_url = ?1",
+            "SELECT trigger_check, trigger_content_hash, trigger_metrics_json FROM remediations WHERE source_url = ?1",
             params![URL],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(check, CHECK_QUOTE_GROUNDING);
     assert_eq!(hash, current_hash(&env.root, TRACE));
+    assert_eq!(
+        metrics.as_deref(),
+        Some(serde_json::json!({ "grounded": 0, "quoted": 1 }).to_string().as_str())
+    );
     // The body carries the lineage and the original method.
     let body = poster.bodies.lock().unwrap()[0].clone();
     assert_eq!(body["replay-of"], TRACE);

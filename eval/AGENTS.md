@@ -13,7 +13,7 @@ DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resol
 
 ## Contract with `sb`
 
-- `sb borg eval --candidate-split N --pattern P`: JSON `{pattern, kind, eligible, train, holdout}`, two disjoint stable samples of staged traces whose distill reaches P's single-call path.
+- `sb borg eval --candidate-split N --pattern P`: JSON `{pattern, kind, eligible, train, holdout, fabric-env}`, two disjoint stable samples of staged traces whose distill reaches P's single-call path. `fabric-env` maps fabric's var (`GEMINI_API_KEY`) to borg.yml's `llm.api-keys` reference for it (an env var name or a file path, never a value); `reflect.child_env` resolves each one onto the reflection child only, as `vault::fabric::command` does for the Rust judges.
 - `sb borg eval --candidate-pattern FILE --pattern P --traces ... --format json [--patterns-dir DIR]`: JSON `SampleScore` (kebab-case keys). Per trace: `score` (this note against its own baseline note, null when an arm errored), `feedback`, `errors`, `candidate-note`, `source-head`. Per sample: `baseline` and `candidate` objectives, present only when `complete`. Writes `candidate` rows to `eval_scores` and caches distills in `eval-cache.db`.
 - Add `--holdout ... --write-candidate [DIR]` to re-score the winner on the holdout and write `<DIR>/<pattern>-<date>.md` (default `~/.local/share/sb/borg/eval-reports/candidates`).
 
@@ -22,7 +22,7 @@ DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resol
 - `propose/__main__.py`: `python -m propose --pattern P [--sample N] [--budget N]`. Split, `gepa.optimize` (train is both trainset and valset), then the candidate file when the best is not the current pattern. Refuses at the split while the claim-support judge check is untrusted: `sb borg eval --candidate-split` carries the same trust gate as `--apply-candidate`.
 - `propose/sb.py`: the three `sb` calls; a non-zero exit is an `SbError` carrying stderr.
 - `propose/adapter.py`: the `GEPAAdapter` (one component, the pattern text); an errored trace scores 0 for the search.
-- `propose/reflect.py`: the custom proposer. One `fabric -m <model>` call per rewrite, the new pattern taken from `<pattern>...</pattern>`: the patterns carry their own ``` fences, which GEPA's fence extractor would cut.
+- `propose/reflect.py`: the custom proposer. One `fabric -m <model>` call per rewrite, with the split's `fabric-env` keys exported on that child, the new pattern taken from `<pattern>...</pattern>`: the patterns carry their own ``` fences, which GEPA's fence extractor would cut.
 - `promptfoo/promptfoo.yml`: the `echo` provider over each regenerated note, `llm-rubric` and `context-faithfulness` graded by `google:gemini-2.5-pro`.
 - `tests/`: pytest with fake runners (no sb, no fabric, no network), plus the run/skip rule of `bin/promptfoo-check` against throwaway git repos.
 
