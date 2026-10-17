@@ -87,7 +87,7 @@ What this settles:
 - **The 422 body echoes the request**, so error text keeps only `detail.error_type` and `message`, never `input`.
 - **Bare tag names are ambiguous for some tags.** `books .61` on a Rust note, and football names like `defense` and `rpo` collide with tech meanings. Phase 0b measures alternatives.
 
-### Phase 0b: calibration and the ship gate (still to run, zero code)
+### Phase 0b: calibration and the ship gate (run 2026-10-16, zero code; winner C at 0.90)
 
 **Inputs.** Start from the existing harness at `~/Claude/tags-only-trial/p0/`:
 
@@ -128,6 +128,41 @@ Thresholds: 0.80, 0.85, 0.90, 0.95.
 - C wins: Phase 1 adds an optional per-tag `description` to `canonical-tags.yml`, read into `CanonicalSet`. The text comes from `descriptions.json`, reviewed in the diff.
 
 The chosen arm, threshold and data path are written into Data Model, API Design and Phase 1 before Phase 1 starts.
+
+#### Phase 0b results (run 2026-10-16, ripr, key in the header from the env var, never echoed)
+
+- Model served: `jev-1.13.0` on every response of all six runs (requested `jev-latest`).
+- Gold notes: 53 in `gold.json`. 46 used, 7 dropped because the vault no longer has them (all deleted in vault commit `6ab13d50`, "cleaned up"):
+  - `plugin-sync-removal-security-review-no-vuln`, `cargo-toml-dep-bump-security-review-no-findings`, `slack-cli-valet-client-extraction-and-pr496-babysit`, `export-fixtures-json-security-review-no-risk`, `marquee-release-yml-and-verify-cli-discovery`, `platform-service-helm-httproute-fixture-security-review`, `review-kms-key-rotation-security-policy`
+- One gold note was renamed, not deleted, and is kept under its current path: `ex-snowflake-engineers-say-there-s-a-blind-spot-in-data-engineering-so-they-built-tower-to-fix-it.md` is now `...-so-they.md` (same title and source URL).
+- `state`: 39 of the 46 notes had a `## Summary` and were scored on it verbatim; 7 used the 900-char body head. 210 gold positives, 4.57 per note.
+- Canonical rename: `kubernetes` became `k8s` (`939470e`) after gold and `descriptions.json` were written. Gold's `kubernetes` is scored as `k8s`, and arm C's `k8s` criterion is `descriptions.json["kubernetes"]`.
+- Scoring follows `p0/score.py`: the predicted set is the scores ≥ threshold, highest first, capped at 8. P, R and F1 are micro-averaged per run, then averaged over the two runs. Instability is the share of the 46 notes whose predicted set differs between run 1 and run 2.
+
+| Arm | Threshold | P | R | F1 | Instability | Tags/note | Gate |
+|---|---|---|---|---|---|---|---|
+| A | 0.80 | 0.654 | 0.719 | 0.685 | 0.130 | 5.02 | fail (P) |
+| A | 0.85 | 0.705 | 0.688 | 0.696 | 0.043 | 4.46 | fail (P) |
+| A | 0.90 | 0.740 | 0.636 | 0.684 | 0.130 | 3.92 | fail (P) |
+| A | 0.95 | 0.856 | 0.538 | 0.661 | 0.043 | 2.87 | pass |
+| B | 0.80 | 0.657 | 0.669 | 0.663 | 0.174 | 4.65 | fail (P) |
+| B | 0.85 | 0.684 | 0.633 | 0.658 | 0.152 | 4.23 | fail (P) |
+| B | 0.90 | 0.733 | 0.595 | 0.657 | 0.109 | 3.71 | fail (P) |
+| B | 0.95 | 0.838 | 0.505 | 0.630 | 0.022 | 2.75 | pass |
+| C | 0.80 | 0.756 | 0.769 | 0.763 | 0.087 | 4.64 | fail (P) |
+| C | 0.85 | 0.792 | 0.724 | 0.756 | 0.152 | 4.17 | fail (P) |
+| **C** | **0.90** | **0.840** | **0.650** | **0.733** | **0.065** | **3.53** | **pass, winner** |
+| C | 0.95 | 0.901 | 0.519 | 0.659 | 0.087 | 2.63 | pass |
+
+**Gate verdict: C at 0.90.** Four rows qualify (P ≥ 0.80, instability ≤ 0.195). C at 0.90 has the highest F1 of them: 0.733, next is C at 0.95 with 0.659. Every row clears the 0.195 instability bar, so precision is the only thing ruling rows out.
+
+Against the classifier.dev baseline: F1 0.733 sits under A0's 0.741 and A2's 0.788, at lower instability (0.065 vs 0.195). The two are not like for like (53 notes on `wire.json`'s 900-char clip there, 46 notes on the production `state` here), and the gate does not ask jev to beat them.
+
+C winning sets three things, written into the sections below:
+
+- Data Model: `threshold` 0.9; `CanonicalSet` carries per-tag descriptions.
+- API Design: `instructions = "Is this text about {tag}?"`, `criteria.true = <the tag's description>`.
+- Phase 1: the `description` data path in `canonical-tags.yml`.
 
 ## Proposed Solution
 
@@ -181,7 +216,7 @@ pub enum ClassifierKind { #[default] Deterministic, FabricClosed, Jev }
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct TagsClassifierConfig {
     pub classifier: ClassifierKind,
-    pub threshold: f32,          // template default: the Phase 0b threshold
+    pub threshold: f32,          // template default 0.9 (Phase 0b: arm C at 0.90)
     pub fallback: ClassifierKind,
     pub timeout_secs: u64,       // unchanged; now one total deadline per classify (API Design)
     pub api_key: String,         // env var NAME, default "ESCOTE_TYPESAFE_API_KEY"
@@ -198,9 +233,36 @@ YAML, as ripr will run it:
 tags:
   classifier:
     classifier: jev
-    threshold: <Phase 0b threshold>   # set explicitly: both live ymls already pin 0.9
+    threshold: 0.9   # Phase 0b winner; set explicitly even though both live ymls already pin 0.9
     fallback: deterministic
 ```
+
+Per-tag descriptions (Phase 0b arm C won), in `vault`:
+
+```rust
+// vault/src/canonical.rs
+pub struct CanonicalTagsFile {
+    // ...existing fields...
+    #[serde(default)]
+    pub descriptions: HashMap<String, String>,   // yml `descriptions:`, tag -> text
+}
+
+pub struct CanonicalSet {
+    // ...existing fields...
+    pub description: HashMap<String, String>,    // filled by canonical_set()
+}
+```
+
+```yaml
+# config/canonical-tags.yml
+descriptions:
+  agents: "AI agents that take actions with tools: coding agents, ..."
+  k8s: "..."
+```
+
+- The text is `~/Claude/tags-only-trial/p0/descriptions.json`, reviewed in the diff. `k8s` takes the `kubernetes` entry.
+- A `descriptions:` key that is not a canonical tag is a load error (fail closed, same as an unknown top-level key).
+- A tag with no description is sent with no `criteria` (arm A's question for that tag). The shipped file carries all 117, and a test pins that.
 
 ### API Design
 
@@ -209,8 +271,12 @@ Request, one per note:
 ```json
 {"model": "<model>",
  "state": "<title>\n\n<text>",
- "questions": {"<tag>": {"type": "noul", "instructions": "<Phase 0b arm>"}}}
+ "questions": {"<tag>": {"type": "noul",
+                         "instructions": "Is this text about <tag>?",
+                         "criteria": {"true": "<CanonicalSet.description[tag]>"}}}}
 ```
+
+- The question shape is Phase 0b arm C. `criteria` is omitted for a tag with no description.
 
 - `state` is today's classifier input, unchanged:
   - `format!("{title}\n\n{text}")` (`distillers/src/tags.rs:676`)
@@ -243,14 +309,15 @@ Request, one per note:
 #### Phase 0b: Calibration and ship gate
 **Model:** opus
 - As specified above. Zero code. The table lands in this doc under Phase 0b.
-- **Success criteria:**
-  - P, R, F1 and instability are recorded for arms A, B and C at all four thresholds, each scored against gold.
-  - Either a winner passes the gate and is written into Data Model, API Design and Phase 1, or the gate fails and the doc records the stop.
+- **Success criteria:** met 2026-10-16.
+  - P, R, F1 and instability are recorded for arms A, B and C at all four thresholds, each scored against gold (46 notes, 7 dropped).
+  - Winner C at 0.90 (P 0.840, R 0.650, F1 0.733, instability 0.065), written into Data Model, API Design and Phase 1.
 
 #### Phase 1: Jev classifier, callers compiled green
 **Model:** opus
 - In `distillers`: `ClassifierKind::Jev`, `TagMethod::Jev`, the `Jev` struct, the config fields, `deny_unknown_fields`, and the `base_url` test seam.
-- Plus the Phase 0b data path, if B or C won.
+- Plus the Phase 0b data path (C won): `descriptions:` in `config/canonical-tags.yml` (117 entries from `descriptions.json`, `k8s` from its `kubernetes` entry), `CanonicalTagsFile.descriptions`, `CanonicalSet.description` filled by `canonical_set()`, and `Jev` sending each as `criteria.true` (Data Model, API Design).
+  - Tests: a non-canonical `descriptions:` key fails to load; the shipped file has a description for every canonical tag; the stub sees `criteria.true` on each question.
 - Delete the classifier.dev client, sharding, constants, `classify_batch`, and `distillers/src/tags/fixtures/classifier-dev-2026-09-20.json`.
 - Every change a caller needs to compile:
   - `sb/src/cli/checks.rs:563` (`token_env`)
@@ -281,7 +348,7 @@ Request, one per note:
 
 #### Phase 3: Templates and agent docs
 **Model:** sonnet
-- Rewrite the tag blocks in `config/templates/borg.yml.example` (`:186-209`) and `config/templates/cortex.yml.example` (`:224-247`) for `jev` and the Phase 0b threshold.
+- Rewrite the tag blocks in `config/templates/borg.yml.example` (`:186-209`) and `config/templates/cortex.yml.example` (`:224-247`) for `jev` and the Phase 0b threshold (0.9).
 - Rewrite the comments in `distillers/AGENTS.md:57` and `distillers/Cargo.toml:24-27`. Name jev in the root `CLAUDE.md` Tags bullet.
 - **Success criteria:**
   - `rg -i 'classifier[.-]dev|ClassifierDev|CLASSIFY_API_KEY|CLASSIFIER_DEV_TOKEN' --glob '!docs/**'` exits 1 (no matches).
@@ -293,7 +360,7 @@ Request, one per note:
    - `~/repos/scottidler/dotfiles/HOME/.config/sb/cortex.yml` (ripr's `cortex.yml` symlinks here)
    - the dotfiles `borg.yml` (`:221` says `classifier-dev`)
 
-   In each: set `classifier: jev`, set `threshold` to the Phase 0b value, and delete the stale classifier.dev comments. Commit the dotfiles change, or the next manifest apply reverts it.
+   In each: set `classifier: jev`, set `threshold` to the Phase 0b value (0.9), and delete the stale classifier.dev comments. Commit the dotfiles change, or the next manifest apply reverts it.
 2. Run `otto deploy` right after, which restarts borg and cortex.
    - The yml and the binary must change together. The old binary rejects `jev`, and the new one rejects `classifier-dev`.
    - Running daemons ignore the yml until they restart. Only `sb` CLI calls in between fail, and they fail loudly, naming the field.
