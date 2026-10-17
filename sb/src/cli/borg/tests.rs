@@ -99,3 +99,36 @@ fn render_eval_jsonl_writes_one_parseable_line_per_trace() {
         assert_eq!(v["run_kind"], "baseline");
     }
 }
+
+#[test]
+fn eval_unscored_takes_limit_or_count_and_refuses_the_dev_run_flags() {
+    let h = EvalHarness::try_parse_from(["sb", "--unscored", "--limit", "5"]).unwrap();
+    assert!(h.eval.unscored);
+    assert_eq!(h.eval.limit, Some(5));
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--unscored", "--count"])
+            .unwrap()
+            .eval
+            .count
+    );
+    assert!(EvalHarness::try_parse_from(["sb", "--unscored", "--count", "--limit", "5"]).is_err());
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--limit", "5"]).is_err(),
+        "--limit needs --unscored"
+    );
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--count"]).is_err(),
+        "--count needs --unscored"
+    );
+    for flag in [
+        &["--staged"][..],
+        &["--no-judge"],
+        &["--judge-model", "m"],
+        &["--regenerate"],
+        &["--sample", "3"],
+    ] {
+        let mut argv = vec!["sb", "--unscored"];
+        argv.extend_from_slice(flag);
+        assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
+    }
+}

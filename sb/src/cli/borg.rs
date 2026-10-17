@@ -385,6 +385,9 @@ impl BorgCli {
                     }
                     return Ok(());
                 }
+                if a.unscored {
+                    return run_eval_unscored(&config, &opts, &a);
+                }
                 match borg::eval::run(&opts)? {
                     borg::eval::EvalOutcome::CalibrationSheet(path) => {
                         println!("wrote calibration sheet: {}", path.display());
@@ -486,6 +489,71 @@ impl BorgCli {
             },
         }
     }
+}
+
+/// `sb borg eval --unscored`: the backlog count, or one scoring run over it.
+/// Judge keys named by `llm.api-keys` must resolve here before anything is
+/// judged, so a timer run missing a var fails as one clear error.
+fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a: &args::EvalArgs) -> Result<()> {
+    let staged_root = vault::paths::borg_stages_dir();
+    let receipts = borg::receipts::open_default().context("opening the receipts db")?;
+    let store = borg::eval::scores::ScoreStore::open(&vault::paths::borg_eval_cache_path())?;
+    let required = borg::eval::scores::required_checks(&config.eval.judge_models);
+
+    if a.count {
+        if config.eval.judge_models.is_empty() {
+            eyre::bail!("eval.judge-models is empty: the required-check set is derived from it");
+        }
+        let backlog = borg::eval::backlog::find_backlog(&receipts, &store, &staged_root, &required, None)?;
+        for (trace, reason) in &backlog.unreadable {
+            eprintln!("unreadable staged trace {trace}: {reason}");
+        }
+        eprintln!(
+            "{} succeeded receipts have no staged source and are not counted",
+            backlog.not_staged
+        );
+        println!("{}", backlog.traces.len());
+        return Ok(());
+    }
+
+    borg::eval::backlog::preflight_keys(&opts.api_keys)?;
+    let cache = borg::eval::cache::JudgmentCache::open(&vault::paths::borg_eval_cache_path())?;
+    let factory = |o: &borg::eval::EvalOpts| -> Result<(Box<dyn borg::eval::DistillationJudge>, Box<dyn borg::eval::ClaimJudge>)> {
+        let (judge, claim_judge) = borg::eval::fabric_judges(o)?;
+        Ok((Box::new(judge), Box::new(claim_judge)))
+    };
+    let run = borg::eval::backlog::run_unscored(
+        &receipts,
+        &store,
+        &cache,
+        opts,
+        &staged_root,
+        &config.eval.judge_models,
+        a.limit.or(config.eval.limit),
+        &factory,
+    )?;
+    for (trace, reason) in &run.unreadable {
+        eprintln!("unreadable staged trace {trace}: {reason}");
+    }
+    for report in &run.reports {
+        let rendered = match a.format {
+            args::EvalFormat::Text => report.render(),
+            args::EvalFormat::Json => render_eval_jsonl(report)?,
+        };
+        print!("{rendered}");
+    }
+    let summary = format!(
+        "unscored: {} traces selected, {} score rows written, {} succeeded receipts with no staged source skipped",
+        run.selected, run.rows_written, run.not_staged
+    );
+    match a.format {
+        args::EvalFormat::Text => println!("\n{summary}"),
+        args::EvalFormat::Json => eprintln!("{summary}"),
+    }
+    if run.all_errored() {
+        eyre::bail!("every judged trace errored on every judge model; see the per-trace errors");
+    }
+    Ok(())
 }
 
 /// The `sb borg eval` options for `a`: the CLI flags plus the eval's

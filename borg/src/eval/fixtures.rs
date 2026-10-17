@@ -173,6 +173,69 @@ fn staged_source(trace_dir: &Path, distilled: &Distilled) -> Result<Option<Strin
     Ok(None)
 }
 
+/// What one staging directory yielded.
+enum StagedLoad {
+    Loaded(&'static str, Box<Fixture>),
+    /// A staged trace the eval does not score: an unscored kind, or no
+    /// recoverable source.
+    Skipped,
+    /// Not a staged distillation at all (no `envelope.yml` / `distilled.yml`).
+    NotStaged,
+}
+
+fn load_staged_dir(dir: &Path, trace: &str) -> Result<StagedLoad> {
+    let distilled_path = dir.join(DISTILLED_FILE);
+    let envelope_path = dir.join(ENVELOPE_FILE);
+    if !distilled_path.is_file() || !envelope_path.is_file() {
+        return Ok(StagedLoad::NotStaged);
+    }
+    let envelope_raw =
+        std::fs::read_to_string(&envelope_path).with_context(|| format!("reading {}", envelope_path.display()))?;
+    let envelope: StagedEnvelope =
+        serde_yaml::from_str(&envelope_raw).with_context(|| format!("parsing {}", envelope_path.display()))?;
+    let Some(kind) = fixture_kind(envelope.kind) else {
+        return Ok(StagedLoad::Skipped);
+    };
+    let raw =
+        std::fs::read_to_string(&distilled_path).with_context(|| format!("reading {}", distilled_path.display()))?;
+    let distilled: Distilled =
+        serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", distilled_path.display()))?;
+    let Some(source) = staged_source(dir, &distilled)? else {
+        log::debug!("eval::fixtures::load_staged: no source for trace={trace}");
+        return Ok(StagedLoad::Skipped);
+    };
+    Ok(StagedLoad::Loaded(
+        kind,
+        Box::new(Fixture {
+            id: format!("{kind}/{trace}"),
+            kind: kind.to_string(),
+            slug: trace.to_string(),
+            source,
+            distilled,
+            capture_note: None,
+        }),
+    ))
+}
+
+/// Load ONE staged trace by id: `Ok(None)` when it is absent, is not a scored
+/// kind, or has no recoverable source (swept from staging, say); `Err` when
+/// its artifacts exist but do not parse. An id that is not a bare directory
+/// name never reaches the filesystem.
+pub fn load_staged_trace(root: &Path, trace: &str) -> Result<Option<Fixture>> {
+    log::debug!(
+        "eval::fixtures::load_staged_trace: root={} trace={trace}",
+        root.display()
+    );
+    let bare = !trace.is_empty() && !trace.contains(['/', '\\']) && trace != "." && trace != "..";
+    if !bare {
+        return Ok(None);
+    }
+    match load_staged_dir(&root.join(trace), trace)? {
+        StagedLoad::Loaded(_, fixture) => Ok(Some(*fixture)),
+        StagedLoad::Skipped | StagedLoad::NotStaged => Ok(None),
+    }
+}
+
 /// Load live distillations from borg's staging root as fixtures: every trace
 /// directory holding `envelope.yml` + `distilled.yml` + a recoverable source.
 /// Ids are `<kind>/<trace>`. With `sample`, take a deterministic stratified
@@ -191,37 +254,12 @@ pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
     let mut skipped = 0usize;
     for entry in read_sorted(root)? {
         let dir = entry.path();
-        let distilled_path = dir.join(DISTILLED_FILE);
-        let envelope_path = dir.join(ENVELOPE_FILE);
-        if !distilled_path.is_file() || !envelope_path.is_file() {
-            continue;
-        }
         let trace = entry.file_name().to_string_lossy().to_string();
-        let envelope_raw =
-            std::fs::read_to_string(&envelope_path).with_context(|| format!("reading {}", envelope_path.display()))?;
-        let envelope: StagedEnvelope =
-            serde_yaml::from_str(&envelope_raw).with_context(|| format!("parsing {}", envelope_path.display()))?;
-        let Some(kind) = fixture_kind(envelope.kind) else {
-            skipped += 1;
-            continue;
-        };
-        let raw = std::fs::read_to_string(&distilled_path)
-            .with_context(|| format!("reading {}", distilled_path.display()))?;
-        let distilled: Distilled =
-            serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", distilled_path.display()))?;
-        let Some(source) = staged_source(&dir, &distilled)? else {
-            log::debug!("eval::fixtures::load_staged: no source for trace={trace}");
-            skipped += 1;
-            continue;
-        };
-        by_kind.entry(kind).or_default().push(Fixture {
-            id: format!("{kind}/{trace}"),
-            kind: kind.to_string(),
-            slug: trace,
-            source,
-            distilled,
-            capture_note: None,
-        });
+        match load_staged_dir(&dir, &trace)? {
+            StagedLoad::Loaded(kind, fixture) => by_kind.entry(kind).or_default().push(*fixture),
+            StagedLoad::Skipped => skipped += 1,
+            StagedLoad::NotStaged => {}
+        }
     }
 
     for fixtures in by_kind.values_mut() {

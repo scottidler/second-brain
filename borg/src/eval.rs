@@ -12,6 +12,7 @@
 //! ([`load`]) is split from scoring ([`evaluate`]) so the scoring pipeline is
 //! unit-testable against a [`judge::MockJudge`] without a live fabric call.
 
+pub mod backlog;
 pub mod cache;
 pub mod calc;
 pub mod fixtures;
@@ -20,6 +21,8 @@ pub mod judge;
 pub mod patterns;
 pub mod regenerate;
 pub mod report;
+pub mod scores;
+pub mod timer;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,7 +30,9 @@ use std::path::{Path, PathBuf};
 use eyre::{Context, Result};
 use judge::JUDGE_INPUT_MAX_CHARS;
 
-pub use fixtures::{CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, render_options_for_kind};
+pub use fixtures::{
+    CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, load_staged_trace, render_options_for_kind,
+};
 pub use intents::{FabricIntentWriter, INTENT_KINDS, IntentWriter, SynthReport, synth_intents};
 pub use judge::{AxisScores, ClaimJudge, ClaimVerdict, DistillationJudge, FabricClaimJudge, FabricJudge};
 #[cfg(test)]
@@ -312,11 +317,12 @@ pub fn evaluate(
 
         // The judge sees the full note first, then as much source as the
         // input budget leaves, so a long source can never push the note out.
-        let note = judge_note_text(&fx.distilled);
-        let budget = judge::source_budget(JUDGE_INPUT_MAX_CHARS, &fx.kind, &note);
-        let (source, truncated) = truncate_source(&fx.source, budget);
-        // The distill hash: covers exactly what the distillation judge sees.
-        let content_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, note));
+        let JudgedInput {
+            note,
+            source,
+            truncated,
+            content_hash,
+        } = judged_input(fx);
         let mut record = TraceRecord {
             trace: fx.slug.clone(),
             fixture: fx.id.clone(),
@@ -506,6 +512,33 @@ fn judge_claims_checked(
         eyre::bail!("claim judge returned {} verdicts for {} claims", v.len(), claims.len());
     }
     Ok(v)
+}
+
+/// Exactly what the distillation judge sees for a fixture, and its hash.
+pub struct JudgedInput {
+    pub note: String,
+    /// The source, truncated to what the note leaves of the judge budget.
+    pub source: String,
+    pub truncated: bool,
+    /// The distill hash: `stable_hash(kind, budgeted source, note)`. The
+    /// `eval_scores` `content_hash`, so a row is current only while the note
+    /// and the source budget it was judged on are unchanged.
+    pub content_hash: String,
+}
+
+/// The judge input for `fx`: the full note first, then as much source as the
+/// input budget leaves, so a long source can never push the note out.
+pub fn judged_input(fx: &Fixture) -> JudgedInput {
+    let note = judge_note_text(&fx.distilled);
+    let budget = judge::source_budget(JUDGE_INPUT_MAX_CHARS, &fx.kind, &note);
+    let (source, truncated) = truncate_source(&fx.source, budget);
+    let content_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, note));
+    JudgedInput {
+        note,
+        source,
+        truncated,
+        content_hash,
+    }
 }
 
 /// Truncate the source to `max_chars` on a char boundary (never a byte slice).

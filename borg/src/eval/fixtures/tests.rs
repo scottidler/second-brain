@@ -335,3 +335,44 @@ fn load_staged_errors_when_nothing_loads() {
     assert!(load_staged(tmp.path(), None).is_err());
     assert!(load_staged(&tmp.path().join("missing"), None).is_err());
 }
+
+fn stage_trace(root: &std::path::Path, trace: &str, kind: &str, distilled: &str, transcript: Option<&str>) {
+    let dir = root.join(trace);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join(ENVELOPE_FILE), format!("kind: {kind}\n")).expect("envelope");
+    std::fs::write(dir.join(DISTILLED_FILE), distilled).expect("distilled");
+    if let Some(t) = transcript {
+        std::fs::write(dir.join(TRANSCRIPT_FILE), t).expect("transcript");
+    }
+}
+
+#[test]
+fn load_staged_trace_returns_the_one_trace_with_its_source() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    stage_trace(tmp.path(), "tr-1", "article-url", MINIMAL_DISTILLED, Some("the source"));
+    stage_trace(tmp.path(), "tr-2", "article-url", MINIMAL_DISTILLED, Some("another"));
+    let fx = load_staged_trace(tmp.path(), "tr-1").expect("load").expect("some");
+    assert_eq!(fx.id, "article/tr-1");
+    assert_eq!(fx.slug, "tr-1");
+    assert_eq!(fx.source, "the source");
+}
+
+#[test]
+fn load_staged_trace_is_none_for_absent_unsourced_unscored_and_non_bare_ids() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    stage_trace(tmp.path(), "no-source", "article-url", MINIMAL_DISTILLED, None);
+    stage_trace(tmp.path(), "vocab", "vocabulary-en", MINIMAL_DISTILLED, Some("src"));
+    for trace in ["missing", "no-source", "vocab", "", ".", "..", "../x", "a/b", "a\\b"] {
+        assert!(
+            load_staged_trace(tmp.path(), trace).expect("not an error").is_none(),
+            "{trace:?}"
+        );
+    }
+}
+
+#[test]
+fn load_staged_trace_errors_on_artifacts_that_do_not_parse() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    stage_trace(tmp.path(), "tr-bad", "article-url", ": : [", Some("src"));
+    assert!(load_staged_trace(tmp.path(), "tr-bad").is_err());
+}

@@ -413,6 +413,38 @@ async fn register_systemd_units() -> Result<()> {
         println!("{line}");
     }
 
+    // The daily eval timer: the same units-then-enable shape, but this one is
+    // enabled here (`enable --now`) because nothing else would turn it on.
+    // A config that cannot render the units (llm.api-keys named but no
+    // eval.env-bootstrap) fails the bootstrap, loudly, after every other unit
+    // has landed.
+    log::debug!("register_systemd_units: installing sb-eval.{{service,timer}}");
+    let eval_config = borg::config::load_config(None).context("load borg config for eval timer install")?;
+    for line in borg::eval::timer::install(&eval_config)? {
+        println!("{line}");
+    }
+    for args in borg::eval::timer::enable_commands() {
+        run_systemctl(&args)?;
+    }
+    println!("Enabled and started {}", borg::eval::timer::EVAL_TIMER);
+
+    Ok(())
+}
+
+/// Run `systemctl <args>` and fail with its stderr when it exits non-zero.
+fn run_systemctl(args: &[String]) -> Result<()> {
+    let out = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run systemctl {}", args.join(" ")))?;
+    if !out.status.success() {
+        eyre::bail!(
+            "systemctl {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     Ok(())
 }
 

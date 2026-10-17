@@ -13,6 +13,7 @@ pub(crate) const APP_NAME: &str = "borg";
 mod desktop;
 mod discord;
 mod engine;
+mod eval;
 mod harvest;
 mod ntfy;
 mod signal;
@@ -21,6 +22,7 @@ mod telegram;
 pub use desktop::DesktopConfig;
 pub use discord::DiscordConfig;
 pub use engine::*;
+pub use eval::EvalConfig;
 pub use harvest::{HarvestConfig, HarvestMode};
 pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;
@@ -163,6 +165,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub harvest: HarvestConfig,
+    #[serde(default)]
+    pub eval: EvalConfig,
     #[serde(default)]
     pub intake: IntakeConfig,
     #[serde(default)]

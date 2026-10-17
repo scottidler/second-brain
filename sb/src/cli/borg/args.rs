@@ -296,6 +296,25 @@ pub struct EvalArgs {
     /// to measure repo prompts before a deploy)
     #[arg(long, value_name = "DIR")]
     pub patterns_dir: Option<PathBuf>,
+    /// Score the successful ingests whose staged trace has no current,
+    /// error-free row for every required check (`eval.judge-models` in
+    /// borg.yml), oldest first, and record each result in `eval_scores`.
+    /// This is what `sb-eval.service` runs.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "staged", "synth_intents", "regenerate", "emit_calibration", "no_judge", "judge_model", "rebuild_cache",
+            "staging_root", "sample"
+        ]
+    )]
+    pub unscored: bool,
+    /// With --unscored, score at most N traces this run (overrides
+    /// `eval.limit`); the rest stay in the backlog for the next run
+    #[arg(long, value_name = "N", requires = "unscored")]
+    pub limit: Option<usize>,
+    /// With --unscored, print the backlog size and score nothing
+    #[arg(long, requires = "unscored", conflicts_with = "limit")]
+    pub count: bool,
     /// text (the report) or json (one JSON record per trace, one per line)
     #[arg(
         long,

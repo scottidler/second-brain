@@ -295,6 +295,23 @@ harvest:
   #   command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
   #   env-file: /run/user/1000/sb-harvest.env
 
+# Daily eval (sb-eval.timer): `sb borg eval --unscored` scores every successful
+# ingest still in staging and records each check in eval_scores. A trace is
+# covered when every deterministic check and both judge checks of EVERY model
+# in `judge-models` have a current, error-free row; adding the second judge is
+# adding its model here. `sb bootstrap` writes and enables the units and
+# refuses to when llm.api-keys is set but `env-bootstrap` is not: the service
+# runs with a stripped environment and must decrypt every var llm.api-keys
+# names (anthropic/gemini/openai) into its OWN env-file.
+# eval:
+#   schedule: "*-*-* 05:00:00"        # systemd OnCalendar, the one value in the timer
+#   limit: 100                        # traces per run; the rest carry over (omit = all)
+#   judge-models:
+#     - gemini-2.5-pro
+#   env-bootstrap:
+#     command: manifest -C ~/repos/scottidler/keep/manifest.yml secrets env -f env
+#     env-file: /run/user/1000/sb-eval.env
+
 # Intake - raw-input sidecars. Every trace gets <vault>/system/intake/<trace>.txt
 # holding the verbatim bytes it arrived with (or a short descriptor for binary
 # input). Nothing in the pipeline READS these; they exist so you can answer
