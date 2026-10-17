@@ -36,8 +36,8 @@ use eyre::{Context, Result};
 use judge::JUDGE_INPUT_MAX_CHARS;
 
 pub use fixtures::{
-    CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, load_staged_trace, render_options_for_kind,
-    stratified_sample,
+    CAPTURE_NOTE_FILE, Fixture, StagedTrace, judge_note_text, load, load_staged, load_staged_trace, probe_staged_trace,
+    render_options_for_kind, stratified_sample,
 };
 pub use intents::{FabricIntentWriter, INTENT_KINDS, IntentWriter, SynthReport, synth_intents};
 pub use judge::{AxisScores, ClaimJudge, ClaimVerdict, DistillationJudge, FabricClaimJudge, FabricJudge};

@@ -51,9 +51,24 @@ pub enum Commands {
         list: bool,
     },
 
-    /// Measure relevance lift of graph retrieval vs hybrid (design 2026-06-06)
+    /// Measure retrieval: relevance lift of graph vs hybrid (design 2026-06-06),
+    /// or answerability (does a note answer what its source answered); or mine
+    /// Scott's own past queries into a query set
     Eval(EvalArgs),
 }
+
+/// What `sb oracle eval` measures.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "kebab-case")]
+pub enum EvalTarget {
+    /// Per-mode nDCG/Recall/MRR and the graph-hybrid lift over hybrid.
+    Lift,
+    /// Note vs its staged source, judged on the configured pipeline's top hits.
+    Answerability,
+}
+
+/// clyde binary the query miner runs (resolved on `PATH`).
+const CLYDE_BINARY: &str = "clyde";
 
 #[derive(Args)]
 pub struct EvalArgs {
@@ -78,6 +93,36 @@ pub struct EvalArgs {
     /// Also write the rendered report to this path
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// What to measure
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value = "lift",
+        conflicts_with = "emit_calibration"
+    )]
+    pub target: EvalTarget,
+    /// Mine the `knowledge_search` queries of every personal-scope session in
+    /// clyde's catalog into a query set at this path, and measure nothing
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["target", "emit_calibration", "report", "rebuild_cache"])]
+    pub mine_queries: Option<PathBuf>,
+}
+
+/// Reads a hit's source from borg's staging root through borg's single-trace
+/// staged reader, the one `sb borg eval` scores from.
+pub struct StagedSourceReader {
+    pub root: PathBuf,
+}
+
+impl oracle::eval::answerability::SourceReader for StagedSourceReader {
+    fn read(&self, trace: &str) -> oracle::eval::answerability::SourceText {
+        use oracle::eval::answerability::SourceText;
+        match borg::eval::probe_staged_trace(&self.root, trace) {
+            borg::eval::StagedTrace::Loaded(fixture) => SourceText::Found(fixture.source),
+            borg::eval::StagedTrace::Absent => SourceText::Expired,
+            borg::eval::StagedTrace::Unreadable(why) => SourceText::Unreadable(why),
+        }
+    }
 }
 
 impl From<&EvalArgs> for oracle::eval::EvalOpts {
@@ -127,7 +172,42 @@ impl OracleCli {
                 }
             }
             Commands::Eval(a) => {
+                if let Some(out) = &a.mine_queries {
+                    let out = vault::paths::expand_tilde(out);
+                    let mined = oracle::eval::mine::mine_to_file(CLYDE_BINARY, &out)?;
+                    println!(
+                        "mined {} distinct queries ({} knowledge_search calls) from {} personal-scope sessions -> {}",
+                        mined.queries.len(),
+                        mined.calls,
+                        mined.sessions_personal,
+                        out.display()
+                    );
+                    println!(
+                        "sessions: {} total, {} personal, {} work (dropped), {} missing or unknown scope (dropped), \
+                         {} personal without a transcript",
+                        mined.sessions_total,
+                        mined.sessions_personal,
+                        mined.sessions_work,
+                        mined.sessions_unknown_scope,
+                        mined.sessions_without_transcript
+                    );
+                    return Ok(());
+                }
                 let opts = oracle::eval::EvalOpts::from(&a);
+                if a.target == EvalTarget::Answerability {
+                    let reader = StagedSourceReader {
+                        root: vault::paths::borg_stages_dir(),
+                    };
+                    let report = oracle::eval::answerability::run(&config, &opts, &reader)?;
+                    let rendered = report.render();
+                    print!("{rendered}");
+                    if let Some(path) = a.report {
+                        std::fs::write(&path, &rendered)
+                            .with_context(|| format!("writing report to {}", path.display()))?;
+                        println!("\nreport written to {}", path.display());
+                    }
+                    return Ok(());
+                }
                 match oracle::eval::run(&config, &opts)? {
                     oracle::eval::EvalOutcome::CalibrationSheet(path) => {
                         println!("wrote calibration sheet: {}", path.display());

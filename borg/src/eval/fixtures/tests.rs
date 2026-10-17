@@ -376,3 +376,34 @@ fn load_staged_trace_errors_on_artifacts_that_do_not_parse() {
     stage_trace(tmp.path(), "tr-bad", "article-url", ": : [", Some("src"));
     assert!(load_staged_trace(tmp.path(), "tr-bad").is_err());
 }
+
+#[test]
+fn probe_staged_trace_loads_a_staged_trace_with_its_source() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    stage_trace(tmp.path(), "tr-1", "article-url", MINIMAL_DISTILLED, Some("the source"));
+    match probe_staged_trace(tmp.path(), "tr-1") {
+        StagedTrace::Loaded(fx) => assert_eq!(fx.source, "the source"),
+        other => panic!("expected Loaded, got {other:?}"),
+    }
+}
+
+#[test]
+fn probe_staged_trace_tells_a_swept_trace_from_an_unreadable_one() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    stage_trace(tmp.path(), "no-source", "article-url", MINIMAL_DISTILLED, None);
+    stage_trace(tmp.path(), "vocab", "vocabulary-en", MINIMAL_DISTILLED, Some("src"));
+    stage_trace(tmp.path(), "tr-bad", "article-url", ": : [", Some("src"));
+    std::fs::create_dir_all(tmp.path().join("bare-dir")).expect("mkdir");
+
+    assert!(matches!(probe_staged_trace(tmp.path(), "missing"), StagedTrace::Absent));
+    for trace in ["no-source", "vocab", "tr-bad", "bare-dir", "", "..", "a/b"] {
+        assert!(
+            matches!(probe_staged_trace(tmp.path(), trace), StagedTrace::Unreadable(_)),
+            "{trace:?}"
+        );
+    }
+    match probe_staged_trace(tmp.path(), "tr-bad") {
+        StagedTrace::Unreadable(why) => assert!(why.contains("parsing"), "{why}"),
+        other => panic!("expected Unreadable, got {other:?}"),
+    }
+}

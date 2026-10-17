@@ -9,10 +9,12 @@
 //! is split from scoring ([`evaluate`]) so the scoring pipeline is unit-testable
 //! without a live index or an LLM.
 
+pub mod answerability;
 pub mod cache;
 pub mod calc;
 pub mod judge;
 pub mod metrics;
+pub mod mine;
 pub mod queries;
 pub mod report;
 

@@ -114,3 +114,56 @@ fn col_width_counts_display_columns_for_wide_names() {
     let names = vec![("日本語タグ".to_string(), 1)];
     assert_eq!(col_width(&names, 0), 10);
 }
+
+#[derive(clap::Parser)]
+struct EvalHarness {
+    #[command(flatten)]
+    args: EvalArgs,
+}
+
+fn parse_eval(argv: &[&str]) -> Result<EvalArgs, clap::Error> {
+    use clap::Parser;
+    EvalHarness::try_parse_from(std::iter::once("eval").chain(argv.iter().copied())).map(|h| h.args)
+}
+
+#[test]
+fn eval_target_defaults_to_lift_and_takes_answerability_in_any_case() {
+    assert_eq!(parse_eval(&[]).unwrap().target, EvalTarget::Lift);
+    assert_eq!(
+        parse_eval(&["--target", "Answerability"]).unwrap().target,
+        EvalTarget::Answerability
+    );
+    assert!(parse_eval(&["--target", "nope"]).is_err());
+}
+
+#[test]
+fn mine_queries_stands_alone_but_a_default_target_does_not_conflict() {
+    let a = parse_eval(&["--mine-queries", "/tmp/q.yml"]).unwrap();
+    assert_eq!(a.mine_queries, Some(PathBuf::from("/tmp/q.yml")));
+    assert!(parse_eval(&["--mine-queries", "/tmp/q.yml", "--target", "answerability"]).is_err());
+    assert!(parse_eval(&["--mine-queries", "/tmp/q.yml", "--emit-calibration", "/tmp/c.yml"]).is_err());
+    assert!(parse_eval(&["--target", "answerability", "--emit-calibration", "/tmp/c.yml"]).is_err());
+}
+
+#[test]
+fn the_staged_source_reader_maps_borgs_staging_outcomes() {
+    use oracle::eval::answerability::{SourceReader, SourceText};
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("tr-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("envelope.yml"), "kind: article-url\n").unwrap();
+    std::fs::write(
+        dir.join("distilled.yml"),
+        "summary: s\nclaims: []\nmeta:\n  extractor: x\n  model: m\n  produced-at: \"2026-07-05T00:00:00Z\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("transcript.md"), "the verbatim source").unwrap();
+    std::fs::create_dir_all(tmp.path().join("tr-empty")).unwrap();
+
+    let reader = StagedSourceReader {
+        root: tmp.path().to_path_buf(),
+    };
+    assert_eq!(reader.read("tr-1"), SourceText::Found("the verbatim source".into()));
+    assert_eq!(reader.read("tr-swept"), SourceText::Expired);
+    assert!(matches!(reader.read("tr-empty"), SourceText::Unreadable(_)));
+}

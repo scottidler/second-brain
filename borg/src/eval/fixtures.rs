@@ -233,6 +233,50 @@ pub fn load_staged_trace(root: &Path, trace: &str) -> Result<Option<Fixture>> {
     }
 }
 
+/// What one staged trace yielded, for a reader that must tell a swept trace
+/// from a broken one ([`probe_staged_trace`]).
+#[derive(Debug)]
+pub enum StagedTrace {
+    /// The trace loaded, with its source.
+    Loaded(Box<Fixture>),
+    /// No staging directory for the trace: swept by retention (or never staged).
+    Absent,
+    /// The directory exists but yields no scorable source: missing artifacts,
+    /// an unscored kind, no recoverable source, or a parse error. Carries why.
+    Unreadable(String),
+}
+
+/// Load ONE staged trace by id, classifying every way it can fail to load.
+/// Shares [`load_staged_trace`]'s reader; unlike it, an absent directory and an
+/// unreadable one are different answers, and a parse error is a value, not an
+/// `Err`. An id that is not a bare directory name is `Unreadable` and never
+/// reaches the filesystem.
+pub fn probe_staged_trace(root: &Path, trace: &str) -> StagedTrace {
+    log::debug!(
+        "eval::fixtures::probe_staged_trace: root={} trace={trace}",
+        root.display()
+    );
+    let bare = !trace.is_empty() && !trace.contains(['/', '\\']) && trace != "." && trace != "..";
+    if !bare {
+        return StagedTrace::Unreadable(format!("trace id {trace:?} is not a bare directory name"));
+    }
+    let dir = root.join(trace);
+    if !dir.is_dir() {
+        return StagedTrace::Absent;
+    }
+    match load_staged_dir(&dir, trace) {
+        Ok(StagedLoad::Loaded(fixture)) => StagedTrace::Loaded(fixture),
+        Ok(StagedLoad::NotStaged) => {
+            StagedTrace::Unreadable(format!("{} lacks {ENVELOPE_FILE} or {DISTILLED_FILE}", dir.display()))
+        }
+        Ok(StagedLoad::Skipped) => StagedTrace::Unreadable(format!(
+            "{} is an unscored kind or has no recoverable source",
+            dir.display()
+        )),
+        Err(e) => StagedTrace::Unreadable(format!("{e:#}")),
+    }
+}
+
 /// Load live distillations from borg's staging root as fixtures: every trace
 /// directory holding `envelope.yml` + `distilled.yml` + a recoverable source.
 /// Ids are `<kind>/<trace>`. With `sample`, take a deterministic stratified
