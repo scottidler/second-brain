@@ -341,3 +341,35 @@ fn weekly_is_its_own_mode_and_takes_a_report_copy_and_a_patterns_dir() {
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
 }
+
+fn claims_trust_row(paired: f64, n: usize) -> borg::eval::trust::TrustRow {
+    borg::eval::trust::TrustRow {
+        judge_model: "gemini-2.5-pro".to_string(),
+        check_name: borg::eval::CHECK_JUDGE_CLAIMS.to_string(),
+        planted_class: "number-swap".to_string(),
+        rubric_version: borg::eval::cache::CLAIMS_RUBRIC_VERSION.to_string(),
+        paired_catch_rate: paired,
+        raw_catch_rate: 0.96,
+        flag_rate: 0.10,
+        wilson_lower: 0.70,
+        sample_size: n,
+        measured_at: "2026-10-17T13:58:31Z".to_string(),
+    }
+}
+
+#[test]
+fn candidate_search_refuses_while_its_claim_judge_is_untrusted() {
+    let policy = borg::config::TrustConfig::default();
+    for rows in [Vec::new(), vec![claims_trust_row(0.58, 26)]] {
+        let err = candidate::search_gate("gemini-2.5-pro", &rows, &policy).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing the candidate search"), "{msg}");
+        assert!(msg.contains("claim-support"), "{msg}");
+    }
+}
+
+#[test]
+fn candidate_search_runs_once_its_claim_judge_is_trusted() {
+    let policy = borg::config::TrustConfig::default();
+    candidate::search_gate("gemini-2.5-pro", &[claims_trust_row(0.90, 30)], &policy).unwrap();
+}

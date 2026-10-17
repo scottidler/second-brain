@@ -28,8 +28,28 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Refuse a prompt-candidate search while a factor of its score comes from an
+/// untrusted judge check: the same gate as `--apply-candidate`, applied at the
+/// search's first call so an untrusted judge never steers a search at all.
+pub(super) fn search_gate(
+    judge_model: &str,
+    trust_rows: &[borg::eval::trust::TrustRow],
+    policy: &borg::config::TrustConfig,
+) -> Result<()> {
+    file::gate(&file::factor_trust(judge_model, trust_rows, policy))
+        .context("refusing the candidate search (python -m propose starts with --candidate-split)")
+}
+
 /// `--candidate-split N --pattern P`: the frozen train/holdout pair, as JSON.
-pub(super) fn run_split(a: &args::EvalArgs, n: usize) -> Result<()> {
+/// Gated on judge trust: this is the search's first call.
+pub(super) fn run_split(
+    config: &borg::config::Config,
+    opts: &borg::eval::EvalOpts,
+    a: &args::EvalArgs,
+    n: usize,
+) -> Result<()> {
+    let trust_rows = borg::eval::trust::TrustStore::open(&vault::paths::borg_eval_cache_path())?.all()?;
+    search_gate(&opts.judge_model, &trust_rows, &config.eval.trust)?;
     let split = candidate::load_split(&vault::paths::borg_stages_dir(), pattern_of(a)?, n)?;
     println!(
         "{}",

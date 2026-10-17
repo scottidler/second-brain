@@ -19,7 +19,7 @@ DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resol
 
 ## Layout
 
-- `propose/__main__.py`: `python -m propose --pattern P [--sample N] [--budget N]`. Split, `gepa.optimize` (train is both trainset and valset), then the candidate file when the best is not the current pattern.
+- `propose/__main__.py`: `python -m propose --pattern P [--sample N] [--budget N]`. Split, `gepa.optimize` (train is both trainset and valset), then the candidate file when the best is not the current pattern. Refuses at the split while the claim-support judge check is untrusted: `sb borg eval --candidate-split` carries the same trust gate as `--apply-candidate`.
 - `propose/sb.py`: the three `sb` calls; a non-zero exit is an `SbError` carrying stderr.
 - `propose/adapter.py`: the `GEPAAdapter` (one component, the pattern text); an errored trace scores 0 for the search.
 - `propose/reflect.py`: the custom proposer. One `fabric -m <model>` call per rewrite, the new pattern taken from `<pattern>...</pattern>`: the patterns carry their own ``` fences, which GEPA's fence extractor would cut.

@@ -394,7 +394,7 @@ impl BorgCli {
                     return Ok(());
                 }
                 if let Some(n) = a.candidate_split {
-                    return candidate::run_split(&a, n);
+                    return candidate::run_split(&config, &opts, &a, n);
                 }
                 if let Some(file) = &a.candidate_pattern {
                     return candidate::run_score(&config, &opts, &a, file).await;
