@@ -247,6 +247,7 @@ pub struct HarvestCliArgs {
 
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("sampled").args(["staged", "inject"])))]
+#[command(group(clap::ArgGroup::new("limitable").args(["unscored", "scored"])))]
 pub struct EvalArgs {
     /// Root of the fixture tree. Default is REPO-RELATIVE
     /// (`config/eval/distill-fixtures`): `sb borg eval` is a developer command
@@ -323,9 +324,34 @@ pub struct EvalArgs {
         ]
     )]
     pub inject: bool,
+    /// Write the records (no judge calls) of the --limit most recently
+    /// scored traces that are still staged at the hash they were scored at, for
+    /// the `eval/` tools to judge (`otto eval-py`). Pair with `--format json`.
+    #[arg(
+        long,
+        requires = "limit",
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "synth_intents", "regenerate", "emit_calibration", "no_judge",
+            "judge_model", "rebuild_cache", "staging_root", "sample", "count", "ingest_verdicts"
+        ]
+    )]
+    pub scored: bool,
+    /// Load the verdict JSONL the `eval/` tools wrote into `eval_scores`. A
+    /// verdict whose content_hash no longer matches its trace and run is
+    /// dropped and named, and the command exits non-zero.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "synth_intents", "regenerate", "emit_calibration", "no_judge",
+            "judge_model", "rebuild_cache", "staging_root", "sample", "count", "limit", "format"
+        ]
+    )]
+    pub ingest_verdicts: Option<PathBuf>,
     /// With --unscored, score at most N traces this run (overrides
-    /// `eval.limit`); the rest stay in the backlog for the next run
-    #[arg(long, value_name = "N", requires = "unscored")]
+    /// `eval.limit`); the rest stay in the backlog for the next run. With
+    /// --scored, export at most N traces
+    #[arg(long, value_name = "N", requires = "limitable")]
     pub limit: Option<usize>,
     /// With --unscored, print the backlog size and score nothing
     #[arg(long, requires = "unscored", conflicts_with = "limit")]

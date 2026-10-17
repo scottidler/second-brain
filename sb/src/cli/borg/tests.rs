@@ -164,3 +164,43 @@ fn eval_inject_takes_a_sample_and_refuses_the_other_modes() {
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
 }
+
+#[test]
+fn eval_scored_needs_a_limit_and_refuses_the_other_modes() {
+    let h = EvalHarness::try_parse_from(["sb", "--scored", "--limit", "10", "--format", "json"]).unwrap();
+    assert!(h.eval.scored);
+    assert_eq!(h.eval.limit, Some(10));
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--scored"]).is_err(),
+        "an unbounded export would send every scored trace to a paid judge"
+    );
+    for flag in [
+        &["--unscored"][..],
+        &["--inject"],
+        &["--staged"],
+        &["--no-judge"],
+        &["--ingest-verdicts", "v.jsonl"],
+    ] {
+        let mut argv = vec!["sb", "--scored", "--limit", "3"];
+        argv.extend_from_slice(flag);
+        assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
+    }
+}
+
+#[test]
+fn eval_ingest_verdicts_takes_a_file_and_refuses_the_other_modes() {
+    let h = EvalHarness::try_parse_from(["sb", "--ingest-verdicts", "v.jsonl"]).unwrap();
+    assert_eq!(h.eval.ingest_verdicts, Some(std::path::PathBuf::from("v.jsonl")));
+    for flag in [
+        &["--unscored"][..],
+        &["--scored", "--limit", "3"],
+        &["--inject"],
+        &["--staged"],
+        &["--limit", "3"],
+        &["--format", "json"],
+    ] {
+        let mut argv = vec!["sb", "--ingest-verdicts", "v.jsonl"];
+        argv.extend_from_slice(flag);
+        assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
+    }
+}

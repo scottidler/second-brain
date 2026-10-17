@@ -20,6 +20,8 @@ echo "=== AGENTS.md module-map lint ==="
 
 while IFS= read -r agents_md; do
   crate="${agents_md%%/*}"
+  # Module maps are for Rust crates; a non-crate dir (eval/, the uv project) has no src/.
+  [ -d "$crate/src" ] || continue
 
   # ---- forward check ----
   while IFS= read -r tok; do

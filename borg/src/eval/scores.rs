@@ -216,6 +216,42 @@ impl ScoreStore {
             .context("reading an eval score row")
     }
 
+    /// The `kind` of the rows a run already has at `content_hash`, or `None`
+    /// when the run has no row at that hash. A verdict may join only a run that
+    /// was actually scored on the content it judged.
+    pub fn run_kind_of(&self, trace: &str, run_kind: &str, run_id: &str, content_hash: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT kind FROM eval_scores
+                 WHERE trace = ?1 AND run_kind = ?2 AND run_id = ?3 AND content_hash = ?4
+                 ORDER BY kind LIMIT 1",
+            )
+            .context("preparing eval run lookup")?;
+        let mut rows = stmt
+            .query_map(params![trace, run_kind, run_id, content_hash], |r| {
+                r.get::<_, String>(0)
+            })
+            .context("reading eval run")?;
+        rows.next().transpose().context("reading an eval run row")
+    }
+
+    /// Traces with an error-free baseline row, most recently scored first.
+    pub fn latest_scored_traces(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT trace FROM eval_scores
+                 WHERE run_kind = ?1 AND run_id = '' AND error IS NULL
+                 GROUP BY trace ORDER BY MAX(julianday(scored_at)) DESC, trace ASC",
+            )
+            .context("preparing latest-scored read")?;
+        stmt.query_map(params![RUN_KIND_BASELINE], |r| r.get::<_, String>(0))
+            .context("reading latest scored traces")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("reading a scored trace")
+    }
+
     /// True when every check in `required` has a current, error-free baseline
     /// row for `trace` at `content_hash`. An empty `required` covers nothing:
     /// a loop that requires no check has no definition of "scored".

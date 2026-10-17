@@ -22,9 +22,11 @@ pub mod judge;
 pub mod patterns;
 pub mod regenerate;
 pub mod report;
+pub mod scored;
 pub mod scores;
 pub mod timer;
 pub mod trust;
+pub mod verdicts;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -184,10 +186,15 @@ pub fn run(opts: &EvalOpts) -> Result<EvalOutcome> {
         Some(root) => load_staged(root, opts.sample)?,
         None => load(&opts.fixtures_dir)?,
     };
+    run_fixtures(opts, &fixtures)
+}
+
+/// [`run`] over fixtures the caller already selected (`--scored` picks its own).
+pub fn run_fixtures(opts: &EvalOpts, fixtures: &[Fixture]) -> Result<EvalOutcome> {
     let calibration = load_calibration(&opts.calibration_path)?;
     let cache = cache::JudgmentCache::open(&vault::paths::borg_eval_cache_path())?;
     let (judge, claim_judge) = fabric_judges(opts)?;
-    evaluate(&fixtures, &calibration, &cache, &judge, &claim_judge, opts)
+    evaluate(fixtures, &calibration, &cache, &judge, &claim_judge, opts)
 }
 
 /// The production judges for `opts`: its model and credential vars, with each
