@@ -66,7 +66,7 @@ pub fn run_with_notes(
         notes.len(),
         opts.apply
     );
-    // Built once per run, never per note: `ClassifierDev` reloads nothing, but
+    // Built once per run, never per note: `Jev` reloads nothing, but
     // the vocabulary behind it is two YAML files and a full vault pass would
     // read them thousands of times.
     let classifiers = Classifiers::load(config)?;

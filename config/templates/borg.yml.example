@@ -183,29 +183,26 @@ tags:
   # `TagsClassifierConfig`. The nesting is load-bearing: `tags.classifier` is
   # a struct, not a scalar, so the kind goes on the inner `classifier:` key.
   classifier:
-    # deterministic | classifier-dev | fabric-closed. The shipped default is
+    # deterministic | jev | fabric-closed. The shipped default is
     # `deterministic`: it maps a note's existing tags and author-tags through
-    # the canonical vocabulary locally and never calls out. `classifier-dev`
-    # scores note text against the vocabulary over HTTP (needs network and
-    # the key below); `fabric-closed` asks the configured fabric model to pick
-    # from the vocabulary (needs the `fabric`/`llm` credential).
+    # the canonical vocabulary locally and never calls out. `jev` asks the
+    # TypeSafe jev model to pick tags from the vocabulary over HTTP (needs
+    # network and the key below; each tag's `descriptions:` entry in
+    # canonical-tags.yml rides along); `fabric-closed` asks the configured
+    # fabric model to pick from the vocabulary (needs the `fabric`/`llm`
+    # credential).
     classifier: deterministic
-    # Minimum score a classifier-dev tag needs to be kept.
+    # Minimum score a jev tag needs to be kept.
     # threshold: 0.9
     # Runs when the selected implementation errors. Borg marks the receipt
     # degraded; cortex holds the note only if this also returns Low.
     # fallback: deterministic
-    # classifier-dev talks to the KEYLESS public tier by default: no
-    # credential, rate-limited (3,000 classifications/min on the fast model,
-    # 200/min on smart, at most 200 texts per public call, which is the
-    # ceiling every batch chunks at).
-    #
-    # Set `token-env` only to use a paid workspace key from
-    # classifier.dev/app/keys. It names the ENV VAR, never the token itself;
-    # supply the value via env-bootstrap. A named-but-unset variable is not an
-    # error, it just falls through to the keyless tier.
-    # token-env: CLASSIFIER_DEV_TOKEN
-    # endpoint: https://classifier.dev/v1/classify
+    # NAME of the env var holding the TypeSafe key (or a secret file path),
+    # never the key itself; supply the value via env-bootstrap. A name that
+    # resolves empty fails every jev classify, so the fallback runs.
+    # api-key: ESCOTE_TYPESAFE_API_KEY
+    # The jev model id sent on every request.
+    # model: jev-latest
     # timeout-secs: 30
 
 # Distillation feature toggles (all default-on; set false to disable a feature).

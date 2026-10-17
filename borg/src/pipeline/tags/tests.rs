@@ -183,7 +183,7 @@ async fn ingest_tags_are_repeatable_under_deterministic() {
 
 /// Design doc success criterion / AC3, panel r4 OQ7: two ingests of the
 /// SAME URL where the distiller's own `tags` output DRIFTS between calls (the
-/// actual source of instability G5 restates around, `classifier-dev` at 23%
+/// actual source of instability G5 restates around, the retired external classifier at 23%
 /// in the baseline measurement) must not lose a canonical tag the first ingest produced. The
 /// reingest union (`apply_preserved_fields`, preserved-first) is what
 /// delivers that, not the classifier call alone - so this drives BOTH:
@@ -410,7 +410,7 @@ async fn author_tags_are_recorded() {
 }
 
 /// Implementation audit r1, M3: `text` is what leaves the machine under
-/// `classifier-dev`. A summary-less audio note used to hand the classifier
+/// an external classifier. A summary-less audio note used to hand the classifier
 /// its whole transcript; `from_body` is the one seam that clips it.
 #[test]
 fn from_body_clips_a_transcript_to_the_documented_excerpt() {

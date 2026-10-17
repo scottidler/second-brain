@@ -68,3 +68,14 @@
 - WARN not error on an empty key, even when `classifier: jev` and the fallback is `deterministic`: matches the doc and the gemini fallback precedent; ingest keeps working, degraded.
 ### Open questions
 - None.
+
+## Phase 3: Templates and agent docs
+### Design decisions
+- Both templates keep `classifier: deterministic` live and the jev keys (`threshold`, `fallback`, `api-key`, `model`, `timeout-secs`) commented — config/templates/{borg,cortex}.yml.example — field names read from `TagsClassifierConfig`; shipped default is unchanged.
+- The root CLAUDE.md Tags bullet and distillers/AGENTS.md name jev and the per-tag `descriptions:` map from Phase 1.
+### Deviations
+- The sweep also hit a doc comment in `cortex/src/classify.rs` and two doc comments in `borg/src/pipeline/tags/tests.rs`; reworded (comments only) since the goal is no mention outside docs/.
+### Tradeoffs
+- Commented jev keys vs live ones — a live `api-key` would imply it is in use under the `deterministic` default.
+### Open questions
+- None.
