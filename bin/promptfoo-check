@@ -2,8 +2,14 @@
 # The otto ci check on distill-pattern edits. Runs promptfoo's llm-rubric and
 # context-faithfulness over the golden fixtures re-distilled through the repo's
 # borg/patterns (`sb borg eval --regenerate --format json`), but ONLY when some
-# borg/patterns/*.md differs from the base (default origin/main, committed or
-# not, untracked included). Otherwise it prints why it skipped and exits 0.
+# borg/patterns/distill-*.md differs from the base (default origin/main,
+# committed or not, untracked included). Other patterns cannot change a
+# distilled note, so they never trigger it. Otherwise it prints why it skipped
+# and exits 0.
+#
+# Report only: the grader is an LLM judge, and no judge has passed the planted-
+# error trust floor (`sb borg eval --inject`). Failing fixtures are printed and
+# counted, never fail `otto ci` (Scott, 2026-10-17).
 #
 # Local only: the grader (google:gemini-2.5-pro, eval/promptfoo/promptfoo.yml)
 # needs GEMINI_API_KEY, and the regenerate needs borg.yml's distiller key. The
@@ -12,8 +18,8 @@
 # usage: bin/promptfoo-check [--decide]
 #   --decide   print the run/skip decision and exit 0 without running anything
 # env:   PROMPTFOO_BASE (default origin/main), SB_BORG_CONFIG (a borg.yml for sb)
-# exit:  0 skipped or every fixture passed | 2 no base commit | promptfoo's own
-#        non-zero status when a fixture fails
+# exit:  0 skipped, not runnable (named on stderr), or graded (failures printed)
+#        | 2 no base commit
 set -euo pipefail
 
 BASE="${PROMPTFOO_BASE:-origin/main}"
@@ -26,12 +32,12 @@ if ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
 fi
 
 changed="$({
-  git diff --name-only "$BASE" -- 'borg/patterns/*.md'
-  git ls-files --others --exclude-standard -- 'borg/patterns/*.md'
+  git diff --name-only "$BASE" -- 'borg/patterns/distill-*.md'
+  git ls-files --others --exclude-standard -- 'borg/patterns/distill-*.md'
 } | sort -u)"
 
 if [ -z "$changed" ]; then
-  echo "promptfoo: skipped: no borg/patterns/*.md differs from $BASE"
+  echo "promptfoo: skipped: no borg/patterns/distill-*.md differs from $BASE"
   exit 0
 fi
 echo "promptfoo: running: differs from $BASE: $(echo "$changed" | tr '\n' ' ')"
@@ -40,8 +46,8 @@ if [ "${1:-}" = "--decide" ]; then
 fi
 
 if [ -z "${GEMINI_API_KEY:-}" ]; then
-  echo "promptfoo-check: GEMINI_API_KEY is not set; the grader is google:gemini-2.5-pro" >&2
-  exit 1
+  echo "promptfoo: NOT RUN: GEMINI_API_KEY is not set; the grader is google:gemini-2.5-pro" >&2
+  exit 0
 fi
 
 PF="$ROOT/eval/promptfoo"
@@ -76,5 +82,9 @@ if [ -s "$work/results.json" ]; then
   jq -r '.results.results[] | select(.success | not)
     | "FAIL \(.testCase.description): \([.gradingResult.componentResults[]? | select(.pass | not) | .reason] | join(" | "))"' \
     "$work/results.json"
+  echo "promptfoo: $(jq '[.results.results[] | select(.success | not)] | length' "$work/results.json") of $(jq '.results.results | length' "$work/results.json") fixtures failed (report only: the grader is an untrusted judge)"
 fi
-exit "$status"
+if [ "$status" -ne 0 ] && [ ! -s "$work/results.json" ]; then
+  echo "promptfoo: NOT RUN: promptfoo exited $status with no results" >&2
+fi
+exit 0

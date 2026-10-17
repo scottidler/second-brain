@@ -219,7 +219,7 @@ tasks:
       uv run --directory eval pytest -q
 
   promptfoo:
-    help: "promptfoo llm-rubric + context-faithfulness over the regenerated fixtures, only when borg/patterns/*.md differs from origin/main"
+    help: "promptfoo llm-rubric + context-faithfulness over the regenerated fixtures, only when borg/patterns/distill-*.md differs from origin/main; report only, never fails ci"
     bash: |
       bin/promptfoo-check
 

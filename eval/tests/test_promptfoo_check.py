@@ -38,7 +38,7 @@ def decide(repo: Path) -> subprocess.CompletedProcess:
 def test_an_unchanged_pattern_skips(repo):
     done = decide(repo)
     assert done.returncode == 0
-    assert done.stdout.startswith("promptfoo: skipped: no borg/patterns/*.md differs from origin/main")
+    assert done.stdout.startswith("promptfoo: skipped: no borg/patterns/distill-*.md differs from origin/main")
 
 
 def test_an_edited_distill_video_runs(repo):
@@ -57,6 +57,11 @@ def test_a_committed_pattern_change_ahead_of_origin_runs(repo):
 def test_a_new_untracked_pattern_runs(repo):
     (repo / "borg" / "patterns" / "distill-new.md").write_text("# new\n")
     assert "borg/patterns/distill-new.md" in decide(repo).stdout
+
+
+def test_a_non_distill_pattern_skips(repo):
+    (repo / "borg" / "patterns" / "eval-cluster-failures.md").write_text("# cluster\n")
+    assert "skipped" in decide(repo).stdout
 
 
 def test_a_change_outside_the_patterns_skips(repo):

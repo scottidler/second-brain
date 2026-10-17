@@ -7,7 +7,7 @@
 Two tools beside the Rust code. Neither decides anything on its own (design: `docs/design/2026-10-14-automated-note-quality-loop.md`, "Prompt improvement"):
 
 - `propose/` (uv project `sb-eval`): a GEPA search (`gepa`, the library DSPy's `dspy.GEPA` wraps) over ONE distill pattern. It only proposes text. Every score comes from `sb borg eval --candidate-pattern`, so the metric and its coverage floor have one definition, in Rust.
-- `promptfoo/` (npm, `promptfoo` pinned exactly in `package.json` + `package-lock.json`): the config `bin/promptfoo-check` runs from `otto ci` when a `borg/patterns/*.md` differs from `origin/main`.
+- `promptfoo/` (npm, `promptfoo` pinned exactly in `package.json` + `package-lock.json`): the config `bin/promptfoo-check` runs from `otto ci` when a `borg/patterns/distill-*.md` differs from `origin/main`.
 
 DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resolved Decisions), along with torch, the NLTK fetch, `otto eval-py` and the verdict ingest.
 
@@ -30,7 +30,7 @@ DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resol
 
 - `otto gepa --pattern distill-video --sample 4 --budget 40`: calls the distiller and the judges, so it is not in `ci`. Env `SB`, `SB_BORG_CONFIG`.
 - `otto eval-test`: the pytest suite, in `ci`.
-- `otto promptfoo` (`bin/promptfoo-check`), in `ci`: skips unless a pattern differs from `origin/main`; when it runs it needs `GEMINI_API_KEY` and borg.yml's distiller key.
+- `otto promptfoo` (`bin/promptfoo-check`), in `ci`, report only: skips unless a `distill-*` pattern differs from `origin/main`; failing fixtures are printed, never fail `ci`, because the grader is an untrusted judge. Running it needs `GEMINI_API_KEY` and borg.yml's distiller key; without the Gemini key it prints NOT RUN.
 
 ## Invariants
 
