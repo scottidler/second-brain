@@ -1,0 +1,24 @@
+# bin/promptfoo-check copies this file next to the tests.jsonl it generates
+# (one test per regenerated fixture note: vars note, context = the source,
+# query) and runs it. The `echo` provider returns the note unchanged, so the
+# assertions grade the note the repo patterns produced, against its source.
+description: distill patterns over the regenerated golden fixtures
+prompts:
+  - "{{note}}"
+providers:
+  - echo
+defaultTest:
+  options:
+    # Not the distiller's vendor (Anthropic), matching the default judge.
+    provider: google:gemini-2.5-pro
+  assert:
+    - type: llm-rubric
+      value: |
+        The output is a note distilled from the SOURCE below. Pass only if every
+        claim, quote, number and name in the note is stated in or directly
+        implied by the source.
+        SOURCE:
+        {{context}}
+    - type: context-faithfulness
+      threshold: 0.7
+tests: file://tests.jsonl

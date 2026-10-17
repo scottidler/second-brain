@@ -34,7 +34,7 @@ Systemd unit files are NOT in the repo. They are written into `~/.config/systemd
 - **oracle/** — `oracle/AGENTS.md` — knowledge-retrieval MCP server.
 - **distillers/** — `distillers/AGENTS.md` — Stage-2 per-kind distillers producing the `Distilled` contract.
 - **sb/** — `sb/AGENTS.md` — unified CLI binary (composition root).
-- **eval/** — `eval/AGENTS.md` — Python `uv` project: DeepEval and MiniCheck verdict producers, files-only contract with `sb borg eval`.
+- **eval/** — `eval/AGENTS.md` — the GEPA prompt-candidate search (`uv` project, every score from `sb borg eval --candidate-pattern`) and the promptfoo config `bin/promptfoo-check` runs from `otto ci` when a pattern changes.
 
 ### Global Invariants
 

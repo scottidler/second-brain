@@ -1,0 +1,8 @@
+{
+  "name": "sb-eval-promptfoo",
+  "private": true,
+  "description": "promptfoo for the distill-pattern check bin/promptfoo-check runs from otto ci",
+  "dependencies": {
+    "promptfoo": "0.124.1"
+  }
+}

@@ -2,20 +2,21 @@
 //! scored the same notes.
 //!
 //! A **rater** is one check under one judge model (`judge-claims` on
-//! `gemini-2.5-pro`, `minicheck` on `roberta-large`, ...). Raters are paired
-//! on the **current baseline rows** of the same trace at the same distill hash
-//! (design: "Kappa pairs current rows on (trace, content_hash,
+//! `gemini-2.5-pro`, `judge-distillation` on `claude-sonnet-5`, ...). Raters
+//! are paired on the **current baseline rows** of the same trace at the same
+//! distill hash (design: "Kappa pairs current rows on (trace, content_hash,
 //! rubric_version, check_name) across judge models"), widened from the same
-//! check to every pair of raters, so a fabric judge can be compared with the
-//! `eval/` tools as well as with the other vendor.
+//! check to every pair of raters, so each judge check is compared with the
+//! other vendor and with the other check.
 //!
 //! Two label levels:
 //! - **trace:** does the rater flag the note? The flag rule is
-//!   [`super::inject::flags`]'s for the judge checks (any axis below 3; any
-//!   claim not `supported`), any claim MiniCheck labels unsupported, and a
-//!   DeepEval summarization score below [`DEEPEVAL_PASS_THRESHOLD`].
-//! - **claim:** is claim `id` supported? Only raters with a per-claim label
-//!   (`judge-claims`, `minicheck`) take part.
+//!   [`super::inject::flags`]'s (any axis below 3; any claim not `supported`).
+//! - **claim:** is claim `id` supported? Only `judge-claims` carries a
+//!   per-claim label.
+//!
+//! A row under any other check name (the dropped DeepEval and MiniCheck
+//! verdicts still sit in older databases) has no flag rule and is not a rater.
 //!
 //! Kappa is agreement, not correctness: two judges that share an error agree.
 
@@ -24,22 +25,9 @@ use std::fmt;
 
 use serde_json::Value;
 
-use super::cache::RUBRIC_VERSION;
 use super::judge::MAX_SCORE;
 use super::scores::{NO_MODEL, ScoreRow, rubric_version_of};
 use super::{CHECK_JUDGE_CLAIMS, CHECK_JUDGE_DISTILLATION, RUN_KIND_BASELINE};
-
-/// `check_name` of DeepEval's verdict rows (`eval/verdict/tools/deepeval.py`).
-pub const TOOL_DEEPEVAL: &str = "deepeval";
-/// `check_name` of MiniCheck's verdict rows (`eval/verdict/tools/minicheck.py`).
-pub const TOOL_MINICHECK: &str = "minicheck";
-/// DeepEval's own pass threshold for `SummarizationMetric`, the `threshold`
-/// the tool constructs the metric with: a score below it fails the note.
-pub const DEEPEVAL_PASS_THRESHOLD: f64 = 0.5;
-/// DeepEval's metric name inside its row (`metrics.<name>.value`).
-const DEEPEVAL_METRIC: &str = "summarization";
-/// MiniCheck's per-claim metric name (`claims.<id>.<name>.detail.label`).
-const MINICHECK_METRIC: &str = "supported";
 
 /// One check under one judge model.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,8 +129,7 @@ pub struct AgreementReport {
 }
 
 /// Is `row` a current, error-free baseline judgment a rater can be read from?
-/// Judge checks must be on their current rubric; a tool's row carries the
-/// distillation rubric of the record it judged. Deterministic rows make no
+/// Judge checks must be on their current rubric. Deterministic rows make no
 /// model call and are not raters.
 pub fn is_current_rater_row(row: &ScoreRow) -> bool {
     if row.error.is_some() || row.run_kind != RUN_KIND_BASELINE || !row.run_id.is_empty() {
@@ -151,8 +138,7 @@ pub fn is_current_rater_row(row: &ScoreRow) -> bool {
     if row.judge_model == NO_MODEL {
         return false;
     }
-    let current = rubric_version_of(&row.check_name).unwrap_or(RUBRIC_VERSION);
-    row.rubric_version == current
+    rubric_version_of(&row.check_name).is_some_and(|current| row.rubric_version == current)
 }
 
 /// Does the rater behind `row` flag the note? `None` when the row's check has
@@ -169,11 +155,7 @@ pub fn trace_flag(row: &ScoreRow) -> Option<bool> {
             ];
             Some(axes.iter().any(|a| *a < u64::from(MAX_SCORE)))
         }
-        CHECK_JUDGE_CLAIMS | TOOL_MINICHECK => claim_support(row).map(|claims| claims.values().any(|s| !s)),
-        TOOL_DEEPEVAL => metrics
-            .pointer(&format!("/metrics/{DEEPEVAL_METRIC}/value"))
-            .and_then(Value::as_f64)
-            .map(|score| score < DEEPEVAL_PASS_THRESHOLD),
+        CHECK_JUDGE_CLAIMS => claim_support(row).map(|claims| claims.values().any(|s| !s)),
         _ => None,
     }
 }
@@ -190,19 +172,6 @@ pub fn claim_support(row: &ScoreRow) -> Option<BTreeMap<usize, bool>> {
                 .map(|(i, v)| (i + 1, v.as_str() == Some("supported")))
                 .collect()
         }),
-        TOOL_MINICHECK => {
-            let claims = metrics.get("claims")?.as_object()?;
-            claims
-                .iter()
-                .map(|(id, entry)| {
-                    let id: usize = id.parse().ok()?;
-                    let label = entry
-                        .pointer(&format!("/{MINICHECK_METRIC}/detail/label"))
-                        .and_then(Value::as_u64)?;
-                    Some((id, label == 1))
-                })
-                .collect()
-        }
         _ => None,
     }
 }

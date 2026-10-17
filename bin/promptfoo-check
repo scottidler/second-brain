@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# The otto ci check on distill-pattern edits. Runs promptfoo's llm-rubric and
+# context-faithfulness over the golden fixtures re-distilled through the repo's
+# borg/patterns (`sb borg eval --regenerate --format json`), but ONLY when some
+# borg/patterns/*.md differs from the base (default origin/main, committed or
+# not, untracked included). Otherwise it prints why it skipped and exits 0.
+#
+# Local only: the grader (google:gemini-2.5-pro, eval/promptfoo/promptfoo.yml)
+# needs GEMINI_API_KEY, and the regenerate needs borg.yml's distiller key. The
+# GitHub workflow holds neither, so this never runs there.
+#
+# usage: bin/promptfoo-check [--decide]
+#   --decide   print the run/skip decision and exit 0 without running anything
+# env:   PROMPTFOO_BASE (default origin/main), SB_BORG_CONFIG (a borg.yml for sb)
+# exit:  0 skipped or every fixture passed | 2 no base commit | promptfoo's own
+#        non-zero status when a fixture fails
+set -euo pipefail
+
+BASE="${PROMPTFOO_BASE:-origin/main}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+if ! git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+  echo "promptfoo-check: base $BASE is not a commit in this repo (git fetch origin?)" >&2
+  exit 2
+fi
+
+changed="$({
+  git diff --name-only "$BASE" -- 'borg/patterns/*.md'
+  git ls-files --others --exclude-standard -- 'borg/patterns/*.md'
+} | sort -u)"
+
+if [ -z "$changed" ]; then
+  echo "promptfoo: skipped: no borg/patterns/*.md differs from $BASE"
+  exit 0
+fi
+echo "promptfoo: running: differs from $BASE: $(echo "$changed" | tr '\n' ' ')"
+if [ "${1:-}" = "--decide" ]; then
+  exit 0
+fi
+
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "promptfoo-check: GEMINI_API_KEY is not set; the grader is google:gemini-2.5-pro" >&2
+  exit 1
+fi
+
+PF="$ROOT/eval/promptfoo"
+if [ ! -x "$PF/node_modules/.bin/promptfoo" ]; then
+  npm ci --prefix "$PF" --no-audit --no-fund
+fi
+cargo build --quiet -p sb
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+sb_borg=(target/debug/sb borg)
+if [ -n "${SB_BORG_CONFIG:-}" ]; then sb_borg+=(--config "$SB_BORG_CONFIG"); fi
+"${sb_borg[@]}" eval --regenerate --patterns-dir borg/patterns --no-judge --format json > "$work/records.jsonl"
+# The record's `source` is cut to the judge budget; the note was distilled
+# from the whole fixture source, so the grader gets the whole source.
+while IFS= read -r record; do
+  fixture="$(jq -r .fixture <<< "$record")"
+  jq -c --rawfile src "config/eval/distill-fixtures/$fixture/source.md" '{
+    description: (.fixture + " " + .run_id),
+    vars: { note: .note_text, context: $src, query: "Distill this source into a structured note." }
+  }' <<< "$record"
+done < "$work/records.jsonl" > "$work/tests.jsonl"
+echo "promptfoo: $(wc -l < "$work/tests.jsonl") regenerated notes"
+cp "$PF/promptfoo.yml" "$work/"
+
+status=0
+PROMPTFOO_CONFIG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sb/eval/promptfoo" \
+PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
+  "$PF/node_modules/.bin/promptfoo" eval -c "$work/promptfoo.yml" \
+  --no-cache --no-progress-bar --no-table -o "$work/results.json" || status=$?
+if [ -s "$work/results.json" ]; then
+  jq -r '.results.results[] | select(.success | not)
+    | "FAIL \(.testCase.description): \([.gradingResult.componentResults[]? | select(.pass | not) | .reason] | join(" | "))"' \
+    "$work/results.json"
+fi
+exit "$status"

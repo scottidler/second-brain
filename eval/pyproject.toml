@@ -3,20 +3,8 @@ name = "sb-eval"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "accelerate>=1.15.0",
-    "deepeval>=4.3.1",
-    "minicheck",
-    "torch>=2.14.1",
+    "gepa>=0.1.4",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-minicheck = { git = "https://github.com/Liyan06/MiniCheck.git", rev = "b58b9fa69acbd1015ec970fa65dd752413a053d2" }
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
 
 [dependency-groups]
 dev = [

@@ -1472,3 +1472,24 @@ fn eval_trust_overrides_parse_and_out_of_range_values_fail_validation() {
     }
     assert!(serde_yaml::from_str::<Config>("eval:\n  trust:\n    min-rate: 0.9\n").is_err());
 }
+
+#[test]
+fn eval_candidate_floor_defaults_to_a_tenth_and_out_of_range_values_fail_validation() {
+    let config: Config = serde_yaml::from_str("eval:\n  limit: 5\n").unwrap();
+    assert_eq!(config.eval.candidate.max_coverage_cut, 0.10);
+    assert_eq!(config.eval.candidate.distill_workers, 4);
+    let config: Config =
+        serde_yaml::from_str("eval:\n  candidate:\n    max-coverage-cut: 0.2\n    distill-workers: 2\n").unwrap();
+    assert_eq!(config.eval.candidate.max_coverage_cut, 0.2);
+    assert_eq!(config.eval.candidate.distill_workers, 2);
+    config.validate().unwrap();
+    for bad in [
+        "eval:\n  candidate:\n    max-coverage-cut: 1.0\n",
+        "eval:\n  candidate:\n    max-coverage-cut: -0.1\n",
+        "eval:\n  candidate:\n    distill-workers: 0\n",
+    ] {
+        let config: Config = serde_yaml::from_str(bad).unwrap();
+        assert!(config.validate().is_err(), "{bad} must fail validation");
+    }
+    assert!(serde_yaml::from_str::<Config>("eval:\n  candidate:\n    floor: 0.1\n").is_err());
+}

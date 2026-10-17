@@ -16,6 +16,7 @@ pub mod agreement;
 pub mod backlog;
 pub mod cache;
 pub mod calc;
+pub mod candidate;
 pub mod fixtures;
 pub mod inject;
 pub mod intents;
@@ -24,11 +25,9 @@ pub mod patterns;
 pub mod regenerate;
 pub mod remediate;
 pub mod report;
-pub mod scored;
 pub mod scores;
 pub mod timer;
 pub mod trust;
-pub mod verdicts;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +53,10 @@ pub use report::{
 /// `run_kind` of a score over the staged note as published (vs a
 /// `--regenerate` candidate or a planted-error injection).
 pub const RUN_KIND_BASELINE: &str = "baseline";
+/// `run_kind` of a score over a candidate pattern's re-distill
+/// (`--candidate-pattern`, `--apply-candidate`); `run_id` is the pattern name
+/// plus the hash of the pattern text.
+pub const RUN_KIND_CANDIDATE: &str = "candidate";
 /// `run_kind` of a score over a planted-error mutation (`--inject`).
 pub const RUN_KIND_INJECT: &str = "inject";
 /// `check_name` of the three-axis distillation judge.
@@ -191,7 +194,7 @@ pub fn run(opts: &EvalOpts) -> Result<EvalOutcome> {
     run_fixtures(opts, &fixtures)
 }
 
-/// [`run`] over fixtures the caller already selected (`--scored` picks its own).
+/// [`run`] over fixtures the caller already selected.
 pub fn run_fixtures(opts: &EvalOpts, fixtures: &[Fixture]) -> Result<EvalOutcome> {
     let calibration = load_calibration(&opts.calibration_path)?;
     let cache = cache::JudgmentCache::open(&vault::paths::borg_eval_cache_path())?;

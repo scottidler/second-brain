@@ -209,46 +209,37 @@ tasks:
 
   ci:
     help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, agents-map, source-lint, check, test]
+    before: [lint, bloat, agents-map, source-lint, check, test, eval-test, promptfoo]
     bash: |
       echo "✅ All CI checks passed!"
 
   eval-test:
-    help: "Run the eval/ uv project's pytest suite (pulls torch; not in ci)"
+    help: "Run the eval/ uv project's pytest suite (the GEPA search glue and bin/promptfoo-check's run/skip rule)"
     bash: |
       uv run --directory eval pytest -q
 
-  eval-py:
-    help: "Judge the latest scored traces with eval/ (DeepEval, MiniCheck), write verdict JSONL, ingest it (pulls torch, calls OpenAI; not in ci)"
+  promptfoo:
+    help: "promptfoo llm-rubric + context-faithfulness over the regenerated fixtures, only when borg/patterns/*.md differs from origin/main"
+    bash: |
+      bin/promptfoo-check
+
+  gepa:
+    help: "GEPA search over one distill pattern; writes a measured candidate file (calls the distiller and the judges; not in ci)"
+    params:
+      --pattern:
+        default: "distill-video"
+        help: "The distill pattern to search"
+      --sample:
+        default: "4"
+        help: "Traces per sample (train and holdout)"
+      --budget:
+        default: "40"
+        help: "GEPA max metric calls (one per trace scored)"
     bash: |
       # Env: SB (the sb binary, default `sb`), SB_BORG_CONFIG (a borg.yml for
-      # `sb borg --config`), EVAL_PY_LIMIT (traces, default 10), EVAL_PY_OUT (dir
-      # for the records and verdicts, default ~/.cache/sb/eval/verdicts).
-      # OPENAI_API_KEY must already be in the environment (DeepEval's judge).
-      set -euo pipefail
-      SB="${SB:-sb}"
-      LIMIT="${EVAL_PY_LIMIT:-10}"
-      OUT_DIR="${EVAL_PY_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/sb/eval/verdicts}"
-      mkdir -p "$OUT_DIR"
-      OUT_DIR="$(cd "$OUT_DIR" && pwd)"
-      STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-      RECORDS="$OUT_DIR/records-$STAMP.jsonl"
-      VERDICTS="$OUT_DIR/verdicts-$STAMP.jsonl"
-      SB_BORG=("$SB" borg)
-      if [ -n "${SB_BORG_CONFIG:-}" ]; then SB_BORG+=(--config "$SB_BORG_CONFIG"); fi
-
-      export NLTK_DATA
-      NLTK_DATA="$(bin/eval-nltk)"
-      export DEEPEVAL_TELEMETRY_OPT_OUT=YES HF_HUB_DISABLE_TELEMETRY=1
-
-      "${SB_BORG[@]}" eval --scored --limit "$LIMIT" --format json > "$RECORDS"
-      py_status=0
-      uv run --directory eval python -m verdict --records "$RECORDS" --out "$VERDICTS" || py_status=$?
-      # Ingest whatever was written even when a tool failed on some trace, then
-      # fail the task: a partial verdict file must never pass for a full one.
-      "${SB_BORG[@]}" eval --ingest-verdicts "$VERDICTS"
-      echo "verdicts: $VERDICTS"
-      exit "$py_status"
+      # `sb borg --config`). The judge and reflection keys come from the
+      # environment, as for every fabric call.
+      uv run --directory eval python -m propose --pattern "${pattern}" --sample "${sample}" --budget "${budget}"
 
   build:
     help: "Build release binaries for all workspace members"

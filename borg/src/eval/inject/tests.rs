@@ -475,7 +475,7 @@ fn run_inject_refuses_an_empty_judge_model_list() {
 }
 
 #[test]
-fn the_report_prints_pairwise_kappa_between_both_judges_and_any_ingested_tool() {
+fn the_report_prints_pairwise_kappa_between_both_judges_and_never_a_dropped_tool() {
     const SECOND: &str = "claude-sonnet-5";
     let fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
     let claims: HashSet<String> = fixtures
@@ -541,7 +541,8 @@ fn the_report_prints_pairwise_kappa_between_both_judges_and_any_ingested_tool() 
         "kappa sits next to the planted-error table: {text}"
     );
 
-    // A tool verdict ingested at an original's distill hash joins the next report.
+    // A row the dropped MiniCheck tool left at an original's distill hash is
+    // not a rater: it never joins the next report.
     let t0 = env.scores.rows_for("t0").unwrap();
     let original = t0
         .iter()
@@ -565,9 +566,9 @@ fn the_report_prints_pairwise_kappa_between_both_judges_and_any_ingested_tool() 
         check: "minicheck".to_string(),
         judge_model: "roberta-large".to_string(),
     };
-    assert_eq!(again.agreement.raters.get(&minicheck), Some(&1));
+    assert_eq!(again.agreement.raters.get(&minicheck), None);
     assert!(
-        again
+        !again
             .agreement
             .claim_pairs
             .iter()

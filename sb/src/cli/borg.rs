@@ -1,6 +1,7 @@
 use eyre::{Context, Result};
 
 mod args;
+mod candidate;
 pub mod extension;
 mod render;
 mod tools;
@@ -376,20 +377,29 @@ impl BorgCli {
                 if a.regenerate {
                     let dispatcher = borg::eval::regenerate_dispatcher(&config.fabric, &opts);
                     let report = borg::eval::run_regenerate(&opts, &dispatcher).await?;
-                    let rendered = report.render();
+                    let rendered = match a.format {
+                        args::EvalFormat::Text => report.render(),
+                        args::EvalFormat::Json => render_records_jsonl(&report.records())?,
+                    };
                     print!("{rendered}");
                     if let Some(path) = a.report {
                         std::fs::write(&path, &rendered)
                             .with_context(|| format!("writing report to {}", path.display()))?;
-                        println!("\nreport written to {}", path.display());
+                        match a.format {
+                            args::EvalFormat::Text => println!("\nreport written to {}", path.display()),
+                            args::EvalFormat::Json => eprintln!("report written to {}", path.display()),
+                        }
                     }
                     return Ok(());
                 }
-                if let Some(path) = &a.ingest_verdicts {
-                    return run_eval_ingest_verdicts(path);
+                if let Some(n) = a.candidate_split {
+                    return candidate::run_split(&a, n);
                 }
-                if a.scored {
-                    return run_eval_scored(&opts, &a);
+                if let Some(file) = &a.candidate_pattern {
+                    return candidate::run_score(&config, &opts, &a, file).await;
+                }
+                if let Some(file) = &a.apply_candidate {
+                    return candidate::run_apply(&config, &opts, file).await;
                 }
                 if a.unscored {
                     return run_eval_unscored(&config, &opts, &a);
@@ -568,63 +578,6 @@ fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts,
     Ok(())
 }
 
-/// `sb borg eval --scored --limit N`: records of the most recently scored
-/// traces, with no judge calls, for the `eval/` tools to judge.
-fn run_eval_scored(opts: &borg::eval::EvalOpts, a: &args::EvalArgs) -> Result<()> {
-    let limit = a.limit.ok_or_else(|| eyre::eyre!("--scored needs --limit"))?;
-    let store = borg::eval::scores::ScoreStore::open(&vault::paths::borg_eval_cache_path())?;
-    let selection = borg::eval::scored::select_scored(&store, &vault::paths::borg_stages_dir(), limit)?;
-    for trace in &selection.moved_on {
-        eprintln!("skipped {trace}: its staged note changed since it was scored");
-    }
-    eprintln!(
-        "scored: {} traces selected, {} scored traces no longer staged, {} re-distilled since scoring",
-        selection.fixtures.len(),
-        selection.not_staged,
-        selection.moved_on.len()
-    );
-    let opts = borg::eval::EvalOpts {
-        no_judge: true,
-        ..opts.clone()
-    };
-    let borg::eval::EvalOutcome::Report(report) = borg::eval::run_fixtures(&opts, &selection.fixtures)? else {
-        eyre::bail!("evaluate returned a calibration sheet for a --scored run");
-    };
-    let rendered = match a.format {
-        args::EvalFormat::Text => report.render(),
-        args::EvalFormat::Json => render_eval_jsonl(&report)?,
-    };
-    print!("{rendered}");
-    Ok(())
-}
-
-/// `sb borg eval --ingest-verdicts <file>`: load the tools' verdicts into
-/// `eval_scores`. Valid verdicts load; every stale one is named, and the run
-/// then fails.
-fn run_eval_ingest_verdicts(path: &std::path::Path) -> Result<()> {
-    let staged_root = vault::paths::borg_stages_dir();
-    let verdicts = borg::eval::verdicts::read_verdicts(path)?;
-    let store = borg::eval::scores::ScoreStore::open(&vault::paths::borg_eval_cache_path())?;
-    let scored_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let outcome = borg::eval::verdicts::ingest(
-        &verdicts,
-        &store,
-        &|trace| borg::eval::verdicts::staged_baseline(&staged_root, trace),
-        &scored_at,
-    )?;
-    for line in outcome.rejection_lines() {
-        eprintln!("{line}");
-    }
-    println!(
-        "verdicts: {} read, {} loaded into {} eval_scores rows, {} groups rejected as stale",
-        outcome.verdicts_read,
-        outcome.verdicts_loaded,
-        outcome.rows_written,
-        outcome.rejected.len()
-    );
-    outcome.check()
-}
-
 /// `sb borg eval --inject`: plant errors into a staged sample, measure every
 /// configured judge on them, and write the `judge_trust` rows.
 fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a: &args::EvalArgs) -> Result<()> {
@@ -700,10 +653,10 @@ async fn run_eval_remediate(config: &borg::config::Config, apply: bool) -> Resul
 /// With no `--judge-model`, a judged run uses the default judge (the first of
 /// `eval.judge-models`, Gemini unless configured); only an explicitly emptied
 /// list leaves it to fabric's own default model. A run that judges nothing
-/// (`--no-judge`, `--scored`) names no model, so its records never claim a
-/// judge that did not run.
+/// (`--no-judge`) names no model, so its records never claim a judge that did
+/// not run.
 fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::eval::EvalOpts> {
-    let judges = !(a.no_judge || a.scored);
+    let judges = !a.no_judge;
     let judge_model = a
         .judge_model
         .clone()

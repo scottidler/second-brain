@@ -11,6 +11,13 @@ pub const DEFAULT_MIN_PAIRED_CATCH_RATE: f64 = 0.80;
 pub const DEFAULT_MIN_SAMPLES: usize = 30;
 /// Default `eval.inject-workers`: judge calls in flight during `--inject`.
 const DEFAULT_INJECT_WORKERS: usize = 4;
+/// Default `eval.candidate.max-coverage-cut`: a candidate pattern that cuts
+/// claims per note or enumeration items per note by more than this share of
+/// the baseline scores 0, so a pattern cannot win by saying less.
+pub const DEFAULT_MAX_COVERAGE_CUT: f64 = 0.10;
+/// Default `eval.candidate.distill-workers`: distills in flight while a
+/// candidate pattern is scored.
+const DEFAULT_CANDIDATE_DISTILL_WORKERS: usize = 4;
 /// The default judge: a Gemini model, because the distiller is Anthropic and
 /// self-preference is a documented judge bias. First in the default
 /// `judge-models`, and the model `sb borg eval --staged` judges with when
@@ -54,6 +61,28 @@ pub struct EvalConfig {
     /// Traces judged in parallel by `sb borg eval --inject`, each worker with
     /// its own fabric children and cache connection.
     pub inject_workers: usize,
+    /// How a candidate distill pattern is scored against the current one
+    /// (`--candidate-pattern`, `--apply-candidate`).
+    pub candidate: CandidateConfig,
+}
+
+/// The `eval.candidate:` block: the coverage floor of the candidate metric
+/// (quote grounding x claim support x listicle survival) and the distill
+/// parallelism while scoring.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CandidateConfig {
+    pub max_coverage_cut: f64,
+    pub distill_workers: usize,
+}
+
+impl Default for CandidateConfig {
+    fn default() -> Self {
+        Self {
+            max_coverage_cut: DEFAULT_MAX_COVERAGE_CUT,
+            distill_workers: DEFAULT_CANDIDATE_DISTILL_WORKERS,
+        }
+    }
 }
 
 /// The `eval.trust:` block. A judge check is trusted when, on every planted
@@ -98,6 +127,13 @@ impl EvalConfig {
         if self.inject_workers == 0 {
             eyre::bail!("eval.inject-workers must be at least 1");
         }
+        let cut = self.candidate.max_coverage_cut;
+        if !(0.0..1.0).contains(&cut) {
+            eyre::bail!("eval.candidate.max-coverage-cut must be within 0..1, got {cut}");
+        }
+        if self.candidate.distill_workers == 0 {
+            eyre::bail!("eval.candidate.distill-workers must be at least 1");
+        }
         Ok(())
     }
 }
@@ -111,6 +147,7 @@ impl Default for EvalConfig {
             env_bootstrap: None,
             trust: TrustConfig::default(),
             inject_workers: DEFAULT_INJECT_WORKERS,
+            candidate: CandidateConfig::default(),
         }
     }
 }

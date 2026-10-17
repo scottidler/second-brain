@@ -19,6 +19,11 @@ use crate::eval::{
     patterns::PatternDirFabric,
 };
 
+/// `run_id` of the arm distilled without its capture note.
+pub const RUN_ID_WITHOUT_NOTE: &str = "regenerate:without-note";
+/// `run_id` of the arm distilled with its capture note.
+pub const RUN_ID_WITH_NOTE: &str = "regenerate:with-note";
+
 /// Both graded arms of a `--regenerate` run.
 #[derive(Debug, Clone)]
 pub struct RegenerateReport {
@@ -31,6 +36,25 @@ pub struct RegenerateReport {
 }
 
 impl RegenerateReport {
+    /// Every graded note of both arms as JSONL records (`--format json`):
+    /// `run_kind` `candidate` (a re-distill under the current pattern dir),
+    /// `run_id` `regenerate:without-note` or `regenerate:with-note`.
+    pub fn records(&self) -> Vec<crate::eval::TraceRecord> {
+        [
+            (RUN_ID_WITHOUT_NOTE, &self.without_note),
+            (RUN_ID_WITH_NOTE, &self.with_note),
+        ]
+        .into_iter()
+        .flat_map(|(run_id, arm)| {
+            arm.traces.iter().cloned().map(move |mut record| {
+                record.run_kind = crate::eval::RUN_KIND_CANDIDATE.to_string();
+                record.run_id = run_id.to_string();
+                record
+            })
+        })
+        .collect()
+    }
+
     /// Plain-text report: one header, then each arm's full eval report.
     pub fn render(&self) -> String {
         format!(

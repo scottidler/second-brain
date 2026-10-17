@@ -531,8 +531,13 @@ pub(super) fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> 
 /// `sb borg eval --format json`: one compact JSON object per trace, one per
 /// line (JSONL), in fixture order.
 pub(super) fn render_eval_jsonl(report: &borg::eval::EvalReport) -> Result<String> {
+    render_records_jsonl(&report.traces)
+}
+
+/// One JSON object per record, one per line: the `--format json` contract.
+pub(super) fn render_records_jsonl(records: &[borg::eval::TraceRecord]) -> Result<String> {
     let mut out = String::new();
-    for trace in &report.traces {
+    for trace in records {
         out.push_str(
             &serde_json::to_string(trace).map_err(|e| eyre::eyre!("serializing trace {}: {e}", trace.fixture))?,
         );

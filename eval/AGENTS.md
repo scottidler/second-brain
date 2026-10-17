@@ -1,33 +1,39 @@
-# eval - Python verdict producers
+# eval - prompt-candidate search and the promptfoo check
 
-> Read this before touching `eval/`. The Rust side of the contract is `borg/src/eval/verdicts.rs` and `borg/src/eval/scored.rs`.
+> Read this before touching `eval/`. The Rust side is `borg/src/eval/candidate.rs` (split, scoring, coverage floor, `candidate` rows) and `borg/src/eval/candidate/file.rs` (the candidate file and `--apply-candidate`).
 
 ## Purpose
 
-A `uv` project beside the Rust code that runs third-party judges (DeepEval, MiniCheck) over `sb borg eval` records and writes verdicts back. The interface is files only: no Python calls Rust and Rust never imports Python. A tool that earns it gets ported into `sb`; one that adds nothing is removed (design: `docs/design/2026-10-14-automated-note-quality-loop.md`, "The `uv` project").
+Two tools beside the Rust code. Neither decides anything on its own (design: `docs/design/2026-10-14-automated-note-quality-loop.md`, "Prompt improvement"):
 
-## Contract
+- `propose/` (uv project `sb-eval`): a GEPA search (`gepa`, the library DSPy's `dspy.GEPA` wraps) over ONE distill pattern. It only proposes text. Every score comes from `sb borg eval --candidate-pattern`, so the metric and its coverage floor have one definition, in Rust.
+- `promptfoo/` (npm, `promptfoo` pinned exactly in `package.json` + `package-lock.json`): the config `bin/promptfoo-check` runs from `otto ci` when a `borg/patterns/*.md` differs from `origin/main`.
 
-- In: `sb borg eval --scored --limit N --format json` writes one `TraceRecord` JSONL line per trace. This side reads `trace`, `run_kind`, `run_id`, `rubric_version`, `content_hash`, `source`, `note_text`, `claims[{id, text, quote?, who?}]`.
-- Out: one verdict line per `{trace, run_kind, run_id, rubric_version, content_hash, tool, tool_version, model, claim_id?, metric, value, detail?}`. The five identity fields are copied from the record judged. `verdict.contract.VERDICT_KEYS` is the full key set; `sb` rejects any other key.
-- Load: `sb borg eval --ingest-verdicts <file>` rebuilds the `eval_scores` key with `check_name = tool`, `judge_model = model`, folds one tool's verdicts per key into one row (note-level metrics under `metrics`, per-claim under `claims.<id>`), and drops a verdict whose `content_hash` is stale, naming the trace, then exits non-zero.
+DeepEval and MiniCheck were dropped on their measured numbers (design doc, Resolved Decisions), along with torch, the NLTK fetch, `otto eval-py` and the verdict ingest.
+
+## Contract with `sb`
+
+- `sb borg eval --candidate-split N --pattern P`: JSON `{pattern, kind, eligible, train, holdout}`, two disjoint stable samples of staged traces whose distill reaches P's single-call path.
+- `sb borg eval --candidate-pattern FILE --pattern P --traces ... --format json [--patterns-dir DIR]`: JSON `SampleScore` (kebab-case keys). Per trace: `score` (this note against its own baseline note, null when an arm errored), `feedback`, `errors`, `candidate-note`, `source-head`. Per sample: `baseline` and `candidate` objectives, present only when `complete`. Writes `candidate` rows to `eval_scores` and caches distills in `eval-cache.db`.
+- Add `--holdout ... --write-candidate [DIR]` to re-score the winner on the holdout and write `<DIR>/<pattern>-<date>.md` (default `~/.local/share/sb/borg/eval-reports/candidates`).
 
 ## Layout
 
-- `verdict/contract.py`: read records, build and write verdicts.
-- `verdict/tools/deepeval.py`: `SummarizationMetric` on an OpenAI model (`OPENAI_API_KEY` in the environment).
-- `verdict/tools/minicheck.py`: MiniCheck `roberta-large` on CPU, one probability per claim. Needs `NLTK_DATA` holding `tokenizers/punkt_tab` (`bin/eval-nltk` provides it).
-- `verdict/__main__.py`: `python -m verdict --records in --out out`; a tool failure on one trace is a stderr line and a non-zero exit, never a silent skip.
-- `tests/`: pytest with fakes for the scorers and the metric; no model, no network.
+- `propose/__main__.py`: `python -m propose --pattern P [--sample N] [--budget N]`. Split, `gepa.optimize` (train is both trainset and valset), then the candidate file when the best is not the current pattern.
+- `propose/sb.py`: the three `sb` calls; a non-zero exit is an `SbError` carrying stderr.
+- `propose/adapter.py`: the `GEPAAdapter` (one component, the pattern text); an errored trace scores 0 for the search.
+- `propose/reflect.py`: the custom proposer. One `fabric -m <model>` call per rewrite, the new pattern taken from `<pattern>...</pattern>`: the patterns carry their own ``` fences, which GEPA's fence extractor would cut.
+- `promptfoo/promptfoo.yml`: the `echo` provider over each regenerated note, `llm-rubric` and `context-faithfulness` graded by `google:gemini-2.5-pro`.
+- `tests/`: pytest with fake runners (no sb, no fabric, no network), plus the run/skip rule of `bin/promptfoo-check` against throwaway git repos.
 
 ## Running
 
-- `otto eval-py`: export records, judge, write verdict JSONL, ingest. Pulls torch and calls OpenAI, so it is not part of `otto ci`.
-- `otto eval-test`: the pytest suite, through `uv run`.
+- `otto gepa --pattern distill-video --sample 4 --budget 40`: calls the distiller and the judges, so it is not in `ci`. Env `SB`, `SB_BORG_CONFIG`.
+- `otto eval-test`: the pytest suite, in `ci`.
+- `otto promptfoo` (`bin/promptfoo-check`), in `ci`: skips unless a pattern differs from `origin/main`; when it runs it needs `GEMINI_API_KEY` and borg.yml's distiller key.
 
 ## Invariants
 
-- Dependencies come from `uv add`; `uv.lock` pins them. torch is the CPU wheel from the `pytorch-cpu` explicit index.
-- MiniCheck is the Liyan06 GitHub repo pinned by `rev`, not the PyPI name.
-- Model weights and NLTK data live in `~/.cache/sb/eval`, never in the repo.
+- Python dependencies come from `uv add`; `uv.lock` pins them. The promptfoo version comes from `npm install --save-exact`.
+- Nothing here writes `borg/patterns/`. That is `sb borg eval --apply-candidate`, gated on judge trust.
 - Never print or write an API key.

@@ -115,43 +115,28 @@ fn trace_flags_follow_each_raters_rule() {
         Some(true)
     );
 
-    let deepeval = |v: f64| {
-        row(
-            "t",
-            "gpt-4o-mini",
-            TOOL_DEEPEVAL,
-            "v2",
-            serde_json::json!({ "tool_version": "4.3.1", "metrics": { "summarization": { "value": v } } }),
-        )
-    };
-    assert_eq!(trace_flag(&deepeval(0.5)), Some(false));
-    assert_eq!(trace_flag(&deepeval(0.49)), Some(true));
-
-    let minicheck = |labels: &[u64]| {
-        let claims: serde_json::Map<String, Value> = labels
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                (
-                    (i + 1).to_string(),
-                    serde_json::json!({ "supported": { "value": 0.5, "detail": { "label": l } } }),
-                )
-            })
-            .collect();
-        row(
-            "t",
-            "roberta-large",
-            TOOL_MINICHECK,
-            "v2",
-            serde_json::json!({ "tool_version": "x", "metrics": {}, "claims": claims }),
-        )
-    };
-    assert_eq!(trace_flag(&minicheck(&[1, 1])), Some(false));
-    assert_eq!(trace_flag(&minicheck(&[1, 0])), Some(true));
-    assert_eq!(
-        claim_support(&minicheck(&[1, 0])).unwrap(),
-        BTreeMap::from([(1, true), (2, false)])
+    // Rows the dropped DeepEval and MiniCheck tools left in older databases
+    // have no flag rule and no claim label: they are not raters.
+    let deepeval = row(
+        "t",
+        "gpt-4o-mini",
+        "deepeval",
+        "v2",
+        serde_json::json!({ "tool_version": "4.3.1", "metrics": { "summarization": { "value": 0.1 } } }),
     );
+    assert_eq!(trace_flag(&deepeval), None);
+    let minicheck = row(
+        "t",
+        "roberta-large",
+        "minicheck",
+        "v2",
+        serde_json::json!({ "tool_version": "x", "metrics": {}, "claims": {
+            "1": { "supported": { "value": 0.1, "detail": { "label": 0 } } }
+        } }),
+    );
+    assert_eq!(trace_flag(&minicheck), None);
+    assert_eq!(claim_support(&minicheck), None);
+    assert!(!is_current_rater_row(&minicheck));
 
     // A check with no flag rule is not a rater.
     assert_eq!(

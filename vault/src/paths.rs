@@ -364,6 +364,18 @@ pub fn borg_eval_cache_path() -> PathBuf {
         .join("eval-cache.db")
 }
 
+/// `sb borg eval`'s report directory, beside the eval cache: weekly reports
+/// land here and measured prompt candidates under `candidates/`. Panics only
+/// when `xdg_data_dir()` returns `None`, same as [`borg_eval_cache_path`].
+///
+/// `~/.local/share/sb/borg/eval-reports` on Linux.
+pub fn borg_eval_reports_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("eval-reports")
+}
+
 /// `sb borg harvest`'s watermark + durable-identity state file, under the
 /// `sb/borg/` data namespace (per-host, beside the receipts DB). Holds the
 /// export cursor plus, per published session id, the note path, `n-msgs` at

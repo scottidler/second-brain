@@ -173,7 +173,7 @@ pub enum Command {
         dry_run: bool,
     },
     /// Score distillation quality over golden fixtures (design 2026-07-05)
-    Eval(EvalArgs),
+    Eval(Box<EvalArgs>),
     /// Harvest dormant Claude Code sessions from clyde into vault notes
     /// (design 2026-07-17). Selects, clusters into threads, distills, and
     /// publishes to the inbox through the normal borg pipeline.
@@ -247,7 +247,6 @@ pub struct HarvestCliArgs {
 
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("sampled").args(["staged", "inject"])))]
-#[command(group(clap::ArgGroup::new("limitable").args(["unscored", "scored"])))]
 pub struct EvalArgs {
     /// Root of the fixture tree. Default is REPO-RELATIVE
     /// (`config/eval/distill-fixtures`): `sb borg eval` is a developer command
@@ -325,30 +324,6 @@ pub struct EvalArgs {
         ]
     )]
     pub inject: bool,
-    /// Write the records (no judge calls) of the --limit most recently
-    /// scored traces that are still staged at the hash they were scored at, for
-    /// the `eval/` tools to judge (`otto eval-py`). Pair with `--format json`.
-    #[arg(
-        long,
-        requires = "limit",
-        conflicts_with_all = [
-            "staged", "unscored", "inject", "synth_intents", "regenerate", "emit_calibration", "no_judge",
-            "judge_model", "rebuild_cache", "staging_root", "sample", "count", "ingest_verdicts"
-        ]
-    )]
-    pub scored: bool,
-    /// Load the verdict JSONL the `eval/` tools wrote into `eval_scores`. A
-    /// verdict whose content_hash no longer matches its trace and run is
-    /// dropped and named, and the command exits non-zero.
-    #[arg(
-        long,
-        value_name = "FILE",
-        conflicts_with_all = [
-            "staged", "unscored", "inject", "synth_intents", "regenerate", "emit_calibration", "no_judge",
-            "judge_model", "rebuild_cache", "staging_root", "sample", "count", "limit", "format"
-        ]
-    )]
-    pub ingest_verdicts: Option<PathBuf>,
     /// List every scored trace whose current rows fail a required check, and
     /// what one re-distill per source would post. Dry run: add --apply to
     /// post. A deterministic failure always acts; a judge check's acts only
@@ -356,7 +331,7 @@ pub struct EvalArgs {
     #[arg(
         long,
         conflicts_with_all = [
-            "staged", "unscored", "inject", "scored", "ingest_verdicts", "synth_intents", "regenerate",
+            "staged", "unscored", "inject", "synth_intents", "regenerate",
             "emit_calibration", "no_judge", "judge_model", "rebuild_cache", "staging_root", "sample", "count",
             "limit", "format", "patterns_dir"
         ]
@@ -366,10 +341,65 @@ pub struct EvalArgs {
     /// re-distill through the daemon's /ingest, carrying replay-of
     #[arg(long, requires = "remediate")]
     pub apply: bool,
+    /// The distill pattern a candidate replaces (`distill-video`,
+    /// `distill-article`, ...), for --candidate-split and --candidate-pattern
+    #[arg(long, value_name = "NAME")]
+    pub pattern: Option<String>,
+    /// Print, as JSON, two disjoint samples (train, holdout) of N staged
+    /// traces each whose distill reaches --pattern, ordered by a stable hash
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "pattern",
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "remediate", "synth_intents", "regenerate", "emit_calibration",
+            "no_judge", "sample", "count", "limit", "candidate_pattern", "apply_candidate"
+        ]
+    )]
+    pub candidate_split: Option<usize>,
+    /// Score FILE as --pattern against the current pattern (from
+    /// --patterns-dir, else the deployed one) on the --traces sample:
+    /// quote grounding x claim support x listicle survival, 0 when claims or
+    /// enumeration items per note fall more than `eval.candidate.max-coverage-cut`.
+    /// Writes `candidate` rows to eval_scores
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires_all = ["pattern", "traces"],
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "remediate", "synth_intents", "regenerate", "emit_calibration",
+            "no_judge", "sample", "count", "limit", "apply_candidate"
+        ]
+    )]
+    pub candidate_pattern: Option<PathBuf>,
+    /// With --candidate-pattern, the staged traces to score it on
+    #[arg(long, value_name = "TRACE", num_args = 1.., requires = "candidate_pattern")]
+    pub traces: Vec<String>,
+    /// With --write-candidate, the disjoint staged traces the winner is
+    /// re-scored on before the candidate file is written
+    #[arg(long, value_name = "TRACE", num_args = 1.., requires = "write_candidate")]
+    pub holdout: Vec<String>,
+    /// With --candidate-pattern and --holdout, write the candidate file
+    /// (metrics on both samples, trust, diff) into DIR (default
+    /// ~/.local/share/sb/borg/eval-reports/candidates)
+    #[arg(long, value_name = "DIR", num_args = 0..=1, requires_all = ["candidate_pattern", "holdout"])]
+    pub write_candidate: Option<Option<PathBuf>>,
+    /// Write a measured candidate file's pattern into borg/patterns (or
+    /// --patterns-dir). Refuses while a metric factor's judge check is
+    /// untrusted, when the repo pattern changed since the measurement, or when
+    /// a fresh re-distill of the holdout sample does not confirm the win
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "remediate", "synth_intents", "regenerate", "emit_calibration",
+            "no_judge", "judge_model", "sample", "count", "limit", "format", "pattern"
+        ]
+    )]
+    pub apply_candidate: Option<PathBuf>,
     /// With --unscored, score at most N traces this run (overrides
-    /// `eval.limit`); the rest stay in the backlog for the next run. With
-    /// --scored, export at most N traces
-    #[arg(long, value_name = "N", requires = "limitable")]
+    /// `eval.limit`); the rest stay in the backlog for the next run
+    #[arg(long, value_name = "N", requires = "unscored")]
     pub limit: Option<usize>,
     /// With --unscored, print the backlog size and score nothing
     #[arg(long, requires = "unscored", conflicts_with = "limit")]
@@ -380,7 +410,7 @@ pub struct EvalArgs {
         value_enum,
         ignore_case = true,
         default_value = "text",
-        conflicts_with_all = ["synth_intents", "regenerate", "emit_calibration"]
+        conflicts_with_all = ["synth_intents", "emit_calibration"]
     )]
     pub format: EvalFormat,
 }

@@ -230,3 +230,14 @@ fn a_vault_that_merely_shares_one_directory_name_is_accepted() {
     std::fs::create_dir_all(tmp.path().join("vault")).unwrap();
     assert!(resolve_vault_root(Some(tmp.path()), None).is_ok());
 }
+
+#[test]
+fn eval_reports_dir_sits_beside_the_eval_cache() {
+    let reports = borg_eval_reports_dir();
+    assert!(
+        reports.ends_with("sb/borg/eval-reports"),
+        "borg_eval_reports_dir() = {}",
+        reports.display()
+    );
+    assert_eq!(reports.parent(), borg_eval_cache_path().parent());
+}

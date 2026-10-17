@@ -101,7 +101,7 @@ fn eval_format_defaults_to_text_and_takes_json_in_any_case() {
     let h = EvalHarness::try_parse_from(["sb", "--format", "JSON"]).unwrap();
     assert_eq!(h.eval.format, args::EvalFormat::Json);
     assert!(EvalHarness::try_parse_from(["sb", "--format", "yaml"]).is_err());
-    assert!(EvalHarness::try_parse_from(["sb", "--format", "json", "--regenerate"]).is_err());
+    assert!(EvalHarness::try_parse_from(["sb", "--format", "json", "--synth-intents"]).is_err());
 }
 
 #[test]
@@ -202,43 +202,111 @@ fn eval_inject_takes_a_sample_and_refuses_the_other_modes() {
 }
 
 #[test]
-fn eval_scored_needs_a_limit_and_refuses_the_other_modes() {
-    let h = EvalHarness::try_parse_from(["sb", "--scored", "--limit", "10", "--format", "json"]).unwrap();
-    assert!(h.eval.scored);
-    assert_eq!(h.eval.limit, Some(10));
-    assert!(
-        EvalHarness::try_parse_from(["sb", "--scored"]).is_err(),
-        "an unbounded export would send every scored trace to a paid judge"
-    );
-    for flag in [
-        &["--unscored"][..],
-        &["--inject"],
-        &["--staged"],
-        &["--no-judge"],
-        &["--ingest-verdicts", "v.jsonl"],
-    ] {
-        let mut argv = vec!["sb", "--scored", "--limit", "3"];
+fn the_dropped_tool_flags_scored_and_ingest_verdicts_are_gone() {
+    // DeepEval and MiniCheck were dropped on their measured numbers; nothing
+    // produces verdicts, so the export and the ingest went with them.
+    assert!(EvalHarness::try_parse_from(["sb", "--scored", "--limit", "3"]).is_err());
+    assert!(EvalHarness::try_parse_from(["sb", "--ingest-verdicts", "v.jsonl"]).is_err());
+}
+
+#[test]
+fn candidate_split_needs_a_pattern_and_refuses_the_other_modes() {
+    let h = EvalHarness::try_parse_from(["sb", "--candidate-split", "4", "--pattern", "distill-video"]).unwrap();
+    assert_eq!(h.eval.candidate_split, Some(4));
+    assert_eq!(h.eval.pattern.as_deref(), Some("distill-video"));
+    assert!(EvalHarness::try_parse_from(["sb", "--candidate-split", "4"]).is_err());
+    for flag in [&["--unscored"][..], &["--inject"], &["--staged"], &["--remediate"]] {
+        let mut argv = vec!["sb", "--candidate-split", "4", "--pattern", "distill-video"];
         argv.extend_from_slice(flag);
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
 }
 
 #[test]
-fn eval_ingest_verdicts_takes_a_file_and_refuses_the_other_modes() {
-    let h = EvalHarness::try_parse_from(["sb", "--ingest-verdicts", "v.jsonl"]).unwrap();
-    assert_eq!(h.eval.ingest_verdicts, Some(std::path::PathBuf::from("v.jsonl")));
+fn candidate_pattern_takes_space_separated_traces_and_writes_only_with_a_holdout() {
+    let h = EvalHarness::try_parse_from([
+        "sb",
+        "--candidate-pattern",
+        "c.md",
+        "--pattern",
+        "distill-video",
+        "--traces",
+        "t1",
+        "t2",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    assert_eq!(h.eval.traces, vec!["t1", "t2"]);
+    assert_eq!(h.eval.write_candidate, None);
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--candidate-pattern", "c.md", "--pattern", "distill-video"]).is_err(),
+        "--traces is required"
+    );
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--candidate-pattern", "c.md", "--traces", "t1"]).is_err(),
+        "--pattern is required"
+    );
+    let base = [
+        "sb",
+        "--candidate-pattern",
+        "c.md",
+        "--pattern",
+        "distill-video",
+        "--traces",
+        "t1",
+    ];
+    let mut bare = base.to_vec();
+    bare.extend(["--holdout", "h1", "h2", "--write-candidate"]);
+    let h = EvalHarness::try_parse_from(bare).unwrap();
+    assert_eq!(h.eval.holdout, vec!["h1", "h2"]);
+    assert_eq!(
+        h.eval.write_candidate,
+        Some(None),
+        "bare --write-candidate takes the report dir"
+    );
+    let mut dir = base.to_vec();
+    dir.extend(["--write-candidate", "/tmp/c", "--holdout", "h1"]);
+    assert_eq!(
+        EvalHarness::try_parse_from(dir).unwrap().eval.write_candidate,
+        Some(Some(std::path::PathBuf::from("/tmp/c")))
+    );
+    let mut no_holdout = base.to_vec();
+    no_holdout.push("--write-candidate");
+    assert!(
+        EvalHarness::try_parse_from(no_holdout).is_err(),
+        "--write-candidate needs --holdout"
+    );
+    let mut no_write = base.to_vec();
+    no_write.extend(["--holdout", "h1"]);
+    assert!(
+        EvalHarness::try_parse_from(no_write).is_err(),
+        "--holdout needs --write-candidate"
+    );
+}
+
+#[test]
+fn apply_candidate_takes_a_file_and_refuses_the_other_modes() {
+    let h = EvalHarness::try_parse_from(["sb", "--apply-candidate", "c.md"]).unwrap();
+    assert_eq!(h.eval.apply_candidate, Some(std::path::PathBuf::from("c.md")));
     for flag in [
         &["--unscored"][..],
-        &["--scored", "--limit", "3"],
-        &["--inject"],
-        &["--staged"],
-        &["--limit", "3"],
+        &["--remediate"],
+        &["--judge-model", "m"],
+        &["--candidate-pattern", "x.md"],
         &["--format", "json"],
     ] {
-        let mut argv = vec!["sb", "--ingest-verdicts", "v.jsonl"];
+        let mut argv = vec!["sb", "--apply-candidate", "c.md"];
         argv.extend_from_slice(flag);
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
+}
+
+#[test]
+fn regenerate_takes_format_json() {
+    let h = EvalHarness::try_parse_from(["sb", "--regenerate", "--no-judge", "--format", "json"]).unwrap();
+    assert!(h.eval.regenerate);
+    assert_eq!(h.eval.format, EvalFormat::Json);
 }
 
 #[test]

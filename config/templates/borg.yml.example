@@ -326,6 +326,14 @@ harvest:
 #     min-paired-catch-rate: 0.80
 #     min-samples: 30                 # also the default --inject --sample
 #   inject-workers: 4                 # traces judged in parallel by --inject
+#   # A candidate distill pattern (`sb borg eval --candidate-pattern`, the
+#   # `otto gepa` search, `--apply-candidate`) scores quote grounding x claim
+#   # support x listicle survival against the current pattern. Cutting claims
+#   # per note or enumeration items per note by more than max-coverage-cut
+#   # scores it 0, so a pattern cannot win by saying less.
+#   candidate:
+#     max-coverage-cut: 0.10
+#     distill-workers: 4              # distills in flight while scoring
 
 # Intake - raw-input sidecars. Every trace gets <vault>/system/intake/<trace>.txt
 # holding the verbatim bytes it arrived with (or a short descriptor for binary
