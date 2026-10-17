@@ -22,6 +22,7 @@ pub mod intents;
 pub mod judge;
 pub mod patterns;
 pub mod regenerate;
+pub mod remediate;
 pub mod report;
 pub mod scored;
 pub mod scores;

@@ -349,6 +349,23 @@ pub struct EvalArgs {
         ]
     )]
     pub ingest_verdicts: Option<PathBuf>,
+    /// List every scored trace whose current rows fail a required check, and
+    /// what one re-distill per source would post. Dry run: add --apply to
+    /// post. A deterministic failure always acts; a judge check's acts only
+    /// when `--inject` measured it trusted
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "scored", "ingest_verdicts", "synth_intents", "regenerate",
+            "emit_calibration", "no_judge", "judge_model", "rebuild_cache", "staging_root", "sample", "count",
+            "limit", "format", "patterns_dir"
+        ]
+    )]
+    pub remediate: bool,
+    /// With --remediate, claim and post each actionable source's one
+    /// re-distill through the daemon's /ingest, carrying replay-of
+    #[arg(long, requires = "remediate")]
+    pub apply: bool,
     /// With --unscored, score at most N traces this run (overrides
     /// `eval.limit`); the rest stay in the backlog for the next run. With
     /// --scored, export at most N traces

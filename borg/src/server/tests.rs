@@ -465,3 +465,74 @@ async fn serve_init_rejects_gemini_without_fallback_when_keys_empty() {
     assert!(err.contains("youtube.gemini.api-key"), "{err}");
     assert!(err.contains("youtube.data-api.api-key"), "{err}");
 }
+
+#[test]
+fn replay_lineage_needs_replay_of_for_an_origin_and_refuses_a_blank_one() {
+    use crate::routes::replay_lineage;
+    use crate::types::ReplayOrigin;
+    assert_eq!(replay_lineage(None, None), Ok(None));
+    let lineage = replay_lineage(Some(" tr-1 "), Some(ReplayOrigin::AutoRemediation))
+        .unwrap()
+        .unwrap();
+    assert_eq!(lineage.replay_of, "tr-1");
+    assert_eq!(lineage.origin, Some(ReplayOrigin::AutoRemediation));
+    assert_eq!(replay_lineage(Some("tr-1"), None).unwrap().unwrap().origin, None);
+    assert!(replay_lineage(None, Some(ReplayOrigin::AutoRemediation)).is_err());
+    assert!(replay_lineage(Some("  "), None).is_err());
+}
+
+#[tokio::test]
+async fn ingest_writes_replay_of_at_intake_and_refuses_an_origin_without_it() {
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let vault = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(vault.path().join(".obsidian")).expect("marker");
+        let config = || {
+            let mut config = Config::default();
+            config.vault.root_path = Some(vault.path().to_string_lossy().to_string());
+            config
+        };
+
+        let refused = test_router_with_auth(config(), None)
+            .oneshot(post(
+                "/ingest",
+                serde_json::json!({"url": "https://example.com/r", "replay-origin": "auto-remediation"}),
+                None,
+            ))
+            .await
+            .expect("response");
+        let refused = body_json(refused).await;
+        assert!(
+            refused["status"]["Failed"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("needs replay-of")
+        );
+        assert!(refused.get("trace_id").is_none(), "refused before intake: {refused}");
+
+        let resp = test_router_with_auth(config(), None)
+            .oneshot(post(
+                "/ingest",
+                serde_json::json!({
+                    "url": "https://example.com/r",
+                    "method": "cli",
+                    "replay-of": "tr-original",
+                    "replay-origin": "auto-remediation",
+                }),
+                None,
+            ))
+            .await
+            .expect("response");
+        let body = body_json(resp).await;
+        let trace = body["trace_id"].as_str().expect("queued trace").to_string();
+        let conn = crate::receipts::open_default().expect("open receipts");
+        let row = crate::receipts::get(&conn, &trace).expect("get").expect("intake row");
+        assert_eq!(row.replay_of.as_deref(), Some("tr-original"));
+        assert_eq!(row.replay_origin.as_deref(), Some("auto-remediation"));
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(total, 1, "the refused request left no row");
+    })
+    .await;
+}

@@ -947,15 +947,19 @@ fn v5_migration_adds_started_at_surviving_v3_rebuild_from_pre_v3_db() {
         .expect("seed pre-v3 (v1) schema");
     }
     {
-        let conn = open_at(&path).expect("first open migrates v1 to v5");
+        let conn = open_at(&path).expect("first open migrates v1 to current");
         assert!(
             has_column(&conn, "receipts", "started_at").expect("probe"),
             "started_at must survive the v3 rebuild"
         );
+        assert!(
+            has_column(&conn, "receipts", "replay_origin").expect("probe"),
+            "replay_origin (v6) must survive the v3 rebuild"
+        );
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .expect("max version");
-        assert_eq!(v, 5);
+        assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(get(&conn, "legacy-1").expect("get").expect("row").status, "succeeded");
     }
     {
@@ -1346,4 +1350,48 @@ fn wal_conversion_under_a_held_lock_gives_up_within_its_budget() {
         elapsed < std::time::Duration::from_secs(1),
         "bounded by the budget, took {elapsed:?}"
     );
+}
+
+#[test]
+fn v6_migration_adds_replay_origin_and_the_remediation_claims_to_a_v5_db() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("receipts.db");
+    {
+        // The v5 shape a v0.17.7 daemon writes: no replay_origin, no claims.
+        let conn = Connection::open(&path).expect("open raw v5 db");
+        apply_pragmas(&conn).expect("pragmas");
+        conn.execute_batch(
+            "CREATE TABLE receipts (
+               trace_id        TEXT NOT NULL PRIMARY KEY,
+               received_at     TEXT NOT NULL,
+               method          TEXT NOT NULL,
+               kind            TEXT NOT NULL CHECK (kind IN ('url', 'text', 'binary', 'session')),
+               raw_input       TEXT NOT NULL,
+               status          TEXT NOT NULL
+                                CHECK (status IN ('received', 'succeeded', 'failed', 'rejected')),
+               terminal_at     TEXT,
+               note_path       TEXT,
+               failure_stage   TEXT,
+               failure_reason  TEXT,
+               replay_of       TEXT,
+               degraded        INTEGER NOT NULL DEFAULT 0,
+               lease_owner_pid INTEGER DEFAULT NULL,
+               lease_until     TEXT DEFAULT NULL,
+               started_at      TEXT DEFAULT NULL
+             );
+             CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_version (version, applied_at) VALUES (5, '2026-10-01T00:00:00Z');
+             INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status)
+               VALUES ('old-1', '2026-10-01T00:00:00Z', 'http', 'url', 'https://x.com', 'succeeded');",
+        )
+        .expect("seed v5 schema");
+    }
+    let conn = open_at(&path).expect("reopen migrates v5 to v6");
+    assert!(has_column(&conn, "receipts", "replay_origin").expect("probe"));
+    let claims: i64 = conn
+        .query_row("SELECT COUNT(*) FROM remediations", [], |r| r.get(0))
+        .expect("remediations table exists");
+    assert_eq!(claims, 0);
+    let row = get(&conn, "old-1").expect("get").expect("row survives");
+    assert_eq!((row.status.as_str(), row.replay_origin), ("succeeded", None));
 }

@@ -240,3 +240,14 @@ fn eval_ingest_verdicts_takes_a_file_and_refuses_the_other_modes() {
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
 }
+
+#[test]
+fn remediate_is_a_dry_run_unless_apply_and_apply_needs_remediate() {
+    let dry = EvalHarness::try_parse_from(["sb", "--remediate"]).unwrap();
+    assert!(dry.eval.remediate && !dry.eval.apply);
+    let applied = EvalHarness::try_parse_from(["sb", "--remediate", "--apply"]).unwrap();
+    assert!(applied.eval.apply);
+    assert!(EvalHarness::try_parse_from(["sb", "--apply"]).is_err());
+    assert!(EvalHarness::try_parse_from(["sb", "--remediate", "--unscored"]).is_err());
+    assert!(EvalHarness::try_parse_from(["sb", "--remediate", "--judge-model", "x"]).is_err());
+}

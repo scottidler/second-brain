@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::notify::{Desktop, Telegram};
 use crate::pipeline;
-use crate::types::{ContentKind, IngestMethod, IngestResult};
+use crate::types::{ContentKind, IngestMethod, IngestResult, ReplayOrigin};
 
 /// Run one captured input through the pipeline with operator-facing progress
 /// and result notifications.
@@ -31,7 +31,9 @@ pub(crate) async fn dispatch_ingest(
 ) -> IngestResult {
     // A `sb borg ingest` caller (usually an agent batch) gets its result on
     // stdout; toasting each one flooded desktop and phone on 2026-10-17.
-    let (desktop, telegram) = if pings_operator(method) { (desktop, telegram) } else { (None, None) };
+    // Only `/ingest` can carry a replay origin, and it applies that half of
+    // the policy before handing its sinks over.
+    let (desktop, telegram) = if pings_operator(method, None) { (desktop, telegram) } else { (None, None) };
     let prior = if let Some(d) = &desktop {
         d.processing(&trace_id, processing_msg).await
     } else {
@@ -57,9 +59,11 @@ pub(crate) async fn dispatch_ingest(
 }
 
 /// Whether an ingest by `method` sends the operator processing/result pings.
-/// Every human-facing transport does; the CLI does not.
-fn pings_operator(method: IngestMethod) -> bool {
-    method != IngestMethod::Cli
+/// Every human-facing transport does; the CLI does not, and neither does an
+/// auto-remediation, whatever method it carries: it is the eval loop's own
+/// re-distill, reported through receipts and the weekly report.
+pub(crate) fn pings_operator(method: IngestMethod, replay_origin: Option<ReplayOrigin>) -> bool {
+    method != IngestMethod::Cli && replay_origin != Some(ReplayOrigin::AutoRemediation)
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use crate::assets;
 use crate::health::HealthResponse;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
 use crate::trace;
-use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus};
+use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus, ReplayOrigin};
 use vault::receipts::FailureStage;
 
 #[derive(Debug, Deserialize)]
@@ -102,18 +102,33 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
 
     let tags = request.tags.unwrap_or_default();
     let method = request.method.unwrap_or(IngestMethod::Http);
+    let lineage = match replay_lineage(request.replay_of.as_deref(), request.replay_origin) {
+        Ok(lineage) => lineage,
+        Err(reason) => {
+            // Refused before intake, like a 401: nothing was accepted, so
+            // nothing is captured, and the caller is told why.
+            log::warn!("http/ingest: refusing {}: {reason}", request.url);
+            return Json(IngestResult {
+                status: IngestStatus::Failed { reason },
+                failure_stage: Some(FailureStage::IntakeRejected),
+                ..Default::default()
+            });
+        }
+    };
     let trace_id = trace::generate(method);
 
     // Durable intake BEFORE any pipeline dispatch. Synchronous so a write
     // failure returns Failed to the caller; everything beyond this point
-    // runs on a detached task and is invisible to the client.
-    if let Err(e) = intake_log::record_received_with_sidecar(
+    // runs on a detached task and is invisible to the client. A replay's
+    // lineage rides the same INSERT.
+    if let Err(e) = intake_log::record_replay_with_sidecar(
         &state.config,
         method,
         IntakeKind::Url,
         &request.url,
         request.url.as_bytes(),
         &trace_id,
+        lineage.as_ref(),
     ) {
         log::error!("http/ingest: failed to record intake trace={trace_id}: {e:#}");
         return Json(IngestResult {
@@ -138,8 +153,11 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
     // response time.
     let url = request.url.clone();
     let config = state.config.clone();
-    let telegram = state.telegram.clone();
-    let desktop = state.desktop.clone();
+    let (telegram, desktop) = if crate::dispatch::pings_operator(method, request.replay_origin) {
+        (state.telegram.clone(), state.desktop.clone())
+    } else {
+        (None, None)
+    };
     let force = request.force;
     // The HTTP transport's capture note is the `IngestRequest.note`
     // field (optional). Trimmed empty -> None so a bare-URL POST renders no
@@ -189,6 +207,24 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         canonical_url: Some(url),
         ..Default::default()
     })
+}
+
+/// The receipts lineage an `/ingest` body asks for. `replay-origin` says why a
+/// replay was sent, so it is refused without the `replay-of` it explains, and
+/// a blank `replay-of` names nothing.
+pub(crate) fn replay_lineage(
+    replay_of: Option<&str>,
+    origin: Option<ReplayOrigin>,
+) -> Result<Option<crate::receipts::Lineage>, String> {
+    match (replay_of.map(str::trim), origin) {
+        (Some(""), _) => Err("replay-of is blank".to_string()),
+        (Some(trace), origin) => Ok(Some(crate::receipts::Lineage {
+            replay_of: trace.to_string(),
+            origin,
+        })),
+        (None, Some(origin)) => Err(format!("replay-origin '{origin}' needs replay-of")),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Terminal-state view of one receipts row, returned by `GET /trace/{id}`.

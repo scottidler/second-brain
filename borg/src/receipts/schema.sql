@@ -49,12 +49,37 @@ CREATE TABLE IF NOT EXISTS receipts (
   lease_until     TEXT DEFAULT NULL,
   -- When the trace got its general permit (TIMESTAMP_FMT); NULL = never
   -- granted. History, not liveness: never cleared at terminal time.
-  started_at      TEXT DEFAULT NULL
+  started_at      TEXT DEFAULT NULL,
+  -- Why a replay was sent (`borg::types::ReplayOrigin`, e.g.
+  -- 'auto-remediation'); NULL for a first ingest or a replay sent without
+  -- one. Written with `replay_of` in the INSERT that creates the row.
+  replay_origin   TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
 CREATE INDEX IF NOT EXISTS idx_receipts_received_at ON receipts(received_at);
 CREATE INDEX IF NOT EXISTS idx_receipts_method_status ON receipts(method, status);
+
+-- One row per source URL `sb borg eval --remediate --apply` has claimed.
+-- The claim is inserted in the same transaction that counts prior
+-- auto-remediation attempts for the URL (this table plus receipts rows with
+-- replay_origin='auto-remediation'), so two concurrent runs cannot both
+-- post. `trigger_*` freezes the eval_scores key (run_kind 'baseline',
+-- run_id '') of the current row that failed, the "before" score.
+CREATE TABLE IF NOT EXISTS remediations (
+  source_url           TEXT NOT NULL PRIMARY KEY,
+  original_trace       TEXT NOT NULL,
+  claimed_at           TEXT NOT NULL,
+  -- The trace /ingest returned; NULL while the POST is in flight or when
+  -- its response was lost (the receipts row still carries the lineage).
+  remediation_trace    TEXT,
+  trigger_judge_model  TEXT NOT NULL,
+  trigger_check        TEXT NOT NULL,
+  trigger_rubric       TEXT NOT NULL,
+  trigger_content_hash TEXT NOT NULL,
+  -- Set when the POST's outcome is unknown (timeout, unreadable answer).
+  post_error           TEXT
+);
 
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER NOT NULL PRIMARY KEY,

@@ -22,6 +22,8 @@ fn test_ingest_request_roundtrip() {
         force: false,
         method: Some(IngestMethod::Clipboard),
         note: Some("why I saved this".to_string()),
+        replay_of: None,
+        replay_origin: None,
     };
     let json = serde_yaml::to_string(&req).expect("serialize");
     let deserialized: IngestRequest = serde_yaml::from_str(&json).expect("deserialize");
@@ -37,6 +39,29 @@ fn test_ingest_request_note_defaults_to_none_when_absent() {
     let body = serde_json::json!({ "url": "https://example.com/" });
     let req: IngestRequest = serde_json::from_value(body).expect("deserialize");
     assert_eq!(req.note, None);
+    assert_eq!(req.replay_of, None);
+    assert_eq!(req.replay_origin, None);
+}
+
+#[test]
+fn replay_lineage_rides_the_ingest_body_under_its_kebab_names() {
+    let body = serde_json::json!({
+        "url": "https://example.com/",
+        "replay-of": "ht-1234abcd",
+        "replay-origin": "auto-remediation",
+    });
+    let req: IngestRequest = serde_json::from_value(body).expect("deserialize");
+    assert_eq!(req.replay_of.as_deref(), Some("ht-1234abcd"));
+    assert_eq!(req.replay_origin, Some(ReplayOrigin::AutoRemediation));
+    let back = serde_json::to_value(&req).expect("serialize");
+    assert_eq!(back["replay-of"], "ht-1234abcd");
+    assert_eq!(back["replay-origin"], ReplayOrigin::AutoRemediation.as_str());
+}
+
+#[test]
+fn an_unknown_replay_origin_is_a_parse_error_not_a_silent_none() {
+    let body = serde_json::json!({ "url": "https://example.com/", "replay-of": "t", "replay-origin": "manual" });
+    assert!(serde_json::from_value::<IngestRequest>(body).is_err());
 }
 
 #[test]

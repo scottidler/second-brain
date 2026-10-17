@@ -283,6 +283,20 @@ fn replay_note(config: &Config, envelope: &crate::types::Envelope, trace_id: &st
     published_capture_note(config, trace_id)
 }
 
+/// The capture note a re-POST of `trace_id` must carry, by the same rule a
+/// replay uses ([`replay_note`]): the staged envelope's note, else the
+/// published note's `capture-note:`. `sb borg eval --remediate` sends it so
+/// the re-distill sees the operator's stated intent.
+pub fn capture_note_for(config: &Config, trace_id: &str) -> Result<Option<String>> {
+    log::debug!("replay::capture_note_for: trace={trace_id}");
+    let store = FsArtifactStore::from_config(&config.staging);
+    if config.staging.enabled && store.has_trace(trace_id)? {
+        let envelope = store.read_envelope(trace_id)?;
+        return replay_note(config, &envelope, trace_id);
+    }
+    published_capture_note(config, trace_id)
+}
+
 /// `capture-note:` of the vault note `trace_id` published, if one exists.
 fn published_capture_note(config: &Config, trace_id: &str) -> Result<Option<String>> {
     let vault_root = config.vault_root()?;

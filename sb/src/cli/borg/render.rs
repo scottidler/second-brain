@@ -76,6 +76,9 @@ pub(super) fn print_receipt_detail(r: &borg::receipts::Receipt) {
     if let Some(rep) = &r.replay_of {
         println!("replay_of:      {rep}");
     }
+    if let Some(origin) = &r.replay_origin {
+        println!("replay_origin:  {origin}");
+    }
     let preview = vault::text::truncate_with_ellipsis(&r.raw_input, 200);
     println!("raw_input:      {preview}");
 }

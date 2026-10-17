@@ -78,18 +78,35 @@ pub fn record_received_with_sidecar(
     sidecar_bytes: &[u8],
     trace_id: &str,
 ) -> Result<()> {
+    record_replay_with_sidecar(config, method, kind, preview, sidecar_bytes, trace_id, None)
+}
+
+/// [`record_received_with_sidecar`] for a door that may be handed a replay's
+/// lineage (`/ingest`'s `replay-of`). The lineage lands in the INSERT that
+/// creates the receipts row, never in a later UPDATE, so an attempt cannot
+/// exist without it.
+pub fn record_replay_with_sidecar(
+    config: &Config,
+    method: IngestMethod,
+    kind: IntakeKind,
+    preview: &str,
+    sidecar_bytes: &[u8],
+    trace_id: &str,
+    lineage: Option<&receipts::Lineage>,
+) -> Result<()> {
     log::debug!(
-        "intake::record_received_with_sidecar: trace={trace_id} method={method} kind={kind} sidecar_bytes={}",
+        "intake::record_replay_with_sidecar: trace={trace_id} method={method} kind={kind} sidecar_bytes={} lineage={lineage:?}",
         sidecar_bytes.len()
     );
     let conn = receipts::open_default().context("open receipts DB for capture")?;
     let root = vault_root(config)?;
-    record_received_with_sidecar_to(&conn, &root, method, kind, preview, sidecar_bytes, trace_id)
+    record_received_with_sidecar_to(&conn, &root, method, kind, preview, sidecar_bytes, trace_id, lineage)
 }
 
-/// Conn/root-injectable core of [`record_received_with_sidecar`]. Sidecar
+/// Conn/root-injectable core of [`record_replay_with_sidecar`]. Sidecar
 /// first (raw-input record lands on disk), then the receipts row. Both
 /// propagate.
+#[allow(clippy::too_many_arguments)]
 fn record_received_with_sidecar_to(
     conn: &Connection,
     vault_root: &Path,
@@ -98,9 +115,10 @@ fn record_received_with_sidecar_to(
     preview: &str,
     sidecar_bytes: &[u8],
     trace_id: &str,
+    lineage: Option<&receipts::Lineage>,
 ) -> Result<()> {
     intake::write_raw_input(vault_root, trace_id, sidecar_bytes).context("Failed to write intake sidecar")?;
-    receipts::record_received(conn, trace_id, method, receipt_kind(kind), preview)
+    receipts::record_received_with_lineage(conn, trace_id, method, receipt_kind(kind), preview, lineage)
         .with_context(|| format!("Failed to record receipts row trace={trace_id}"))?;
     log::info!(
         "intake: captured trace={trace_id} method={method} kind={kind} preview={}",

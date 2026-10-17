@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -70,8 +70,19 @@ pub struct Receipt {
     pub failure_stage: Option<String>,
     pub failure_reason: Option<String>,
     pub replay_of: Option<String>,
+    /// Why the replay was sent (`ReplayOrigin::as_str`); `None` unless the
+    /// door was handed one with `replay_of`.
+    pub replay_origin: Option<String>,
     /// True when the note was published from a distill fallback (degraded).
     pub degraded: bool,
+}
+
+/// A replay's lineage, written onto its receipts row at the door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lineage {
+    /// The trace being re-run.
+    pub replay_of: String,
+    pub origin: Option<crate::types::ReplayOrigin>,
 }
 
 /// Filter for [`query`]. Empty filter means "all rows".
@@ -340,6 +351,14 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE receipts ADD COLUMN started_at TEXT DEFAULT NULL", [])
             .context("add started_at column")?;
     }
+    // v6: `replay_origin` says why a replay was sent (the remediation claim
+    // counts 'auto-remediation' rows); the `remediations` claim table comes
+    // from the baseline schema batch above. Same placement rule as v4.
+    if !has_column(conn, "receipts", "replay_origin")? {
+        log::debug!("receipts::run_migrations: adding replay_origin column (v6)");
+        conn.execute("ALTER TABLE receipts ADD COLUMN replay_origin TEXT DEFAULT NULL", [])
+            .context("add replay_origin column")?;
+    }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
     // it cleanly.
@@ -435,6 +454,21 @@ pub fn record_received_expecting_existing(
     record_received_flagged(conn, trace_id, method, kind, raw_input, true)
 }
 
+/// Like [`record_received`], with the replay's lineage on the same row: the
+/// one INSERT that creates the row carries `replay_of` and `replay_origin`, so
+/// no reader ever sees the attempt without its lineage. `None` is a plain
+/// first ingest.
+pub fn record_received_with_lineage(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+    lineage: Option<&Lineage>,
+) -> Result<()> {
+    record_received_row(conn, trace_id, method, kind, raw_input, lineage, false)
+}
+
 fn record_received_flagged(
     conn: &Connection,
     trace_id: &str,
@@ -443,20 +477,43 @@ fn record_received_flagged(
     raw_input: &str,
     expected_existing: bool,
 ) -> Result<()> {
+    record_received_row(conn, trace_id, method, kind, raw_input, None, expected_existing)
+}
+
+fn record_received_row(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+    lineage: Option<&Lineage>,
+    expected_existing: bool,
+) -> Result<()> {
     log::debug!(
-        "receipts::record_received: trace={} method={} kind={} raw_len={} expected_existing={}",
+        "receipts::record_received: trace={} method={} kind={} raw_len={} lineage={:?} expected_existing={}",
         trace_id,
         method,
         kind,
         raw_input.len(),
+        lineage,
         expected_existing
     );
+    let replay_of = lineage.map(|l| l.replay_of.as_str());
+    let replay_origin = lineage.and_then(|l| l.origin).map(|o| o.as_str());
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO receipts \
-             (trace_id, received_at, method, kind, raw_input, status) \
-             VALUES (?, ?, ?, ?, ?, 'received')",
-            params![trace_id, now_iso8601(), method.as_str(), kind.as_str(), raw_input],
+             (trace_id, received_at, method, kind, raw_input, status, replay_of, replay_origin) \
+             VALUES (?, ?, ?, ?, ?, 'received', ?, ?)",
+            params![
+                trace_id,
+                now_iso8601(),
+                method.as_str(),
+                kind.as_str(),
+                raw_input,
+                replay_of,
+                replay_origin
+            ],
         )
         .with_context(|| format!("Failed to record received trace_id={trace_id}"))?;
     if rows == 0 {
@@ -469,7 +526,11 @@ fn record_received_flagged(
     Ok(())
 }
 
-/// INSERT a `received` row tagged as a replay of `original_trace_id`.
+/// INSERT a `received` row tagged as a replay of `original_trace_id`. Tests
+/// only: a post-POST call is a no-op on the row `/ingest` already wrote
+/// (`INSERT OR IGNORE`), so production lineage rides the `/ingest` body
+/// ([`record_received_with_lineage`]).
+#[cfg(test)]
 pub fn record_replay(
     conn: &Connection,
     trace_id: &str,
@@ -734,7 +795,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
     let mut stmt = conn
         .prepare(
             "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                    terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded \
+                    terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin \
              FROM receipts WHERE trace_id=?",
         )
         .context("prepare get")?;
@@ -750,7 +811,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
 pub fn query(conn: &Connection, filter: &Filter) -> Result<Vec<Receipt>> {
     let mut sql = String::from(
         "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded \
+                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin \
          FROM receipts WHERE 1=1",
     );
     let mut bound: Vec<rusqlite::types::Value> = Vec::new();
@@ -808,6 +869,7 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
         failure_reason: row.get(9)?,
         replay_of: row.get(10)?,
         degraded: row.get::<_, i64>(11)? != 0,
+        replay_origin: row.get(12)?,
     })
 }
 

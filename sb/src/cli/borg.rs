@@ -397,6 +397,9 @@ impl BorgCli {
                 if a.inject {
                     return run_eval_inject(&config, &opts, &a);
                 }
+                if a.remediate {
+                    return run_eval_remediate(&config, a.apply).await;
+                }
                 match borg::eval::run(&opts)? {
                     borg::eval::EvalOutcome::CalibrationSheet(path) => {
                         println!("wrote calibration sheet: {}", path.display());
@@ -653,6 +656,41 @@ fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a
     }
     if report.all_judged_errored() {
         eyre::bail!("every judged trace errored on --inject; no judge was measured");
+    }
+    Ok(())
+}
+
+/// `sb borg eval --remediate [--apply]`: list the failing scored traces and
+/// the one re-distill each actionable source gets; `--apply` claims and posts
+/// them through the daemon, which must advertise `replay-of` on `/health`.
+async fn run_eval_remediate(config: &borg::config::Config, apply: bool) -> Result<()> {
+    use borg::eval::remediate;
+    if config.eval.judge_models.is_empty() {
+        eyre::bail!("eval.judge-models is empty: the required-check set --remediate reads is derived from it");
+    }
+    let receipts = borg::receipts::open_default().context("opening the receipts db")?;
+    let cache_path = vault::paths::borg_eval_cache_path();
+    let store = borg::eval::scores::ScoreStore::open(&cache_path)?;
+    let trust_rows = borg::eval::trust::TrustStore::open(&cache_path)?.all()?;
+    let plan = remediate::plan(
+        &receipts,
+        &store,
+        &vault::paths::borg_stages_dir(),
+        &config.eval.judge_models,
+        &trust_rows,
+        &config.eval.trust,
+    )?;
+    let note_of = |trace: &str| borg::replay::capture_note_for(config, trace);
+    let report = if apply {
+        let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
+        let poster = remediate::DaemonPoster::connect(daemon).await?;
+        remediate::run(&receipts, plan, Some(&poster), &note_of).await?
+    } else {
+        remediate::run::<remediate::DaemonPoster>(&receipts, plan, None, &note_of).await?
+    };
+    print!("{}", report.render());
+    if report.post_failed() {
+        eyre::bail!("a remediation post failed; see NOT DELIVERED / UNKNOWN above");
     }
     Ok(())
 }

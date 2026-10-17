@@ -323,6 +323,39 @@ pub struct IngestRequest {
     /// the published note's `## Why Captured` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The trace this ingest re-runs. Additive + optional. Intake writes it
+    /// onto the new receipts row in the same INSERT that creates the row, so
+    /// lineage exists the moment the attempt does.
+    #[serde(rename = "replay-of", default, skip_serializing_if = "Option::is_none")]
+    pub replay_of: Option<String>,
+    /// Why the replay was sent. Additive + optional; only meaningful with
+    /// `replay-of` (the door refuses it alone).
+    #[serde(rename = "replay-origin", default, skip_serializing_if = "Option::is_none")]
+    pub replay_origin: Option<ReplayOrigin>,
+}
+
+/// Who sent a replay. The receipts `replay_origin` column stores
+/// [`ReplayOrigin::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplayOrigin {
+    /// `sb borg eval --remediate --apply`: the one automatic re-distill of a
+    /// failing note's source.
+    AutoRemediation,
+}
+
+impl ReplayOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AutoRemediation => "auto-remediation",
+        }
+    }
+}
+
+impl std::fmt::Display for ReplayOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

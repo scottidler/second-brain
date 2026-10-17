@@ -19,6 +19,7 @@ fn capture_writes_sidecar_and_received_row() {
         url,
         url.as_bytes(),
         "tr-cap",
+        None,
     )
     .unwrap();
 
@@ -32,6 +33,34 @@ fn capture_writes_sidecar_and_received_row() {
     assert_eq!(r.method, "http");
     assert_eq!(r.kind, "url");
     assert_eq!(r.raw_input, url);
+}
+
+/// A replay's lineage lands on the row the capture creates, in that same
+/// INSERT: the row is never visible without it.
+#[test]
+fn capture_writes_the_replay_lineage_onto_the_received_row() {
+    let conn = receipts::open_memory().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let url = "https://example.com/article";
+    let lineage = receipts::Lineage {
+        replay_of: "tr-original".to_string(),
+        origin: Some(crate::types::ReplayOrigin::AutoRemediation),
+    };
+    record_received_with_sidecar_to(
+        &conn,
+        tmp.path(),
+        IngestMethod::Http,
+        IntakeKind::Url,
+        url,
+        url.as_bytes(),
+        "tr-remediation",
+        Some(&lineage),
+    )
+    .unwrap();
+    let r = receipts::get(&conn, "tr-remediation").unwrap().expect("receipts row");
+    assert_eq!(r.status, "received");
+    assert_eq!(r.replay_of.as_deref(), Some("tr-original"));
+    assert_eq!(r.replay_origin.as_deref(), Some("auto-remediation"));
 }
 
 /// A harvest session candidate maps to the honest `ReceiptKind::Session`
@@ -52,6 +81,7 @@ fn capture_maps_session_kind_to_receipt_kind_session() {
         body,
         body.as_bytes(),
         "tr-session",
+        None,
     )
     .unwrap();
 
@@ -77,6 +107,7 @@ fn capture_propagates_sidecar_write_failure() {
         "https://x.com",
         b"https://x.com",
         "tr-fail",
+        None,
     );
     assert!(err.is_err(), "sidecar write failure must propagate");
 }
