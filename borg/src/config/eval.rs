@@ -9,6 +9,10 @@ pub const DEFAULT_MIN_PAIRED_CATCH_RATE: f64 = 0.80;
 /// Default `eval.trust.min-samples`: applicable traces a class needs before
 /// its rate can make a judge check trusted.
 pub const DEFAULT_MIN_SAMPLES: usize = 30;
+/// Default `eval.limit`: traces one timer run scores (Scott, 2026-10-17), so
+/// a borg.yml without the line drains the backlog instead of scoring it all
+/// in one run.
+pub const DEFAULT_LIMIT: usize = 100;
 /// Default `eval.inject-workers`: judge calls in flight during `--inject`.
 const DEFAULT_INJECT_WORKERS: usize = 4;
 /// Default `eval.candidate.max-coverage-cut`: a candidate pattern that cuts
@@ -52,7 +56,8 @@ pub struct EvalConfig {
     /// baked into the timer unit.
     pub schedule: String,
     /// Cap on traces one `--unscored` run scores; the rest stay in the
-    /// backlog for the next run. `None` scores the whole backlog.
+    /// backlog for the next run. Default [`DEFAULT_LIMIT`]; `null` scores the
+    /// whole backlog.
     pub limit: Option<usize>,
     /// Judge models (fabric `-m`), each scoring every trace. The first is
     /// the default judge ([`EvalConfig::default_judge_model`]).
@@ -191,7 +196,7 @@ impl Default for EvalConfig {
     fn default() -> Self {
         Self {
             schedule: DEFAULT_SCHEDULE.to_string(),
-            limit: None,
+            limit: Some(DEFAULT_LIMIT),
             judge_models: vec![DEFAULT_JUDGE_MODEL.to_string(), SECOND_JUDGE_MODEL.to_string()],
             env_bootstrap: None,
             trust: TrustConfig::default(),
@@ -201,3 +206,6 @@ impl Default for EvalConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

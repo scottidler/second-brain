@@ -308,7 +308,7 @@ harvest:
 # names (anthropic/gemini/openai) into its OWN env-file.
 # eval:
 #   schedule: "*-*-* 05:00:00"        # systemd OnCalendar, the one value in the timer
-#   limit: 100                        # traces per run; the rest carry over (omit = all)
+#   limit: 100                        # traces per run (the default); the rest carry over (null = all)
 #   judge-models:
 #     - gemini-2.5-pro                # the default judge (first entry)
 #     - claude-sonnet-5               # the second judge
