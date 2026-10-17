@@ -1442,6 +1442,17 @@ fn eval_trust_defaults_to_the_design_floors() {
 }
 
 #[test]
+fn eval_judge_models_default_to_gemini_then_anthropic_and_an_explicit_list_wins() {
+    let config: Config = serde_yaml::from_str("eval:\n  limit: 5\n").unwrap();
+    assert_eq!(config.eval.judge_models, vec!["gemini-2.5-pro", "claude-sonnet-5"]);
+    assert_eq!(config.eval.default_judge_model(), Some("gemini-2.5-pro"));
+    let config: Config = serde_yaml::from_str("eval:\n  judge-models: [claude-sonnet-5]\n").unwrap();
+    assert_eq!(config.eval.default_judge_model(), Some("claude-sonnet-5"));
+    let config: Config = serde_yaml::from_str("eval:\n  judge-models: []\n").unwrap();
+    assert_eq!(config.eval.default_judge_model(), None);
+}
+
+#[test]
 fn eval_trust_overrides_parse_and_out_of_range_values_fail_validation() {
     let config: Config = serde_yaml::from_str(
         "eval:\n  inject-workers: 2\n  trust:\n    min-paired-catch-rate: 0.9\n    min-samples: 50\n",

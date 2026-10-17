@@ -25,6 +25,7 @@ use eyre::{Result, bail, eyre};
 use regex::Regex;
 use vault::distilled::Distilled;
 
+use super::agreement::{AgreementReport, agreement};
 use super::calc::{grounding_words, wilson_lower_bound};
 use super::judge::MAX_SCORE;
 use super::report::{TraceMetrics, TraceRecord};
@@ -333,6 +334,10 @@ pub struct InjectReport {
     pub cells: Vec<InjectCell>,
     pub trust: Vec<CheckTrust>,
     pub policy: TrustConfig,
+    /// Pairwise kappa between every rater with a current baseline row on the
+    /// sampled originals: this run's judges, plus any `eval/` tool verdicts
+    /// already ingested at the same distill hash.
+    pub agreement: AgreementReport,
     pub score_rows_written: usize,
     pub trust_rows_written: usize,
 }
@@ -395,6 +400,8 @@ impl InjectReport {
                 )),
             }
         }
+        out.push('\n');
+        out.push_str(&self.agreement.render());
         out.push_str(&format!(
             "\ntrust (paired catch >= {:.2} over >= {} applicable traces, on every class the check can see, current rubric):\n",
             self.policy.min_paired_catch_rate, self.policy.min_samples
@@ -612,6 +619,15 @@ pub fn run_inject(
         trust_rows_written += 1;
     }
 
+    // Read back after the writes, so the agreement covers this run's judges
+    // and any tool verdicts already ingested for the same notes.
+    let mut current = Vec::new();
+    for group_records in &records_by_model[0] {
+        let original = &group_records[0];
+        current.extend(scores.baseline_rows_at(&original.trace, &original.content_hash)?);
+    }
+    let agreement = agreement(&current);
+
     let rows = trust.all()?;
     let mut trust_states = Vec::new();
     for model in judge_models {
@@ -636,6 +652,7 @@ pub fn run_inject(
         cells,
         trust: trust_states,
         policy: run.eval.trust.clone(),
+        agreement,
         score_rows_written,
         trust_rows_written,
     })

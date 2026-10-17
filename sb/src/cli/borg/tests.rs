@@ -58,6 +58,42 @@ fn eval_opts_carry_borg_yml_llm_api_keys() {
     assert_eq!(opts.api_keys.get(vault::fabric::Vendor::Gemini), Some("GEMINI_API_KEY"));
 }
 
+/// Gemini is the default judge: with no `--judge-model`, a judged run uses
+/// the first of `eval.judge-models`, whose default is Gemini then Anthropic.
+#[test]
+fn the_default_judge_is_gemini_and_a_flag_or_config_overrides_it() {
+    let defaults = borg::config::Config::default();
+    assert_eq!(
+        defaults.eval.judge_models,
+        vec![borg::config::DEFAULT_JUDGE_MODEL, borg::config::SECOND_JUDGE_MODEL]
+    );
+    assert!(borg::config::DEFAULT_JUDGE_MODEL.starts_with("gemini-"));
+    assert!(borg::config::SECOND_JUDGE_MODEL.starts_with("claude-"));
+
+    let staged = EvalHarness::try_parse_from(["sb", "--staged"]).unwrap();
+    assert_eq!(
+        eval_opts(&defaults, &staged.eval).unwrap().judge_model,
+        "gemini-2.5-pro"
+    );
+
+    let flagged = EvalHarness::try_parse_from(["sb", "--staged", "--judge-model", "gpt-4o"]).unwrap();
+    assert_eq!(eval_opts(&defaults, &flagged.eval).unwrap().judge_model, "gpt-4o");
+
+    let configured: borg::config::Config =
+        serde_yaml::from_str("eval:\n  judge-models: [gemini-3.1-pro-preview, claude-opus-4-8]\n").unwrap();
+    assert_eq!(
+        eval_opts(&configured, &staged.eval).unwrap().judge_model,
+        "gemini-3.1-pro-preview"
+    );
+
+    // A run that judges nothing names no judge.
+    let unjudged = EvalHarness::try_parse_from(["sb", "--staged", "--no-judge"]).unwrap();
+    assert_eq!(eval_opts(&defaults, &unjudged.eval).unwrap().judge_model, "");
+    // An explicitly emptied list falls back to fabric's own default model.
+    let emptied: borg::config::Config = serde_yaml::from_str("eval:\n  judge-models: []\n").unwrap();
+    assert_eq!(eval_opts(&emptied, &staged.eval).unwrap().judge_model, "");
+}
+
 #[test]
 fn eval_format_defaults_to_text_and_takes_json_in_any_case() {
     let h = EvalHarness::try_parse_from(["sb"]).unwrap();

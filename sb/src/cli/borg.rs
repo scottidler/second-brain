@@ -659,8 +659,24 @@ fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a
 
 /// The `sb borg eval` options for `a`: the CLI flags plus the eval's
 /// credential vars, which come from borg.yml's `llm.api-keys`, never a flag.
+/// With no `--judge-model`, a judged run uses the default judge (the first of
+/// `eval.judge-models`, Gemini unless configured); only an explicitly emptied
+/// list leaves it to fabric's own default model. A run that judges nothing
+/// (`--no-judge`, `--scored`) names no model, so its records never claim a
+/// judge that did not run.
 fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::eval::EvalOpts> {
+    let judges = !(a.no_judge || a.scored);
+    let judge_model = a
+        .judge_model
+        .clone()
+        .or_else(|| {
+            judges
+                .then(|| config.eval.default_judge_model().map(str::to_string))
+                .flatten()
+        })
+        .unwrap_or_default();
     Ok(borg::eval::EvalOpts {
+        judge_model,
         api_keys: config.llm.api_keys.clone(),
         patterns_dir: a
             .patterns_dir

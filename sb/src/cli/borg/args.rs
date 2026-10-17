@@ -258,10 +258,11 @@ pub struct EvalArgs {
     /// Hand-labeled calibration file (fixture -> human axis scores). Optional.
     #[arg(long, default_value = "config/eval/distill-calibration.yml")]
     pub calibration: PathBuf,
-    /// Model for the eval's fabric calls: both judges and --synth-intents
-    /// (empty = fabric's default model)
-    #[arg(long, default_value = "")]
-    pub judge_model: String,
+    /// Model for the eval's fabric calls: both judges and --synth-intents.
+    /// Default: the first of `eval.judge-models` in borg.yml (gemini-2.5-pro
+    /// unless configured), so the judge is not the distiller's vendor
+    #[arg(long)]
+    pub judge_model: Option<String>,
     /// Ignore and overwrite cached judgments
     #[arg(long)]
     pub rebuild_cache: bool,
@@ -381,7 +382,9 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
         Self {
             fixtures_dir: vault::paths::expand_tilde(&a.fixtures),
             calibration_path: vault::paths::expand_tilde(&a.calibration),
-            judge_model: a.judge_model.clone(),
+            // `None` is resolved to the default judge by the caller, which
+            // holds borg.yml's `eval.judge-models`.
+            judge_model: a.judge_model.clone().unwrap_or_default(),
             // The credential vars come from borg.yml, not a flag: the caller
             // sets them from `config.llm.api_keys`.
             api_keys: vault::fabric::ApiKeys::default(),

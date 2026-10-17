@@ -186,17 +186,32 @@ impl ScoreStore {
 
     /// Every row for `trace`, oldest key first (tests and reports).
     pub fn rows_for(&self, trace: &str) -> Result<Vec<ScoreRow>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT trace, run_kind, run_id, kind, judge_model, check_name, rubric_version,
-                        content_hash, scored_at, metrics_json, error
-                 FROM eval_scores WHERE trace = ?1
-                 ORDER BY run_kind, run_id, content_hash, rubric_version, judge_model, check_name",
-            )
-            .context("preparing eval score read")?;
+        self.select(
+            "SELECT trace, run_kind, run_id, kind, judge_model, check_name, rubric_version,
+                    content_hash, scored_at, metrics_json, error
+             FROM eval_scores WHERE trace = ?1
+             ORDER BY run_kind, run_id, content_hash, rubric_version, judge_model, check_name",
+            params![trace],
+        )
+    }
+
+    /// Every `baseline` row of `trace` at `content_hash`, from every judge,
+    /// tool and rubric version. The agreement report reads its current rater
+    /// rows from these ([`super::agreement::is_current_rater_row`]).
+    pub fn baseline_rows_at(&self, trace: &str, content_hash: &str) -> Result<Vec<ScoreRow>> {
+        self.select(
+            "SELECT trace, run_kind, run_id, kind, judge_model, check_name, rubric_version,
+                    content_hash, scored_at, metrics_json, error
+             FROM eval_scores WHERE trace = ?1 AND run_kind = ?2 AND run_id = '' AND content_hash = ?3
+             ORDER BY rubric_version, judge_model, check_name",
+            params![trace, RUN_KIND_BASELINE, content_hash],
+        )
+    }
+
+    fn select(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<ScoreRow>> {
+        let mut stmt = self.conn.prepare(sql).context("preparing eval score read")?;
         let rows = stmt
-            .query_map(params![trace], |r| {
+            .query_map(params, |r| {
                 Ok(ScoreRow {
                     trace: r.get(0)?,
                     run_kind: r.get(1)?,

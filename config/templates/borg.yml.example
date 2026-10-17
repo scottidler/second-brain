@@ -298,8 +298,11 @@ harvest:
 # Daily eval (sb-eval.timer): `sb borg eval --unscored` scores every successful
 # ingest still in staging and records each check in eval_scores. A trace is
 # covered when every deterministic check and both judge checks of EVERY model
-# in `judge-models` have a current, error-free row; adding the second judge is
-# adding its model here. `sb bootstrap` writes and enables the units and
+# in `judge-models` have a current, error-free row. The default list is
+# gemini-2.5-pro (the default judge: the distiller is Anthropic) then
+# claude-sonnet-5 (the second judge), so every note is judged by two vendors
+# and `--inject` prints their pairwise kappa. The first entry is also the
+# model `sb borg eval --staged` judges with when --judge-model is not given. `sb bootstrap` writes and enables the units and
 # refuses to when llm.api-keys is set but `env-bootstrap` is not: the service
 # runs with a stripped environment and must decrypt every var llm.api-keys
 # names (anthropic/gemini/openai) into its OWN env-file.
@@ -307,7 +310,8 @@ harvest:
 #   schedule: "*-*-* 05:00:00"        # systemd OnCalendar, the one value in the timer
 #   limit: 100                        # traces per run; the rest carry over (omit = all)
 #   judge-models:
-#     - gemini-2.5-pro
+#     - gemini-2.5-pro                # the default judge (first entry)
+#     - claude-sonnet-5               # the second judge
 #   env-bootstrap:
 #     command: manifest -C ~/repos/scottidler/keep/manifest.yml secrets env -f env
 #     env-file: /run/user/1000/sb-eval.env

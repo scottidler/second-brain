@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::*;
 use crate::eval::calc::quote_grounding;
 use crate::eval::judge::{AxisScores, ClaimVerdict, MockClaimJudge, MockJudge};
-use crate::eval::scores::DETERMINISTIC_CHECKS;
+use crate::eval::scores::{DETERMINISTIC_CHECKS, ScoreRow};
 use crate::eval::{RUN_KIND_BASELINE, judge_note_text};
 use vault::distilled::Claim;
 
@@ -457,7 +457,11 @@ fn every_judge_call_failing_is_the_one_failing_run() {
 #[test]
 fn run_inject_refuses_an_empty_judge_model_list() {
     let env = env();
-    let config = EvalConfig::default();
+    // The default names two judges; only an explicit empty list reaches here.
+    let config = EvalConfig {
+        judge_models: Vec::new(),
+        ..EvalConfig::default()
+    };
     let opts = EvalOpts::default();
     let run = InjectRun {
         opts: &opts,
@@ -468,6 +472,109 @@ fn run_inject_refuses_an_empty_judge_model_list() {
     let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> { bail!("unused") };
     let err = run_inject(&[fixture("t0")], &run, &env.scores, &env.trust, &factory).unwrap_err();
     assert!(err.to_string().contains("judge-models is empty"), "{err}");
+}
+
+#[test]
+fn the_report_prints_pairwise_kappa_between_both_judges_and_any_ingested_tool() {
+    const SECOND: &str = "claude-sonnet-5";
+    let fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
+    let claims: HashSet<String> = fixtures
+        .iter()
+        .flat_map(|f| f.distilled.claims.iter().map(|c| c.text.trim().to_string()))
+        .collect();
+    // MODEL passes every original's claims; SECOND flags every claim.
+    let factory = |o: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        let claim_judge: Box<dyn ClaimJudge> = if o.judge_model == MODEL {
+            Box::new(KnownClaimsJudge { claims: claims.clone() })
+        } else {
+            Box::new(MockClaimJudge::new(ClaimVerdict::Unsupported))
+        };
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 3,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            claim_judge,
+        ))
+    };
+    let env = env();
+    let config = EvalConfig {
+        judge_models: vec![MODEL.to_string(), SECOND.to_string()],
+        ..eval_config(3)
+    };
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    assert_eq!(report.agreement.notes, 3, "the originals only, never a mutant");
+    let claims_pair = |report: &InjectReport| {
+        report
+            .agreement
+            .trace_pairs
+            .iter()
+            .find(|p| p.a.check == CHECK_JUDGE_CLAIMS && p.b.check == CHECK_JUDGE_CLAIMS)
+            .cloned()
+            .expect("a judge-claims pair across the two models")
+    };
+    let pair = claims_pair(&report);
+    assert_eq!(
+        (pair.a.judge_model.as_str(), pair.b.judge_model.as_str()),
+        (SECOND, MODEL)
+    );
+    // SECOND flags all 3 originals, MODEL none.
+    assert_eq!((pair.table.n(), pair.table.a_only), (3, 3));
+    let text = report.render();
+    assert!(
+        text.contains("pairwise judge agreement on the 3 unmutated originals"),
+        "{text}"
+    );
+    let planted = text.find("check                judge").unwrap();
+    let kappa = text.find("pairwise judge agreement").unwrap();
+    let trust = text.find("trust (paired catch").unwrap();
+    assert!(
+        planted < kappa && kappa < trust,
+        "kappa sits next to the planted-error table: {text}"
+    );
+
+    // A tool verdict ingested at an original's distill hash joins the next report.
+    let t0 = env.scores.rows_for("t0").unwrap();
+    let original = t0
+        .iter()
+        .find(|r| r.run_kind == RUN_KIND_BASELINE && r.check_name == CHECK_JUDGE_CLAIMS)
+        .unwrap();
+    env.scores
+        .put(&ScoreRow {
+            judge_model: "roberta-large".to_string(),
+            check_name: "minicheck".to_string(),
+            rubric_version: crate::eval::cache::RUBRIC_VERSION.to_string(),
+            metrics_json: serde_json::json!({
+                "tool_version": "x", "metrics": {},
+                "claims": { "1": { "supported": { "value": 0.9, "detail": { "label": 1 } } } }
+            })
+            .to_string(),
+            ..original.clone()
+        })
+        .unwrap();
+    let again = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    let minicheck = crate::eval::agreement::Rater {
+        check: "minicheck".to_string(),
+        judge_model: "roberta-large".to_string(),
+    };
+    assert_eq!(again.agreement.raters.get(&minicheck), Some(&1));
+    assert!(
+        again
+            .agreement
+            .claim_pairs
+            .iter()
+            .any(|p| p.a == minicheck || p.b == minicheck),
+        "{:?}",
+        again.agreement.claim_pairs
+    );
 }
 
 #[test]

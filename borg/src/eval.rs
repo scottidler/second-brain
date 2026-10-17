@@ -12,6 +12,7 @@
 //! ([`load`]) is split from scoring ([`evaluate`]) so the scoring pipeline is
 //! unit-testable against a [`judge::MockJudge`] without a live fabric call.
 
+pub mod agreement;
 pub mod backlog;
 pub mod cache;
 pub mod calc;

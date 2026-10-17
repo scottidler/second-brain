@@ -11,16 +11,24 @@ pub const DEFAULT_MIN_PAIRED_CATCH_RATE: f64 = 0.80;
 pub const DEFAULT_MIN_SAMPLES: usize = 30;
 /// Default `eval.inject-workers`: judge calls in flight during `--inject`.
 const DEFAULT_INJECT_WORKERS: usize = 4;
+/// The default judge: a Gemini model, because the distiller is Anthropic and
+/// self-preference is a documented judge bias. First in the default
+/// `judge-models`, and the model `sb borg eval --staged` judges with when
+/// `--judge-model` is not given.
+pub const DEFAULT_JUDGE_MODEL: &str = "gemini-2.5-pro";
+/// The second judge: Anthropic, so `--inject` and the timer score every note
+/// with two vendors and the report can print their kappa.
+pub const SECOND_JUDGE_MODEL: &str = "claude-sonnet-5";
 
 /// The `eval:` block of `borg.yml`: what the `sb-eval.timer` run scores
 /// (`sb borg eval --unscored`).
 ///
 /// `judge-models` is the required-check set's judge half: a trace is covered
 /// only when every deterministic check and every judge check of every model
-/// named here has a current, error-free row in `eval_scores`. Adding the
-/// second judge is adding its model here. There is no default model: an empty
-/// list makes `--unscored` fail loudly, because a silently chosen judge is a
-/// silently chosen definition of "covered".
+/// named here has a current, error-free row in `eval_scores`. The default is
+/// [`DEFAULT_JUDGE_MODEL`] (Gemini) then [`SECOND_JUDGE_MODEL`] (Anthropic);
+/// the first entry is the default judge. An explicitly empty list makes
+/// `--unscored` and `--inject` fail loudly.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct EvalConfig {
@@ -30,7 +38,8 @@ pub struct EvalConfig {
     /// Cap on traces one `--unscored` run scores; the rest stay in the
     /// backlog for the next run. `None` scores the whole backlog.
     pub limit: Option<usize>,
-    /// Judge models (fabric `-m`), each scoring every trace.
+    /// Judge models (fabric `-m`), each scoring every trace. The first is
+    /// the default judge ([`EvalConfig::default_judge_model`]).
     pub judge_models: Vec<String>,
     /// Secret bootstrap for `sb-eval.service` (same shape as
     /// `harvest.env-bootstrap`): its own `env-file`, so the one-shot run never
@@ -69,6 +78,12 @@ impl Default for TrustConfig {
 }
 
 impl EvalConfig {
+    /// The default judge: the first of `judge-models`, or `None` when the
+    /// list was explicitly emptied.
+    pub fn default_judge_model(&self) -> Option<&str> {
+        self.judge_models.first().map(String::as_str)
+    }
+
     /// Structural checks, run at config load: a rate outside 0..=1, a zero
     /// sample floor, or zero inject workers is a load error, never a silent
     /// clamp.
@@ -92,7 +107,7 @@ impl Default for EvalConfig {
         Self {
             schedule: DEFAULT_SCHEDULE.to_string(),
             limit: None,
-            judge_models: Vec::new(),
+            judge_models: vec![DEFAULT_JUDGE_MODEL.to_string(), SECOND_JUDGE_MODEL.to_string()],
             env_bootstrap: None,
             trust: TrustConfig::default(),
             inject_workers: DEFAULT_INJECT_WORKERS,
