@@ -34,6 +34,24 @@ pub fn cohens_kappa(pairs: &[(u8, u8)]) -> f64 {
     (po - pe) / (1.0 - pe)
 }
 
+/// z for a one-sided 95% bound.
+const WILSON_Z_ONE_SIDED_95: f64 = 1.645;
+
+/// One-sided 95% Wilson score lower bound on a rate of `successes` out of
+/// `n`. 24 of 30 gives about 0.66: the floor a small synthetic sample can
+/// actually vouch for. 0.0 when `n == 0`.
+pub fn wilson_lower_bound(successes: usize, n: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let n = n as f64;
+    let p = successes as f64 / n;
+    let z2 = WILSON_Z_ONE_SIDED_95 * WILSON_Z_ONE_SIDED_95;
+    let centre = p + z2 / (2.0 * n);
+    let margin = WILSON_Z_ONE_SIDED_95 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    ((centre - margin) / (1.0 + z2 / n)).max(0.0)
+}
+
 /// Judge-vs-human agreement at the `score >= threshold` hit boundary. Returns
 /// `(precision, recall)`: precision = of the pairs the judge called a hit, the
 /// fraction the human agrees on; recall = of the human's hits, the fraction the

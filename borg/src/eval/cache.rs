@@ -54,9 +54,13 @@ pub struct CachedJudgment {
     pub truncated: bool,
 }
 
-/// SQLite-backed judgment cache.
+/// SQLite-backed judgment cache. One connection behind a mutex, so the
+/// `--inject` workers share it: each get/put holds the lock for one statement
+/// and every judge call runs outside it. Separate connections writing the same
+/// rollback-journal file can hit SQLite's deadlock case, where it returns
+/// `database is locked` without ever calling the busy handler.
 pub struct JudgmentCache {
-    conn: Connection,
+    conn: std::sync::Mutex<Connection>,
 }
 
 const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS distill_judgments (
@@ -80,6 +84,12 @@ CREATE TABLE IF NOT EXISTS claim_judgments (
 );";
 
 impl JudgmentCache {
+    /// The connection; a worker that panicked mid-statement leaves it usable,
+    /// since every statement is autocommit.
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Open (creating parent dirs and the table if needed).
     pub fn open(path: &Path) -> Result<Self> {
         log::debug!("JudgmentCache::open: path={}", path.display());
@@ -87,22 +97,29 @@ impl JudgmentCache {
             std::fs::create_dir_all(parent).with_context(|| format!("creating eval cache dir {}", parent.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening eval cache {}", path.display()))?;
+        // `--unscored` or another process may hold this file.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .context("setting eval cache busy timeout")?;
         conn.execute_batch(CREATE_TABLE).context("creating eval cache tables")?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory cache (tests).
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("opening in-memory eval cache")?;
         conn.execute_batch(CREATE_TABLE).context("creating eval cache tables")?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
     }
 
     /// Fetch a cached judgment, or `None` if absent for this exact key. A
     /// genuine "no rows" outcome is a cache miss; every other rusqlite error
     /// propagates instead of being silently swallowed as a miss.
     pub fn get(&self, k: &CacheKey) -> Result<Option<CachedJudgment>> {
-        let result = self.conn.query_row(
+        let result = self.conn().query_row(
             "SELECT claim_coverage, anchor_validity, summary_faithfulness, truncated
                  FROM distill_judgments
                  WHERE fixture_id=?1 AND content_hash=?2 AND judge_model=?3 AND rubric_version=?4",
@@ -131,7 +148,7 @@ impl JudgmentCache {
 
     /// Insert or replace a judgment.
     pub fn put(&self, k: &CacheKey, j: CachedJudgment) -> Result<()> {
-        self.conn
+        self.conn()
             .execute(
                 "INSERT OR REPLACE INTO distill_judgments
                  (fixture_id, content_hash, judge_model, rubric_version,
@@ -155,7 +172,7 @@ impl JudgmentCache {
     /// Fetch cached per-claim verdicts. A stored code that no longer parses is
     /// an error, not a miss, for the same reason as [`JudgmentCache::get`].
     pub fn get_claims(&self, k: &CacheKey) -> Result<Option<Vec<ClaimVerdict>>> {
-        let result = self.conn.query_row(
+        let result = self.conn().query_row(
             "SELECT verdicts FROM claim_judgments
                  WHERE fixture_id=?1 AND content_hash=?2 AND judge_model=?3 AND rubric_version=?4",
             params![k.fixture_id, k.content_hash, k.judge_model, CLAIMS_RUBRIC_VERSION],
@@ -176,7 +193,7 @@ impl JudgmentCache {
     /// Insert or replace per-claim verdicts.
     pub fn put_claims(&self, k: &CacheKey, verdicts: &[ClaimVerdict]) -> Result<()> {
         let codes: String = verdicts.iter().map(|v| v.code()).collect();
-        self.conn
+        self.conn()
             .execute(
                 "INSERT OR REPLACE INTO claim_judgments
                  (fixture_id, content_hash, judge_model, rubric_version, verdicts)

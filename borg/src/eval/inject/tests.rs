@@ -1,0 +1,490 @@
+use std::collections::HashSet;
+
+use super::*;
+use crate::eval::calc::quote_grounding;
+use crate::eval::judge::{AxisScores, ClaimVerdict, MockClaimJudge, MockJudge};
+use crate::eval::scores::DETERMINISTIC_CHECKS;
+use crate::eval::{RUN_KIND_BASELINE, judge_note_text};
+use vault::distilled::Claim;
+
+const MODEL: &str = "gemini-2.5-pro";
+
+fn golden_fixtures() -> Vec<Fixture> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/eval/distill-fixtures");
+    crate::eval::load(&dir).unwrap()
+}
+
+fn claim(text: &str, who: Option<&str>, quote: Option<&str>) -> Claim {
+    Claim {
+        text: text.to_string(),
+        who: who.map(str::to_string),
+        quote: quote.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+/// A note every class applies to, with a source that backs it.
+fn fixture(trace: &str) -> Fixture {
+    let source = format!(
+        "In the {trace} talk, Ada Lovelace said the engine computes 7 results per cycle. \
+         She added that the cache doubles throughput on large batches. \
+         Grace Hopper argued that compilers make programs portable across machines."
+    );
+    let distilled = Distilled {
+        summary: format!("A talk ({trace}) on engines and compilers."),
+        claims: vec![
+            claim(
+                "The engine computes 7 results per cycle.",
+                Some("Ada Lovelace"),
+                Some("the engine computes 7 results per cycle"),
+            ),
+            claim("The cache doubles throughput on large batches.", None, None),
+            claim(
+                "Compilers make programs portable.",
+                Some("Grace Hopper"),
+                Some("compilers make programs portable across machines"),
+            ),
+        ],
+        ..Default::default()
+    };
+    Fixture {
+        id: format!("article/{trace}"),
+        kind: "article".to_string(),
+        slug: trace.to_string(),
+        source,
+        distilled,
+        capture_note: None,
+    }
+}
+
+fn no_judge_opts() -> EvalOpts {
+    EvalOpts {
+        no_judge: true,
+        ..EvalOpts::default()
+    }
+}
+
+#[test]
+fn quote_grounding_catches_every_fabricated_quote_with_zero_llm_calls() {
+    let mut fixtures = golden_fixtures();
+    fixtures.extend((0..5).map(|i| fixture(&format!("t{i}"))));
+    let mutants: Vec<Fixture> = fixtures
+        .iter()
+        .filter_map(|fx| {
+            plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).map(|distilled| Fixture {
+                distilled,
+                ..fx.clone()
+            })
+        })
+        .collect();
+    assert!(
+        mutants.len() >= 8,
+        "only {} fixtures took a fabricated quote",
+        mutants.len()
+    );
+
+    let judge = MockJudge::new(AxisScores {
+        claim_coverage: 3,
+        anchor_validity: 3,
+        summary_faithfulness: 3,
+    });
+    let claim_judge = MockClaimJudge::new(ClaimVerdict::Supported);
+    let cache = cache::JudgmentCache::open_memory().unwrap();
+    let EvalOutcome::Report(report) = evaluate(
+        &mutants,
+        &BTreeMap::new(),
+        &cache,
+        &judge,
+        &claim_judge,
+        &no_judge_opts(),
+    )
+    .unwrap() else {
+        panic!("expected a report");
+    };
+    assert_eq!(judge.calls(), 0);
+    assert_eq!(claim_judge.calls(), 0);
+    for (mutant, record) in mutants.iter().zip(&report.traces) {
+        let quote = mutant.distilled.claims[0].quote.as_deref().unwrap();
+        let source_words: HashSet<String> = grounding_words(&mutant.source).into_iter().collect();
+        assert!(
+            grounding_words(quote).iter().all(|w| !source_words.contains(w)),
+            "{}: fabricated quote reuses a source word: {quote}",
+            mutant.id
+        );
+        assert_eq!(
+            flags(CHECK_QUOTE_GROUNDING, &record.metrics),
+            Some(true),
+            "{} not caught",
+            mutant.id
+        );
+    }
+}
+
+#[test]
+fn a_fabricated_quote_uses_only_words_absent_from_the_source_and_skips_present_ones() {
+    let mut fx = fixture("t");
+    fx.source.push_str(" marmalade trombone porcupine");
+    let mutant = plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).unwrap();
+    let quote = mutant.claims[0].quote.clone().unwrap();
+    assert_eq!(quote, "saxophone tapestry walrus cinnamon hammock pelican");
+    assert_eq!(quote_grounding(&fx.source, &mutant), (1, 2));
+    assert_eq!(quote_grounding(&fx.source, &fx.distilled), (2, 2));
+}
+
+#[test]
+fn a_number_swap_picks_a_number_the_source_never_states() {
+    let mut fx = fixture("t");
+    fx.source.push_str(" It needs 8 cores.");
+    let mutant = plant(PlantedClass::NumberSwap, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(mutant.claims[0].text, "The engine computes 9 results per cycle.");
+    assert_eq!(mutant.claims[0].quote, fx.distilled.claims[0].quote);
+
+    let mut no_number = fx.distilled.clone();
+    for c in &mut no_number.claims {
+        c.text = "No figures here, nor in x86 or H100.".to_string();
+    }
+    assert!(plant(PlantedClass::NumberSwap, &no_number, &fx.source).is_none());
+}
+
+#[test]
+fn a_dropped_top_claim_needs_two_claims() {
+    let fx = fixture("t");
+    let mutant = plant(PlantedClass::DroppedTopClaim, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(mutant.claims.len(), 2);
+    assert_eq!(mutant.claims[0].text, fx.distilled.claims[1].text);
+
+    let mut one = fx.distilled.clone();
+    one.claims.truncate(1);
+    assert!(plant(PlantedClass::DroppedTopClaim, &one, &fx.source).is_none());
+}
+
+#[test]
+fn a_who_change_names_someone_the_source_never_mentions() {
+    let fx = fixture("t");
+    let mutant = plant(PlantedClass::WhoChange, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(mutant.claims[0].who.as_deref(), Some("Dr. Imogen Thistlewood"));
+    assert_eq!(mutant.claims[2].who, fx.distilled.claims[2].who);
+
+    let mut no_who = fx.distilled.clone();
+    for c in &mut no_who.claims {
+        c.who = Some("  ".to_string());
+    }
+    assert!(plant(PlantedClass::WhoChange, &no_who, &fx.source).is_none());
+}
+
+#[test]
+fn no_class_applies_to_a_note_with_no_claims() {
+    let mut fx = fixture("t");
+    fx.distilled.claims.clear();
+    for class in PlantedClass::ALL {
+        assert!(plant(class, &fx.distilled, &fx.source).is_none(), "{class}");
+    }
+}
+
+#[test]
+fn the_applicability_matrix_matches_the_design() {
+    use PlantedClass::*;
+    let row = |check: &str| PlantedClass::ALL.map(|c| applies(check, c));
+    assert_eq!(row(CHECK_JUDGE_DISTILLATION), [true, true, true, true]);
+    assert_eq!(row(CHECK_JUDGE_CLAIMS), [true, false, false, false]);
+    assert_eq!(row(CHECK_QUOTE_GROUNDING), [false, true, false, false]);
+    assert_eq!(applicable_classes(CHECK_JUDGE_CLAIMS), vec![NumberSwap]);
+    assert!(applicable_classes("no-such-check").is_empty());
+}
+
+#[test]
+fn an_unscored_side_is_an_error_never_a_pass() {
+    let mut t = ClassTally::default();
+    t.add(None, Some(true));
+    t.add(Some(false), None);
+    assert_eq!(
+        t,
+        ClassTally {
+            errors: 2,
+            ..Default::default()
+        }
+    );
+    assert_eq!(t.paired_catch_rate(), 0.0);
+}
+
+/// Scores a note perfectly only when it is one of the originals.
+struct KnownNotesJudge {
+    originals: HashSet<String>,
+}
+
+impl DistillationJudge for KnownNotesJudge {
+    fn judge(&self, _kind: &str, _source: &str, note: &str) -> Result<AxisScores> {
+        let faithful = if self.originals.contains(note) { 3 } else { 2 };
+        Ok(AxisScores {
+            claim_coverage: faithful,
+            anchor_validity: 3,
+            summary_faithfulness: 3,
+        })
+    }
+}
+
+/// Supports a claim only when it is one of the originals' claims.
+struct KnownClaimsJudge {
+    claims: HashSet<String>,
+}
+
+impl ClaimJudge for KnownClaimsJudge {
+    fn judge_claims(&self, _kind: &str, _source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        Ok(claims
+            .iter()
+            .map(|c| {
+                if self.claims.contains(c) {
+                    ClaimVerdict::Supported
+                } else {
+                    ClaimVerdict::Contradicted
+                }
+            })
+            .collect())
+    }
+}
+
+struct Env {
+    _tmp: tempfile::TempDir,
+    cache_path: std::path::PathBuf,
+    scores: ScoreStore,
+    trust: TrustStore,
+}
+
+fn env() -> Env {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_path = tmp.path().join("eval-cache.db");
+    Env {
+        scores: ScoreStore::open(&cache_path).unwrap(),
+        trust: TrustStore::open(&cache_path).unwrap(),
+        cache_path,
+        _tmp: tmp,
+    }
+}
+
+fn eval_config(min_samples: usize) -> EvalConfig {
+    EvalConfig {
+        judge_models: vec![MODEL.to_string()],
+        trust: TrustConfig {
+            min_paired_catch_rate: 0.80,
+            min_samples,
+        },
+        inject_workers: 2,
+        ..EvalConfig::default()
+    }
+}
+
+fn now() -> DateTime<Utc> {
+    "2026-10-17T12:00:00Z".parse().unwrap()
+}
+
+fn cell<'a>(report: &'a InjectReport, judge: &str, check: &str, class: PlantedClass) -> &'a InjectCell {
+    report
+        .cells
+        .iter()
+        .find(|c| c.judge_model == judge && c.check == check && c.class == class)
+        .unwrap()
+}
+
+#[test]
+fn run_inject_measures_a_discerning_judge_and_writes_one_trust_row_per_judge_check_and_class() {
+    let fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
+    let originals: HashSet<String> = fixtures.iter().map(|f| judge_note_text(&f.distilled)).collect();
+    let claims: HashSet<String> = fixtures
+        .iter()
+        .flat_map(|f| f.distilled.claims.iter().map(|c| c.text.trim().to_string()))
+        .collect();
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(KnownNotesJudge {
+                originals: originals.clone(),
+            }),
+            Box::new(KnownClaimsJudge { claims: claims.clone() }),
+        ))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+
+    assert_eq!(report.run_id, "inject-20261017T120000Z");
+    assert_eq!(report.traces, 3);
+    assert_eq!(report.cells.len(), 12);
+    for c in &report.cells {
+        assert_eq!(c.tally.is_some(), applies(c.check, c.class), "{c:?}");
+    }
+    for class in PlantedClass::ALL {
+        let t = cell(&report, MODEL, CHECK_JUDGE_DISTILLATION, class).tally.unwrap();
+        assert_eq!((t.n, t.paired_caught, t.originals_flagged), (3, 3, 0), "{class}");
+    }
+    let claims_swap = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!(claims_swap.paired_catch_rate(), 1.0);
+    let grounding = cell(&report, "", CHECK_QUOTE_GROUNDING, PlantedClass::FabricatedQuote)
+        .tally
+        .unwrap();
+    assert_eq!((grounding.n, grounding.paired_caught), (3, 3));
+
+    // judge-distillation x4 + judge-claims x1 + quote-grounding x1.
+    let rows = env.trust.all().unwrap();
+    assert_eq!(report.trust_rows_written, 6);
+    assert_eq!(rows.len(), 6);
+    assert!(rows.iter().all(|r| {
+        applies(
+            &r.check_name,
+            PlantedClass::ALL
+                .into_iter()
+                .find(|c| c.as_str() == r.planted_class)
+                .unwrap(),
+        )
+    }));
+    let state = |check: &str| {
+        report
+            .trust
+            .iter()
+            .find(|t| t.check == check)
+            .map(|t| t.state.clone())
+            .unwrap()
+    };
+    assert_eq!(state(CHECK_JUDGE_DISTILLATION), TrustState::Trusted);
+    assert_eq!(state(CHECK_JUDGE_CLAIMS), TrustState::Trusted);
+    assert_eq!(state(CHECK_QUOTE_GROUNDING), TrustState::Ungated);
+
+    // Originals are baseline rows; each mutant is an inject row under its own run id.
+    let score_rows = env.scores.rows_for("t0").unwrap();
+    let per_variant = DETERMINISTIC_CHECKS.len() + 2;
+    assert_eq!(score_rows.len(), 5 * per_variant);
+    assert_eq!(report.score_rows_written, 3 * 5 * per_variant);
+    let baseline = score_rows.iter().filter(|r| r.run_kind == RUN_KIND_BASELINE).count();
+    assert_eq!(baseline, per_variant);
+    let run_ids: HashSet<&str> = score_rows
+        .iter()
+        .filter(|r| r.run_kind == RUN_KIND_INJECT)
+        .map(|r| r.run_id.as_str())
+        .collect();
+    let expected: HashSet<String> = PlantedClass::ALL
+        .iter()
+        .map(|c| format!("inject-20261017T120000Z:{c}"))
+        .collect();
+    assert_eq!(run_ids, expected.iter().map(String::as_str).collect());
+
+    let text = report.render();
+    assert!(text.contains("What this misses:"), "{text}");
+    assert!(text.contains("the base rate of errors in production"), "{text}");
+    assert!(text.contains("Kappa is agreement, not correctness."), "{text}");
+    let na_rows = text.lines().filter(|l| l.contains(" n/a ")).count();
+    assert_eq!(na_rows, 6, "{text}");
+    for column in ["paired", "wilson-lb", "raw", "flag", "errors"] {
+        assert!(text.contains(column), "missing column {column}: {text}");
+    }
+}
+
+#[test]
+fn a_judge_that_flags_everything_scores_paired_zero_and_is_untrusted() {
+    let fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 1,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            Box::new(MockClaimJudge::new(ClaimVerdict::Unsupported)),
+        ))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    let t = cell(&report, MODEL, CHECK_JUDGE_DISTILLATION, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!(
+        (t.raw_catch_rate(), t.flag_rate(), t.paired_catch_rate()),
+        (1.0, 1.0, 0.0)
+    );
+    for t in report.trust.iter().filter(|t| !t.judge_model.is_empty()) {
+        assert!(matches!(t.state, TrustState::Untrusted(_)), "{t:?}");
+    }
+}
+
+#[test]
+fn every_judge_call_failing_is_the_one_failing_run() {
+    struct Failing;
+    impl DistillationJudge for Failing {
+        fn judge(&self, _: &str, _: &str, _: &str) -> Result<AxisScores> {
+            bail!("vendor down")
+        }
+    }
+    impl ClaimJudge for Failing {
+        fn judge_claims(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<ClaimVerdict>> {
+            bail!("vendor down")
+        }
+    }
+    let fixtures = vec![fixture("t0")];
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((Box::new(Failing), Box::new(Failing)))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    assert!(report.all_judged_errored());
+    let t = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!((t.n, t.errors), (0, 1));
+}
+
+#[test]
+fn run_inject_refuses_an_empty_judge_model_list() {
+    let env = env();
+    let config = EvalConfig::default();
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> { bail!("unused") };
+    let err = run_inject(&[fixture("t0")], &run, &env.scores, &env.trust, &factory).unwrap_err();
+    assert!(err.to_string().contains("judge-models is empty"), "{err}");
+}
+
+#[test]
+fn the_sample_keeps_only_traces_some_class_applies_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (trace, claims) in [("t-two", 2), ("t-none", 0)] {
+        let dir = tmp.path().join(trace);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("envelope.yml"), "kind: article-url\n").unwrap();
+        let mut fx = fixture(trace);
+        fx.distilled.claims.truncate(claims);
+        std::fs::write(dir.join("distilled.yml"), serde_yaml::to_string(&fx.distilled).unwrap()).unwrap();
+        std::fs::write(dir.join("transcript.md"), &fx.source).unwrap();
+    }
+    let picked = sample_fixtures(tmp.path(), 30).unwrap();
+    assert_eq!(
+        picked.iter().map(|f| f.slug.as_str()).collect::<Vec<_>>(),
+        vec!["t-two"]
+    );
+}

@@ -311,6 +311,17 @@ harvest:
 #   env-bootstrap:
 #     command: manifest -C ~/repos/scottidler/keep/manifest.yml secrets env -f env
 #     env-file: /run/user/1000/sb-eval.env
+#   # `sb borg eval --inject` plants errors (number-swap, fabricated-quote,
+#   # dropped-top-claim, who-change) into a staged sample and writes one
+#   # judge_trust row per judge model, check and class the check can see. A
+#   # judge check is trusted when its paired catch rate (flags the mutant AND
+#   # passes its original) clears min-paired-catch-rate over at least
+#   # min-samples traces on every class it can see, on the current rubric.
+#   # Both are policy floors: 24 of 30 has a Wilson lower bound near 0.66.
+#   trust:
+#     min-paired-catch-rate: 0.80
+#     min-samples: 30                 # also the default --inject --sample
+#   inject-workers: 4                 # traces judged in parallel by --inject
 
 # Intake - raw-input sidecars. Every trace gets <vault>/system/intake/<trace>.txt
 # holding the verbatim bytes it arrived with (or a short descriptor for binary

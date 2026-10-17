@@ -22,7 +22,7 @@ mod telegram;
 pub use desktop::DesktopConfig;
 pub use discord::DiscordConfig;
 pub use engine::*;
-pub use eval::EvalConfig;
+pub use eval::{EvalConfig, TrustConfig};
 pub use harvest::{HarvestConfig, HarvestMode};
 pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;
@@ -1289,6 +1289,7 @@ impl Config {
                 self.frontmatter.timezone
             );
         }
+        self.eval.validate()?;
         self.validate_youtube_engine()
     }
 }

@@ -246,6 +246,7 @@ pub struct HarvestCliArgs {
 }
 
 #[derive(Args)]
+#[command(group(clap::ArgGroup::new("sampled").args(["staged", "inject"])))]
 pub struct EvalArgs {
     /// Root of the fixture tree. Default is REPO-RELATIVE
     /// (`config/eval/distill-fixtures`): `sb borg eval` is a developer command
@@ -276,8 +277,10 @@ pub struct EvalArgs {
     /// With --staged, read this staging root instead of borg's default
     #[arg(long, value_name = "DIR", requires = "staged")]
     pub staging_root: Option<PathBuf>,
-    /// With --staged, score at most N traces (deterministic, stratified by kind)
-    #[arg(long, value_name = "N", requires = "staged")]
+    /// With --staged, score at most N traces; with --inject, plant errors
+    /// into N traces (default `eval.trust.min-samples`). Deterministic,
+    /// stratified by kind
+    #[arg(long, value_name = "N", requires = "sampled")]
     pub sample: Option<usize>,
     /// Skip both LLM judges; report only the deterministic metrics
     #[arg(long, conflicts_with = "emit_calibration")]
@@ -308,6 +311,18 @@ pub struct EvalArgs {
         ]
     )]
     pub unscored: bool,
+    /// Plant errors (number-swap, fabricated-quote, dropped-top-claim,
+    /// who-change) into a staged sample, judge originals and mutants with
+    /// every `eval.judge-models` model, print each check's catch rates per
+    /// class, and write the `judge_trust` rows
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "staged", "unscored", "synth_intents", "regenerate", "emit_calibration", "no_judge", "judge_model",
+            "staging_root", "format"
+        ]
+    )]
+    pub inject: bool,
     /// With --unscored, score at most N traces this run (overrides
     /// `eval.limit`); the rest stay in the backlog for the next run
     #[arg(long, value_name = "N", requires = "unscored")]

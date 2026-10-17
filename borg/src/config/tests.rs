@@ -1431,3 +1431,33 @@ fn daemon_start_is_quiet_when_jev_key_resolves_or_jev_is_unused() {
     assert!(vault::capture::warns_containing("SB_TEST_BORG_JEV_UNUSED_KEY").is_empty());
     assert!(vault::capture::warns_containing(&key_file.display().to_string()).is_empty());
 }
+
+#[test]
+fn eval_trust_defaults_to_the_design_floors() {
+    let config: Config = serde_yaml::from_str("eval:\n  judge-models: [gemini-2.5-pro]\n").unwrap();
+    assert_eq!(config.eval.trust.min_paired_catch_rate, 0.80);
+    assert_eq!(config.eval.trust.min_samples, 30);
+    assert_eq!(config.eval.inject_workers, 4);
+    config.validate().unwrap();
+}
+
+#[test]
+fn eval_trust_overrides_parse_and_out_of_range_values_fail_validation() {
+    let config: Config = serde_yaml::from_str(
+        "eval:\n  inject-workers: 2\n  trust:\n    min-paired-catch-rate: 0.9\n    min-samples: 50\n",
+    )
+    .unwrap();
+    assert_eq!(config.eval.trust.min_paired_catch_rate, 0.9);
+    assert_eq!(config.eval.trust.min_samples, 50);
+    assert_eq!(config.eval.inject_workers, 2);
+
+    for bad in [
+        "eval:\n  trust:\n    min-paired-catch-rate: 1.5\n",
+        "eval:\n  trust:\n    min-samples: 0\n",
+        "eval:\n  inject-workers: 0\n",
+    ] {
+        let config: Config = serde_yaml::from_str(bad).unwrap();
+        assert!(config.validate().is_err(), "{bad} must fail validation");
+    }
+    assert!(serde_yaml::from_str::<Config>("eval:\n  trust:\n    min-rate: 0.9\n").is_err());
+}

@@ -63,6 +63,17 @@ const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS eval_scores (
     PRIMARY KEY (trace, run_kind, run_id, content_hash, rubric_version, judge_model, check_name)
 );";
 
+/// The current rubric version of `check`, or `None` for a check this table
+/// does not know. A row on any other version is history, never current.
+pub fn rubric_version_of(check: &str) -> Option<&'static str> {
+    match check {
+        CHECK_JUDGE_DISTILLATION => Some(RUBRIC_VERSION),
+        CHECK_JUDGE_CLAIMS => Some(CLAIMS_RUBRIC_VERSION),
+        c if DETERMINISTIC_CHECKS.contains(&c) => Some(DETERMINISTIC_RUBRIC_VERSION),
+        _ => None,
+    }
+}
+
 /// One check a trace must have a current, error-free row for to be covered.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequiredCheck {

@@ -16,6 +16,7 @@ pub mod backlog;
 pub mod cache;
 pub mod calc;
 pub mod fixtures;
+pub mod inject;
 pub mod intents;
 pub mod judge;
 pub mod patterns;
@@ -23,6 +24,7 @@ pub mod regenerate;
 pub mod report;
 pub mod scores;
 pub mod timer;
+pub mod trust;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +34,7 @@ use judge::JUDGE_INPUT_MAX_CHARS;
 
 pub use fixtures::{
     CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, load_staged_trace, render_options_for_kind,
+    stratified_sample,
 };
 pub use intents::{FabricIntentWriter, INTENT_KINDS, IntentWriter, SynthReport, synth_intents};
 pub use judge::{AxisScores, ClaimJudge, ClaimVerdict, DistillationJudge, FabricClaimJudge, FabricJudge};
@@ -47,6 +50,8 @@ pub use report::{
 /// `run_kind` of a score over the staged note as published (vs a
 /// `--regenerate` candidate or a planted-error injection).
 pub const RUN_KIND_BASELINE: &str = "baseline";
+/// `run_kind` of a score over a planted-error mutation (`--inject`).
+pub const RUN_KIND_INJECT: &str = "inject";
 /// `check_name` of the three-axis distillation judge.
 pub const CHECK_JUDGE_DISTILLATION: &str = "judge-distillation";
 /// `check_name` of the per-claim verdict judge.

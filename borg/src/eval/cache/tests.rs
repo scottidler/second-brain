@@ -80,3 +80,42 @@ fn empty_claim_verdicts_are_a_hit_not_a_miss() {
     cache.put_claims(&k, &[]).expect("put");
     assert_eq!(cache.get_claims(&k).expect("get"), Some(vec![]));
 }
+
+/// `--inject` workers share one cache: concurrent puts and gets from many
+/// threads on a file-backed cache never surface `database is locked`.
+#[test]
+fn one_cache_shared_by_many_threads_writes_without_lock_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = JudgmentCache::open(&tmp.path().join("eval-cache.db")).unwrap();
+    let scores = AxisScores {
+        claim_coverage: 3,
+        anchor_validity: 2,
+        summary_faithfulness: 1,
+    };
+    std::thread::scope(|s| {
+        for t in 0..8 {
+            let cache = &cache;
+            s.spawn(move || {
+                for i in 0..100 {
+                    let hash = format!("{t}-{i}");
+                    let key = CacheKey {
+                        fixture_id: "article/x",
+                        content_hash: &hash,
+                        judge_model: "m",
+                    };
+                    cache
+                        .put(
+                            &key,
+                            CachedJudgment {
+                                scores,
+                                truncated: false,
+                            },
+                        )
+                        .unwrap();
+                    cache.put_claims(&key, &[ClaimVerdict::Supported]).unwrap();
+                    assert_eq!(cache.get(&key).unwrap().unwrap().scores, scores);
+                }
+            });
+        }
+    });
+}

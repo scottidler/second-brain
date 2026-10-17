@@ -4,6 +4,13 @@ use vault::systemd::EnvBootstrap;
 
 /// Daily, after the 03:00 harvest has published its notes.
 const DEFAULT_SCHEDULE: &str = "*-*-* 05:00:00";
+/// Default `eval.trust.min-paired-catch-rate`: a policy floor, not proof.
+pub const DEFAULT_MIN_PAIRED_CATCH_RATE: f64 = 0.80;
+/// Default `eval.trust.min-samples`: applicable traces a class needs before
+/// its rate can make a judge check trusted.
+pub const DEFAULT_MIN_SAMPLES: usize = 30;
+/// Default `eval.inject-workers`: judge calls in flight during `--inject`.
+const DEFAULT_INJECT_WORKERS: usize = 4;
 
 /// The `eval:` block of `borg.yml`: what the `sb-eval.timer` run scores
 /// (`sb borg eval --unscored`).
@@ -14,7 +21,7 @@ const DEFAULT_SCHEDULE: &str = "*-*-* 05:00:00";
 /// second judge is adding its model here. There is no default model: an empty
 /// list makes `--unscored` fail loudly, because a silently chosen judge is a
 /// silently chosen definition of "covered".
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct EvalConfig {
     /// systemd `OnCalendar` expression for `sb-eval.timer`, the ONE value
@@ -32,6 +39,52 @@ pub struct EvalConfig {
     /// `llm.api-keys` is set is an error, because the run would score with no
     /// keys.
     pub env_bootstrap: Option<EnvBootstrap>,
+    /// The bar a judge check must clear on `sb borg eval --inject` before
+    /// its failures may act (remediation, candidates).
+    pub trust: TrustConfig,
+    /// Traces judged in parallel by `sb borg eval --inject`, each worker with
+    /// its own fabric children and cache connection.
+    pub inject_workers: usize,
+}
+
+/// The `eval.trust:` block. A judge check is trusted when, on every planted
+/// class it can see, its paired catch rate is at least
+/// `min-paired-catch-rate` over at least `min-samples` applicable traces, on
+/// the current rubric version. Both are policy floors: 24 of 30 caught has a
+/// one-sided Wilson lower bound near 0.66.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct TrustConfig {
+    pub min_paired_catch_rate: f64,
+    pub min_samples: usize,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            min_paired_catch_rate: DEFAULT_MIN_PAIRED_CATCH_RATE,
+            min_samples: DEFAULT_MIN_SAMPLES,
+        }
+    }
+}
+
+impl EvalConfig {
+    /// Structural checks, run at config load: a rate outside 0..=1, a zero
+    /// sample floor, or zero inject workers is a load error, never a silent
+    /// clamp.
+    pub fn validate(&self) -> eyre::Result<()> {
+        let rate = self.trust.min_paired_catch_rate;
+        if !(0.0..=1.0).contains(&rate) {
+            eyre::bail!("eval.trust.min-paired-catch-rate must be within 0..=1, got {rate}");
+        }
+        if self.trust.min_samples == 0 {
+            eyre::bail!("eval.trust.min-samples must be at least 1");
+        }
+        if self.inject_workers == 0 {
+            eyre::bail!("eval.inject-workers must be at least 1");
+        }
+        Ok(())
+    }
 }
 
 impl Default for EvalConfig {
@@ -41,6 +94,8 @@ impl Default for EvalConfig {
             limit: None,
             judge_models: Vec::new(),
             env_bootstrap: None,
+            trust: TrustConfig::default(),
+            inject_workers: DEFAULT_INJECT_WORKERS,
         }
     }
 }

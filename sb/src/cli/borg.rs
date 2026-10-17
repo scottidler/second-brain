@@ -388,6 +388,9 @@ impl BorgCli {
                 if a.unscored {
                     return run_eval_unscored(&config, &opts, &a);
                 }
+                if a.inject {
+                    return run_eval_inject(&config, &opts, &a);
+                }
                 match borg::eval::run(&opts)? {
                     borg::eval::EvalOutcome::CalibrationSheet(path) => {
                         println!("wrote calibration sheet: {}", path.display());
@@ -552,6 +555,41 @@ fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts,
     }
     if run.all_errored() {
         eyre::bail!("every judged trace errored on every judge model; see the per-trace errors");
+    }
+    Ok(())
+}
+
+/// `sb borg eval --inject`: plant errors into a staged sample, measure every
+/// configured judge on them, and write the `judge_trust` rows.
+fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a: &args::EvalArgs) -> Result<()> {
+    if config.eval.judge_models.is_empty() {
+        eyre::bail!("eval.judge-models is empty: name the judge models --inject measures in borg.yml");
+    }
+    borg::eval::backlog::preflight_keys(&opts.api_keys)?;
+    let sample = a.sample.unwrap_or(config.eval.trust.min_samples);
+    let fixtures = borg::eval::inject::sample_fixtures(&vault::paths::borg_stages_dir(), sample)?;
+    let cache_path = vault::paths::borg_eval_cache_path();
+    let scores = borg::eval::scores::ScoreStore::open(&cache_path)?;
+    let trust = borg::eval::trust::TrustStore::open(&cache_path)?;
+    let factory = |o: &borg::eval::EvalOpts| -> Result<(Box<dyn borg::eval::DistillationJudge>, Box<dyn borg::eval::ClaimJudge>)> {
+        let (judge, claim_judge) = borg::eval::fabric_judges(o)?;
+        Ok((Box::new(judge), Box::new(claim_judge)))
+    };
+    let run = borg::eval::inject::InjectRun {
+        opts,
+        eval: &config.eval,
+        cache_path: &cache_path,
+        now: chrono::Utc::now(),
+    };
+    let report = borg::eval::inject::run_inject(&fixtures, &run, &scores, &trust, &factory)?;
+    let rendered = report.render();
+    print!("{rendered}");
+    if let Some(path) = &a.report {
+        std::fs::write(path, &rendered).with_context(|| format!("writing report to {}", path.display()))?;
+        println!("\nreport written to {}", path.display());
+    }
+    if report.all_judged_errored() {
+        eyre::bail!("every judged trace errored on --inject; no judge was measured");
     }
     Ok(())
 }

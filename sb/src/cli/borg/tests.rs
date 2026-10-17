@@ -132,3 +132,35 @@ fn eval_unscored_takes_limit_or_count_and_refuses_the_dev_run_flags() {
         assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
     }
 }
+
+#[test]
+fn eval_inject_takes_a_sample_and_refuses_the_other_modes() {
+    let h = EvalHarness::try_parse_from(["sb", "--inject", "--sample", "30"]).unwrap();
+    assert!(h.eval.inject);
+    assert_eq!(h.eval.sample, Some(30));
+    assert_eq!(
+        EvalHarness::try_parse_from(["sb", "--inject"]).unwrap().eval.sample,
+        None,
+        "the sample defaults to eval.trust.min-samples at run time"
+    );
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--staged", "--sample", "3"]).is_ok(),
+        "--staged still takes --sample"
+    );
+    assert!(
+        EvalHarness::try_parse_from(["sb", "--sample", "3"]).is_err(),
+        "--sample needs --staged or --inject"
+    );
+    for flag in [
+        &["--staged"][..],
+        &["--unscored"],
+        &["--no-judge"],
+        &["--judge-model", "m"],
+        &["--regenerate"],
+        &["--format", "json"],
+    ] {
+        let mut argv = vec!["sb", "--inject"];
+        argv.extend_from_slice(flag);
+        assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
+    }
+}

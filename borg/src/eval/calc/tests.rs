@@ -393,3 +393,18 @@ fn tools_grounding_counts_the_repo_install_line() {
 fn tools_grounding_empty_without_tools() {
     assert!(tools_grounding("anything", &Distilled::default()).is_empty());
 }
+
+#[test]
+fn wilson_lower_bound_of_24_of_30_is_near_0_66() {
+    let lb = wilson_lower_bound(24, 30);
+    assert!((lb - 0.6575).abs() < 0.001, "lb={lb}");
+}
+
+#[test]
+fn wilson_lower_bound_is_zero_with_no_samples_and_below_the_rate_otherwise() {
+    assert_eq!(wilson_lower_bound(0, 0), 0.0);
+    assert_eq!(wilson_lower_bound(0, 10), 0.0);
+    let one_of_one = wilson_lower_bound(1, 1);
+    assert!(one_of_one < 0.3, "1 of 1 vouches for little: {one_of_one}");
+    assert!(wilson_lower_bound(30, 30) < 1.0);
+}

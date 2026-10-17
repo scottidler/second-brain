@@ -175,7 +175,7 @@ fn staged_source(trace_dir: &Path, distilled: &Distilled) -> Result<Option<Strin
 
 /// What one staging directory yielded.
 enum StagedLoad {
-    Loaded(&'static str, Box<Fixture>),
+    Loaded(Box<Fixture>),
     /// A staged trace the eval does not score: an unscored kind, or no
     /// recoverable source.
     Skipped,
@@ -204,17 +204,14 @@ fn load_staged_dir(dir: &Path, trace: &str) -> Result<StagedLoad> {
         log::debug!("eval::fixtures::load_staged: no source for trace={trace}");
         return Ok(StagedLoad::Skipped);
     };
-    Ok(StagedLoad::Loaded(
-        kind,
-        Box::new(Fixture {
-            id: format!("{kind}/{trace}"),
-            kind: kind.to_string(),
-            slug: trace.to_string(),
-            source,
-            distilled,
-            capture_note: None,
-        }),
-    ))
+    Ok(StagedLoad::Loaded(Box::new(Fixture {
+        id: format!("{kind}/{trace}"),
+        kind: kind.to_string(),
+        slug: trace.to_string(),
+        source,
+        distilled,
+        capture_note: None,
+    })))
 }
 
 /// Load ONE staged trace by id: `Ok(None)` when it is absent, is not a scored
@@ -231,7 +228,7 @@ pub fn load_staged_trace(root: &Path, trace: &str) -> Result<Option<Fixture>> {
         return Ok(None);
     }
     match load_staged_dir(&root.join(trace), trace)? {
-        StagedLoad::Loaded(_, fixture) => Ok(Some(*fixture)),
+        StagedLoad::Loaded(fixture) => Ok(Some(*fixture)),
         StagedLoad::Skipped | StagedLoad::NotStaged => Ok(None),
     }
 }
@@ -250,18 +247,39 @@ pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
     if !root.is_dir() {
         bail!("staging root not found: {}", root.display());
     }
-    let mut by_kind: BTreeMap<&'static str, Vec<Fixture>> = BTreeMap::new();
+    let mut loaded = Vec::new();
     let mut skipped = 0usize;
     for entry in read_sorted(root)? {
         let dir = entry.path();
         let trace = entry.file_name().to_string_lossy().to_string();
         match load_staged_dir(&dir, &trace)? {
-            StagedLoad::Loaded(kind, fixture) => by_kind.entry(kind).or_default().push(*fixture),
+            StagedLoad::Loaded(fixture) => loaded.push(*fixture),
             StagedLoad::Skipped => skipped += 1,
             StagedLoad::NotStaged => {}
         }
     }
+    let total = loaded.len();
+    let picked = stratified_sample(loaded, sample);
+    if picked.is_empty() {
+        bail!("no staged distillations found under {}", root.display());
+    }
+    log::debug!(
+        "eval::fixtures::load_staged: loaded={} of {} skipped={}",
+        picked.len(),
+        total,
+        skipped
+    );
+    Ok(picked)
+}
 
+/// A deterministic stratified sample of `fixtures`: round-robin across kinds,
+/// each kind ordered by a stable hash of its trace id, so reruns pick the same
+/// traces and every kind is represented. `None` keeps them all. Sorted by id.
+pub fn stratified_sample(fixtures: Vec<Fixture>, sample: Option<usize>) -> Vec<Fixture> {
+    let mut by_kind: BTreeMap<String, Vec<Fixture>> = BTreeMap::new();
+    for fixture in fixtures {
+        by_kind.entry(fixture.kind.clone()).or_default().push(fixture);
+    }
     for fixtures in by_kind.values_mut() {
         fixtures.sort_by_key(|f| crate::eval::cache::stable_hash(&f.slug));
     }
@@ -280,16 +298,7 @@ pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
         }
     }
     picked.sort_by(|a, b| a.id.cmp(&b.id));
-    if picked.is_empty() {
-        bail!("no staged distillations found under {}", root.display());
-    }
-    log::debug!(
-        "eval::fixtures::load_staged: loaded={} of {} skipped={}",
-        picked.len(),
-        total,
-        skipped
-    );
-    Ok(picked)
+    picked
 }
 
 /// Directory entries sorted by file name (deterministic traversal).
