@@ -699,6 +699,62 @@ fn fts_quote_wraps_and_escapes() {
 }
 
 #[test]
+fn fts_natural_query_quotes_each_word() {
+    assert_eq!(fts_natural_query("run agent 24/7"), "\"run\" \"agent\" \"24/7\"");
+    assert_eq!(fts_natural_query("  rust   OR python "), "\"rust\" \"OR\" \"python\"");
+    assert_eq!(
+        fts_natural_query("the \"best\" one"),
+        "\"the\" \"\"\"best\"\"\" \"one\""
+    );
+}
+
+#[test]
+fn natural_query_with_punctuation_and_quotes_does_not_abort_the_match() {
+    let index = SearchIndex::open_memory().expect("open");
+    insert_test_note(
+        &index,
+        "notes/agent.md",
+        "Agent",
+        &["tech"],
+        "how to run an AI coding agent 24/7 securely with the \"best\" setup",
+    );
+
+    for query in [
+        "how to run an AI coding agent 24/7 securely",
+        "the \"best\" setup",
+        "agent: securely",
+        "coding-agent",
+    ] {
+        let hits = index
+            .search(&fts_natural_query(query), None, false, None, None, Some(5))
+            .unwrap_or_else(|e| panic!("query {query:?} must not abort the MATCH: {e:#}"));
+        assert!(
+            hits.iter().any(|r| r.path == "notes/agent.md"),
+            "query {query:?} should find notes/agent.md"
+        );
+    }
+}
+
+#[test]
+fn constructed_or_expression_keeps_its_operator() {
+    // find_similar sends `"a" OR "b"` through `search` unchanged. Quoting it
+    // again would make OR a literal word and drop the python-only note.
+    let index = SearchIndex::open_memory().expect("open");
+    insert_test_note(&index, "notes/rust.md", "Rust", &["tech"], "rust ownership");
+    insert_test_note(&index, "notes/python.md", "Python", &["tech"], "python typing");
+
+    let expr = ["rust", "python"]
+        .iter()
+        .map(|t| fts_quote(t))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let hits = index.search(&expr, None, false, None, None, Some(5)).expect("search");
+    let mut paths: Vec<&str> = hits.iter().map(|r| r.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["notes/python.md", "notes/rust.md"]);
+}
+
+#[test]
 fn find_similar_survives_hyphenated_and_uuid_terms() {
     // The exact shapes that aborted the MATCH in production: a hyphenated host
     // (`no such column: developers`), a note slug (`no such column: plugin`),

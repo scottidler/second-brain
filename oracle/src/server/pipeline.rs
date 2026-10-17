@@ -12,7 +12,7 @@ use crate::config::{ExcludeConfig, RerankConfig, RetrievalConfig};
 use crate::tools::SearchMode;
 use rmcp::ErrorData as McpError;
 use tracing::{debug, warn};
-use vault::search::{NoteRow, Reranker, SearchIndex};
+use vault::search::{NoteRow, Reranker, SearchIndex, fts_natural_query};
 
 /// Outcome of the testable rerank core (`rerank_within_budget`). `Disable`
 /// tells the caller to latch rerank off for the rest of the process (probe
@@ -43,7 +43,7 @@ impl OracleMcpServer {
         k: u32,
     ) -> Result<Vec<String>, McpError> {
         let rows = db
-            .search(query, tags, tags_all, note_type, status, Some(k))
+            .search(&fts_natural_query(query), tags, tags_all, note_type, status, Some(k))
             .map_err(Self::err)?;
         Ok(rows.iter().map(|n| n.path.clone()).collect())
     }
@@ -152,7 +152,14 @@ impl OracleMcpServer {
     ) -> Result<Vec<NoteRow>, McpError> {
         match mode {
             SearchMode::Bm25 => db
-                .search(query, tags, tags_all, note_type, status, Some(limit))
+                .search(
+                    &fts_natural_query(query),
+                    tags,
+                    tags_all,
+                    note_type,
+                    status,
+                    Some(limit),
+                )
                 .map_err(Self::err),
             SearchMode::Vector => {
                 let paths = self.vector_paths(db, query, tags, tags_all, note_type, status, limit)?;

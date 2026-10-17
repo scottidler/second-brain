@@ -127,6 +127,16 @@ pub(crate) fn fts_quote(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
+/// Turn a natural-language query into an FTS5 MATCH expression: each
+/// whitespace-separated word quoted via `fts_quote`, joined by spaces (FTS5's
+/// implicit AND). A user typing `24/7` or `don't` means words, not FTS5
+/// syntax. Only for raw user text: an expression already built for FTS5
+/// (`find_similar`'s `"a" OR "b"`) must not pass through here, or its
+/// operators become literals.
+pub fn fts_natural_query(query: &str) -> String {
+    query.split_whitespace().map(fts_quote).collect::<Vec<_>>().join(" ")
+}
+
 /// Extract a string value from the frontmatter extra map (for cortex-* fields)
 fn extract_cortex_string(extra: &HashMap<String, serde_yaml::Value>, key: &str) -> String {
     extra

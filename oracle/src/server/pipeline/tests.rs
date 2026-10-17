@@ -510,3 +510,48 @@ fn limit_10_order_is_unchanged_by_the_depth_change() {
         "legacy graph"
     );
 }
+
+/// BM25 receives natural language, not FTS5 syntax: `24/7` and embedded
+/// quotes once aborted `sb oracle eval` with an fts5 syntax error. Covers
+/// both oracle call sites (`run_search_mode`'s BM25 arm and `bm25_paths` via
+/// hybrid's configured bm25-only pipeline).
+#[test]
+fn bm25_quotes_natural_language_queries() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed(
+        &db,
+        "notes/agent.md",
+        "how to run an AI coding agent 24/7 securely with the \"best\" setup",
+    );
+    let cfg = Config {
+        retrieval: bm25_only_retrieval(0.3),
+        ..Default::default()
+    };
+    let server = OracleMcpServer::new(cfg, db);
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+
+    for query in ["how to run an AI coding agent 24/7 securely", "the \"best\" setup"] {
+        let rows = server
+            .run_search_mode(
+                &guard,
+                SearchMode::Bm25,
+                query,
+                None,
+                false,
+                None,
+                None,
+                10,
+                1,
+                None,
+                0.0,
+            )
+            .unwrap_or_else(|e| panic!("bm25 mode, query {query:?}: {e:?}"));
+        assert_eq!(rows.len(), 1, "bm25 mode, query {query:?}");
+
+        let rows = server
+            .run_configured_pipeline(&guard, query, None, false, None, None, 10)
+            .unwrap_or_else(|e| panic!("configured pipeline, query {query:?}: {e:?}"));
+        assert_eq!(rows.len(), 1, "configured pipeline, query {query:?}");
+    }
+}
