@@ -29,6 +29,9 @@ pub(crate) async fn dispatch_ingest(
     telegram: Option<Telegram>,
     chat_id_override: Option<i64>,
 ) -> IngestResult {
+    // A `sb borg ingest` caller (usually an agent batch) gets its result on
+    // stdout; toasting each one flooded desktop and phone on 2026-10-17.
+    let (desktop, telegram) = if pings_operator(method) { (desktop, telegram) } else { (None, None) };
     let prior = if let Some(d) = &desktop {
         d.processing(&trace_id, processing_msg).await
     } else {
@@ -52,3 +55,12 @@ pub(crate) async fn dispatch_ingest(
 
     result
 }
+
+/// Whether an ingest by `method` sends the operator processing/result pings.
+/// Every human-facing transport does; the CLI does not.
+fn pings_operator(method: IngestMethod) -> bool {
+    method != IngestMethod::Cli
+}
+
+#[cfg(test)]
+mod tests;
