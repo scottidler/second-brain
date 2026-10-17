@@ -560,10 +560,12 @@ pub struct Jev {
     timeout: Duration,
 }
 
+/// `answers` stays raw JSON until `Jev::scores` keeps only the asked tags,
+/// so a malformed entry for a tag we never asked about cannot fail the call.
 #[derive(Deserialize)]
 struct SystemOneReply {
     model: String,
-    answers: HashMap<String, SystemOneAnswer>,
+    answers: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -596,11 +598,13 @@ fn retry_delay(retry_after_ms: Option<&str>, retry_after: Option<&str>) -> Optio
 
 /// The error for a non-200 answer. Carries the status, `detail.error_type`,
 /// `detail.message` and the request id, never the request body or the key.
+/// `why` follows the status (a terminal 429 says which kind it was), and is
+/// empty for a plain non-200.
 ///
 /// A 422 is FastAPI's validation body, whose `detail` is a list of
 /// `{type, loc, msg, input}` and whose `input` echoes the whole request; only
 /// `loc` and `msg` survive. A body that is not JSON contributes nothing.
-fn api_error(status: u16, body: &str, request_id: Option<&str>) -> eyre::Report {
+fn api_error(status: u16, why: &str, body: &str, request_id: Option<&str>) -> eyre::Report {
     let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
     let detail = parsed.as_ref().and_then(|v| v.get("detail"));
     let (error_type, message) = match detail {
@@ -630,7 +634,7 @@ fn api_error(status: u16, body: &str, request_id: Option<&str>) -> eyre::Report 
         _ => (None, None),
     };
     eyre!(
-        "jev returned {status}: error_type={} message={} request_id={}",
+        "jev returned {status}{why}: error_type={} message={} request_id={}",
         error_type.as_deref().unwrap_or("unknown"),
         message.as_deref().unwrap_or("none"),
         request_id.unwrap_or("none")
@@ -756,25 +760,36 @@ impl Jev {
         if first.status != 429 {
             return Self::accept(first);
         }
-        let request_id = first.request_id.as_deref().unwrap_or("none");
+        let request_id = first.request_id.as_deref();
         let Some(delay) = first.retry_delay else {
-            return Err(eyre!(
-                "jev returned 429 with no usable retry-after-ms or Retry-After header: request_id={request_id}"
+            return Err(api_error(
+                429,
+                " with no usable retry-after-ms or Retry-After header",
+                &first.body,
+                request_id,
             ));
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if delay + RETRY_REQUEST_ALLOWANCE > remaining {
-            return Err(eyre!(
-                "jev returned 429 asking for {delay:?}, which does not fit the {remaining:?} left of the deadline: request_id={request_id}"
+            return Err(api_error(
+                429,
+                &format!(" asking for {delay:?}, which does not fit the {remaining:?} left of the deadline"),
+                &first.body,
+                request_id,
             ));
         }
-        log::debug!("Jev::post: 429, retrying once after {delay:?} (request_id={request_id})");
+        log::debug!(
+            "Jev::post: 429, retrying once after {delay:?} (request_id={})",
+            request_id.unwrap_or("none")
+        );
         std::thread::sleep(delay);
         let second = self.send(body, deadline)?;
         if second.status == 429 {
-            return Err(eyre!(
-                "jev returned 429 again after one retry: request_id={}",
-                second.request_id.as_deref().unwrap_or("none")
+            return Err(api_error(
+                429,
+                " again after one retry",
+                &second.body,
+                second.request_id.as_deref(),
             ));
         }
         Self::accept(second)
@@ -786,6 +801,7 @@ impl Jev {
         }
         Err(api_error(
             exchange.status,
+            "",
             &exchange.body,
             exchange.request_id.as_deref(),
         ))
@@ -806,10 +822,12 @@ impl Jev {
         log::debug!("Jev::scores: served model={}", reply.model);
         let mut scores = Vec::with_capacity(self.canon.all.len());
         for tag in self.sorted_vocabulary() {
-            let answer = reply
+            let raw = reply
                 .answers
                 .get(&tag)
                 .ok_or_else(|| eyre!("jev answer is missing tag {tag:?}"))?;
+            let answer =
+                SystemOneAnswer::deserialize(raw).map_err(|e| eyre!("jev answer for tag {tag:?} is malformed: {e}"))?;
             let noul = answer
                 .noul
                 .ok_or_else(|| eyre!("jev answer for tag {tag:?} carries no noul score"))?;

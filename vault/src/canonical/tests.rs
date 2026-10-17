@@ -422,18 +422,26 @@ fn descriptions_are_optional_and_reach_the_canonical_set() {
     assert!(!set.description.contains_key("cli"), "a tag may go without one");
 }
 
-/// The shipped vocabulary carries a non-empty description for every tag:
-/// a tag without one gets the weaker name-only question.
+/// Every shipped description names a canonical tag and says something.
+/// Descriptions are optional per tag: `tag-promote` writes none, so a newly
+/// promoted tag must not turn CI red; it is asked by name alone until one
+/// is written.
 #[test]
-fn the_shipped_file_describes_every_canonical_tag() {
+fn every_shipped_description_names_a_canonical_tag() {
     let file: CanonicalTagsFile = serde_yaml::from_str(SHIPPED_CANONICAL_TAGS).expect("shipped file parses");
     let set = file.canonical_set();
-    let mut missing: Vec<&String> = set
-        .all
+    let mut strangers: Vec<&String> = set.description.keys().filter(|t| !set.all.contains(*t)).collect();
+    strangers.sort();
+    assert!(
+        strangers.is_empty(),
+        "descriptions for non-canonical tags: {strangers:?}"
+    );
+    let mut blank: Vec<&String> = set
+        .description
         .iter()
-        .filter(|t| set.description.get(*t).is_none_or(|d| d.trim().is_empty()))
+        .filter(|(_, d)| d.trim().is_empty())
+        .map(|(t, _)| t)
         .collect();
-    missing.sort();
-    assert!(missing.is_empty(), "canonical tags with no description: {missing:?}");
-    assert_eq!(set.description.len(), set.all.len());
+    blank.sort();
+    assert!(blank.is_empty(), "blank descriptions: {blank:?}");
 }

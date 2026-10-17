@@ -21,6 +21,26 @@ fn shipped_canon() -> CanonicalSet {
     file.canonical_set()
 }
 
+/// The vocabulary the fixture was recorded with: exactly the tags its
+/// answer covers, each with the shipped description it still has, and the
+/// recorded `max_per_note`. Decoupled from the live vocabulary so a
+/// `tag-promote` (which adds a tag the recorded answer never saw) cannot
+/// turn this test red.
+fn fixture_canon() -> CanonicalSet {
+    let fx = fixture();
+    let recorded: HashSet<String> = fx["response"]["answers"]
+        .as_object()
+        .expect("fixture answers map")
+        .keys()
+        .cloned()
+        .collect();
+    let mut canon = shipped_canon();
+    canon.description.retain(|tag, _| recorded.contains(tag));
+    canon.all = recorded;
+    canon.max_per_note = fx["max_per_note"].as_u64().expect("max_per_note") as usize;
+    canon
+}
+
 /// One canned HTTP answer.
 struct Canned {
     status: u16,
@@ -178,7 +198,7 @@ fn assert_keyless(err: &eyre::Report) {
 #[test]
 fn a_classify_sends_one_request_with_a_noul_question_per_canonical_tag() {
     let fx = fixture();
-    let canon = shipped_canon();
+    let canon = fixture_canon();
     let stub = Stub::start(vec![Canned::json(200, fixture_body())]);
     let (jev, _dir) = jev_for(&stub, canon.clone(), 30);
 
@@ -257,7 +277,35 @@ fn unasked_answer_keys_are_dropped() {
     assert_eq!(out.tags, vec!["rust".to_string()]);
 }
 
+/// Only asked tags are parsed: a malformed entry under a key we never sent
+/// is dropped with the rest of the unasked keys.
+#[test]
+fn a_malformed_unasked_answer_is_ignored() {
+    let canon = shipped_canon();
+    let mut reply = answers_for(&canon, "jev-1.13.0", 0.0);
+    reply["answers"]["not-a-canonical-tag"] = serde_json::json!({"type": "noul", "noul": "very"});
+    reply["answers"]["another-stranger"] = serde_json::json!("not even an object");
+    reply["answers"]["rust"] = serde_json::json!({"type": "noul", "noul": 0.97});
+    let stub = Stub::start(vec![Canned::json(200, reply.to_string())]);
+    let (jev, _dir) = jev_for(&stub, canon, 30);
+    let out = jev.classify(&note()).expect("an unasked malformed entry is ignored");
+    assert_eq!(out.tags, vec!["rust".to_string()]);
+}
+
 // --------------------------------------------------------------- errors
+
+#[test]
+fn a_malformed_asked_answer_is_an_error() {
+    let canon = shipped_canon();
+    let mut reply = answers_for(&canon, "jev-1.13.0", 0.0);
+    reply["answers"]["rust"] = serde_json::json!({"type": "noul", "noul": "very"});
+    let stub = Stub::start(vec![Canned::json(200, reply.to_string())]);
+    let (jev, _dir) = jev_for(&stub, canon, 30);
+    let err = jev.classify(&note()).expect_err("a malformed asked entry is an error");
+    let text = format!("{err:#}");
+    assert!(text.contains("\"rust\" is malformed"), "{text}");
+    assert_keyless(&err);
+}
 
 /// Success criterion: the 401 error names `authentication_error` and never
 /// the key.
@@ -366,6 +414,17 @@ fn a_non_jev_model_is_an_error() {
 
 // ------------------------------------------------------------------ 429
 
+/// A terminal 429 carries the same fields as any other non-200: status,
+/// `detail.error_type`, `detail.message`, the request id, never the key.
+fn assert_rate_limit_detail(err: &eyre::Report) {
+    let text = format!("{err:#}");
+    assert!(text.contains("429"), "{text}");
+    assert!(text.contains("error_type=rate_limit_error"), "{text}");
+    assert!(text.contains("message=Slow down: 60 rpm"), "{text}");
+    assert!(text.contains("request_id=req_stub_0001"), "{text}");
+    assert_keyless(err);
+}
+
 #[test]
 fn a_429_then_200_retries_once() {
     let canon = shipped_canon();
@@ -383,33 +442,48 @@ fn a_429_then_200_retries_once() {
 fn a_429_then_429_is_an_error() {
     let stub = Stub::start(vec![
         Canned::json(429, "{}").with_header("retry-after", "0"),
-        Canned::json(429, "{}").with_header("retry-after", "0"),
+        Canned::json(
+            429,
+            r#"{"detail":{"error_type":"rate_limit_error","message":"Slow down: 60 rpm"}}"#,
+        )
+        .with_header("retry-after", "0"),
     ]);
     let (jev, _dir) = jev_for(&stub, shipped_canon(), 30);
     let err = jev.classify(&note()).expect_err("a second 429 is an error");
     assert_eq!(stub.hit_count(), 2, "never a third request");
     assert!(format!("{err:#}").contains("429 again"), "{err:#}");
-    assert_keyless(&err);
+    assert_rate_limit_detail(&err);
 }
 
 #[test]
 fn a_429_with_no_header_is_an_error_without_a_retry() {
-    let stub = Stub::start(vec![Canned::json(429, "{}")]);
+    let stub = Stub::start(vec![Canned::json(
+        429,
+        r#"{"detail":{"error_type":"rate_limit_error","message":"Slow down: 60 rpm"}}"#,
+    )]);
     let (jev, _dir) = jev_for(&stub, shipped_canon(), 30);
     let err = jev.classify(&note()).expect_err("no header, no retry");
     assert_eq!(stub.hit_count(), 1);
     assert!(format!("{err:#}").contains("no usable"), "{err:#}");
+    assert_rate_limit_detail(&err);
 }
 
 #[test]
 fn a_429_whose_delay_overruns_the_deadline_is_an_error_without_a_retry() {
-    let stub = Stub::start(vec![Canned::json(429, "{}").with_header("retry-after", "5")]);
+    let stub = Stub::start(vec![
+        Canned::json(
+            429,
+            r#"{"detail":{"error_type":"rate_limit_error","message":"Slow down: 60 rpm"}}"#,
+        )
+        .with_header("retry-after", "5"),
+    ]);
     let (jev, _dir) = jev_for(&stub, shipped_canon(), 2);
     let err = jev
         .classify(&note())
         .expect_err("a delay past the deadline is an error");
     assert_eq!(stub.hit_count(), 1);
     assert!(format!("{err:#}").contains("does not fit"), "{err:#}");
+    assert_rate_limit_detail(&err);
 }
 
 #[test]

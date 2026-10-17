@@ -79,3 +79,18 @@
 - Commented jev keys vs live ones — a live `api-key` would imply it is in use under the `deterministic` default.
 ### Open questions
 - None.
+
+## Implementation audit fold
+### Design decisions
+- Q1: `the_shipped_file_describes_every_canonical_tag` became `every_shipped_description_names_a_canonical_tag` (vault/src/canonical/tests.rs): it pins that every `descriptions:` key is canonical and non-blank, and no longer that every tag has one. `tag-promote` writes no description, so the old test failed (`canonical tags with no description: ["zig"]`) on the first promotion. The doc's Data Model and Phase 1 test bullets now say so.
+- The recorded-response 200 test scores the fixture against `fixture_canon()` (distillers/src/tags/tests/jev.rs): exactly the 117 tags the recorded answer covers, each with whatever shipped description it still has, and the fixture's `max_per_note`. Every earlier assertion stays. With the live vocabulary it failed `jev answer is missing tag "zig"` on any new tag, described or not.
+- The three terminal-429 branches go through `api_error` (distillers/src/tags.rs:Jev::post): with a `why` suffix (`with no usable ...`, `asking for ..., which does not fit ...`, `again after one retry`), so they carry status, `detail.error_type`, `detail.message` and `x-typesafe-request-id` like any other non-200, and never the request body or key. `api_error` takes `why` as a new parameter, empty for a plain non-200.
+- `SystemOneReply.answers` is `HashMap<String, serde_json::Value>` (distillers/src/tags.rs:Jev::scores): and only asked tags are deserialized into `SystemOneAnswer`, so a malformed unasked entry drops like any other unasked key. A malformed asked entry is `jev answer for tag "<tag>" is malformed`.
+- Proof: with `zig` added to `config/canonical-tags.yml` (once with no description, once with one), `cargo test --workspace` was all green both times. The edit was reverted.
+- Bite checks (mutate, run, restore): the vault test at HEAD with `zig` fails as above; the 200 test switched back to the live vocabulary with `zig` fails as above; HEAD's `tags.rs` under the new tests fails all three 429 tests (the 429 bodies now carry `rate_limit_error` / `Slow down: 60 rpm`) and both malformed-answer tests; asked-entry parse errors swallowed (`unwrap_or(noul 0.0)`) fails `a_malformed_asked_answer_is_an_error`.
+### Deviations
+- The fixture records no descriptions, so `fixture_canon()` takes the recorded tag set from the fixture and the descriptions from the shipped file, filtered to that set. The criteria assertion compares against that canon, so it still checks that each question carries its tag's description.
+### Tradeoffs
+- Taking descriptions from the shipped file vs freezing 117 description strings into the fixture: the test checks the description reaches `criteria.true`, not that the text matches what was recorded, and a frozen copy would drift from the shipped file with nothing gained.
+### Open questions
+- None.

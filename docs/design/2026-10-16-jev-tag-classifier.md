@@ -262,7 +262,7 @@ descriptions:
 
 - The text is `~/Claude/tags-only-trial/p0/descriptions.json`, reviewed in the diff. `k8s` takes the `kubernetes` entry.
 - A `descriptions:` key that is not a canonical tag is a load error (fail closed, same as an unknown top-level key).
-- A tag with no description is sent with no `criteria` (arm A's question for that tag). The shipped file carries all 117, and a test pins that.
+- A tag with no description is sent with no `criteria` (arm A's question for that tag). The shipped file carries all 117 today; a test pins only that every description key is canonical and non-blank, because `tag-promote` writes no description.
 
 ### API Design
 
@@ -317,7 +317,7 @@ Request, one per note:
 **Model:** opus
 - In `distillers`: `ClassifierKind::Jev`, `TagMethod::Jev`, the `Jev` struct, the config fields, `deny_unknown_fields`, and the `base_url` test seam.
 - Plus the Phase 0b data path (C won): `descriptions:` in `config/canonical-tags.yml` (117 entries from `descriptions.json`, `k8s` from its `kubernetes` entry), `CanonicalTagsFile.descriptions`, `CanonicalSet.description` filled by `canonical_set()`, and `Jev` sending each as `criteria.true` (Data Model, API Design).
-  - Tests: a non-canonical `descriptions:` key fails to load; the shipped file has a description for every canonical tag; the stub sees `criteria.true` on each question.
+  - Tests: a non-canonical `descriptions:` key fails to load; every shipped description key is a canonical tag (descriptions stay optional per tag: `tag-promote` writes none, so pinning all of them would turn CI red on the first promotion); the stub sees `criteria.true` on each question.
 - Delete the classifier.dev client, sharding, constants, `classify_batch`, and `distillers/src/tags/fixtures/classifier-dev-2026-09-20.json`.
 - Every change a caller needs to compile:
   - `sb/src/cli/checks.rs:563` (`token_env`)
