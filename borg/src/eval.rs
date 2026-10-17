@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
+use judge::JUDGE_INPUT_MAX_CHARS;
 
 pub use fixtures::{CAPTURE_NOTE_FILE, Fixture, judge_note_text, load, load_staged, render_options_for_kind};
 pub use intents::{FabricIntentWriter, INTENT_KINDS, IntentWriter, SynthReport, synth_intents};
@@ -34,14 +35,18 @@ pub use judge::{MockClaimJudge, MockJudge};
 pub use patterns::{PatternDirFabric, pattern_in, resolve_patterns_dir};
 pub use regenerate::{RegenerateReport, regenerate_dispatcher, run_regenerate};
 pub use report::{
-    ArtifactMetric, CalibrationPanel, ClaimSupport, EvalReport, FlaggedClaim, GroundingMetric, KindReport,
-    ListicleMetric, NoteSizeMetric, ToolsGroundingMetric,
+    ArtifactMetric, CalibrationPanel, ClaimRecord, ClaimSupport, EvalReport, FlaggedClaim, GroundingMetric, KindReport,
+    ListicleMetric, NoteSizeMetric, ToolsGroundingMetric, TraceError, TraceMetrics, TraceRecord,
 };
 
-/// Char budget for the source text shown to the judge. Larger than the oracle
-/// eval's note budget (8K) because claim coverage requires the judge to see the
-/// whole source; long-transcript fixtures still exceed it and are flagged.
-const JUDGE_SOURCE_MAX_CHARS: usize = 24_000;
+/// `run_kind` of a score over the staged note as published (vs a
+/// `--regenerate` candidate or a planted-error injection).
+pub const RUN_KIND_BASELINE: &str = "baseline";
+/// `check_name` of the three-axis distillation judge.
+pub const CHECK_JUDGE_DISTILLATION: &str = "judge-distillation";
+/// `check_name` of the per-claim verdict judge.
+pub const CHECK_JUDGE_CLAIMS: &str = "judge-claims";
+
 /// Label for the aggregate ("all kinds") row in the report.
 pub const OVERALL_LABEL: &str = "ALL";
 
@@ -55,10 +60,10 @@ pub struct EvalOpts {
     pub calibration_path: PathBuf,
     /// Judge model name; empty = fabric's default model.
     pub judge_model: String,
-    /// Name of the env var (or file) holding the Anthropic credential every
-    /// eval fabric call hands the child as `ANTHROPIC_API_KEY` (borg's
-    /// `fabric.api-key`). Empty leaves fabric on its own `.env`.
-    pub api_key: String,
+    /// Per-vendor credential vars (borg's `llm.api-keys`) every eval fabric
+    /// call (both judges, the intent writer) exports under fabric's names on
+    /// the child. Empty leaves fabric on its own `.env`.
+    pub api_keys: vault::fabric::ApiKeys,
     /// Absolute dir every eval pattern (distill, judge, intent) resolves from;
     /// `None` = the deployed `vault::paths::patterns_dir()`. Set it through
     /// [`resolve_patterns_dir`].
@@ -82,7 +87,7 @@ impl Default for EvalOpts {
             fixtures_dir: PathBuf::from("config/eval/distill-fixtures"),
             calibration_path: PathBuf::from("config/eval/distill-calibration.yml"),
             judge_model: String::new(),
-            api_key: String::new(),
+            api_keys: vault::fabric::ApiKeys::default(),
             patterns_dir: None,
             rebuild_cache: false,
             emit_calibration: None,
@@ -175,12 +180,12 @@ pub fn run(opts: &EvalOpts) -> Result<EvalOutcome> {
     evaluate(&fixtures, &calibration, &cache, &judge, &claim_judge, opts)
 }
 
-/// The production judges for `opts`: its model and credential var, with each
+/// The production judges for `opts`: its model and credential vars, with each
 /// pattern resolved from `opts.patterns_dir` when set.
 pub fn fabric_judges(opts: &EvalOpts) -> Result<(FabricJudge, FabricClaimJudge)> {
-    let mut judge = FabricJudge::new(opts.judge_model.clone(), opts.api_key.clone());
+    let mut judge = FabricJudge::new(opts.judge_model.clone(), opts.api_keys.clone());
     judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &judge.pattern)?;
-    let mut claim_judge = FabricClaimJudge::new(opts.judge_model.clone(), opts.api_key.clone());
+    let mut claim_judge = FabricClaimJudge::new(opts.judge_model.clone(), opts.api_keys.clone());
     claim_judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &claim_judge.pattern)?;
     Ok((judge, claim_judge))
 }
@@ -188,7 +193,7 @@ pub fn fabric_judges(opts: &EvalOpts) -> Result<(FabricJudge, FabricClaimJudge)>
 /// The production intent writer for `opts`, its pattern resolved from
 /// `opts.patterns_dir` when set.
 pub fn fabric_intent_writer(opts: &EvalOpts) -> Result<FabricIntentWriter> {
-    let mut writer = FabricIntentWriter::new(opts.judge_model.clone(), opts.api_key.clone());
+    let mut writer = FabricIntentWriter::new(opts.judge_model.clone(), opts.api_keys.clone());
     writer.pattern = pattern_in(opts.patterns_dir.as_deref(), &writer.pattern)?;
     Ok(writer)
 }
@@ -198,6 +203,10 @@ pub fn fabric_intent_writer(opts: &EvalOpts) -> Result<FabricIntentWriter> {
 /// [`MockJudge`]. In `--emit-calibration` mode, write the sheet and short-circuit.
 /// With `opts.no_judge`, neither judge is called and only the deterministic
 /// metrics are reported.
+///
+/// A failed judge call is captured on that trace's [`TraceRecord::errors`]
+/// and the run continues: one bad reply never aborts the batch. The caller
+/// decides the exit from [`EvalReport::all_judged_errored`].
 pub fn evaluate(
     fixtures: &[Fixture],
     calibration: &BTreeMap<String, AxisScores>,
@@ -234,6 +243,7 @@ pub fn evaluate(
     let mut tools_grounding: Vec<ToolsGroundingMetric> = Vec::new();
     let mut claim_support: BTreeMap<String, ClaimSupport> = BTreeMap::new();
     let mut flagged_claims: Vec<FlaggedClaim> = Vec::new();
+    let mut traces: Vec<TraceRecord> = Vec::with_capacity(fixtures.len());
 
     for fx in fixtures {
         if fx.distilled.meta.validation.fallback_reason.is_some() {
@@ -243,16 +253,16 @@ pub fn evaluate(
         // listicle-survival: applicability gate is the fixture's OWN expected
         // `declared_count` - present means "this is a listicle and must
         // survive", absent means N/A (excluded from the aggregate, not 0.0).
-        if fx
+        let listicle_score = fx
             .distilled
             .enumeration
             .as_ref()
             .and_then(|e| e.declared_count)
-            .is_some()
-        {
+            .map(|_| calc::listicle_survival(fx.distilled.enumeration.as_ref()));
+        if let Some(score) = listicle_score {
             listicle.push(report::ListicleMetric {
                 fixture: fx.id.clone(),
-                score: calc::listicle_survival(fx.distilled.enumeration.as_ref()),
+                score,
             });
         }
 
@@ -266,6 +276,12 @@ pub fn evaluate(
             within_ceiling: calc::note_size_within_ceiling(rendered_bytes),
         });
 
+        let mut metrics = TraceMetrics {
+            rendered_bytes,
+            within_ceiling: calc::note_size_within_ceiling(rendered_bytes),
+            listicle_survival: listicle_score,
+            ..TraceMetrics::default()
+        };
         let (grounded, quoted) = calc::quote_grounding(&fx.source, &fx.distilled);
         if quoted > 0 {
             grounding.push(GroundingMetric {
@@ -274,6 +290,7 @@ pub fn evaluate(
                 grounded,
                 quoted,
             });
+            metrics.quote_grounding = Some(report::QuoteGrounding { grounded, quoted });
         }
         let tool_counts = calc::tools_grounding(&fx.source, &fx.distilled);
         if !tool_counts.is_empty() {
@@ -282,23 +299,45 @@ pub fn evaluate(
                 kind: fx.kind.clone(),
                 counts: tool_counts,
             });
+            metrics.tools_grounding = Some(tool_counts);
         }
         let reasons = calc::placeholder_artifacts(&fx.distilled);
         if !reasons.is_empty() {
+            metrics.placeholder_artifacts = reasons.clone();
             artifacts.push(ArtifactMetric {
                 fixture: fx.id.clone(),
                 reasons,
             });
         }
 
+        // The judge sees the full note first, then as much source as the
+        // input budget leaves, so a long source can never push the note out.
+        let note = judge_note_text(&fx.distilled);
+        let budget = judge::source_budget(JUDGE_INPUT_MAX_CHARS, &fx.kind, &note);
+        let (source, truncated) = truncate_source(&fx.source, budget);
+        // The distill hash: covers exactly what the distillation judge sees.
+        let content_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, note));
+        let mut record = TraceRecord {
+            trace: fx.slug.clone(),
+            fixture: fx.id.clone(),
+            run_kind: RUN_KIND_BASELINE.to_string(),
+            run_id: String::new(),
+            rubric_version: cache::RUBRIC_VERSION.to_string(),
+            judge_model: opts.judge_model.clone(),
+            kind: fx.kind.clone(),
+            content_hash: content_hash.clone(),
+            source_truncated: truncated,
+            claims: ClaimRecord::from_distilled(&fx.distilled),
+            note_text: note,
+            source,
+            metrics,
+            errors: Vec::new(),
+        };
+
         if opts.no_judge {
+            traces.push(record);
             continue;
         }
-
-        let note = judge_note_text(&fx.distilled);
-        let (source, truncated) = truncate_source(&fx.source, JUDGE_SOURCE_MAX_CHARS);
-        // The content hash covers exactly what the judge sees.
-        let content_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, note));
 
         let key = cache::CacheKey {
             fixture_id: &fx.id,
@@ -306,25 +345,34 @@ pub fn evaluate(
             judge_model: &opts.judge_model,
         };
         let cached = if opts.rebuild_cache { None } else { cache.get(&key)? };
-        let cj = match cached {
-            Some(cj) => cj,
-            None => {
-                let scores = judge
-                    .judge(&fx.kind, &source, &note)
-                    .with_context(|| format!("judging fixture {}", fx.id))?
-                    .clamped();
-                let cj = cache::CachedJudgment { scores, truncated };
-                cache.put(&key, cj)?;
-                new_judgments += 1;
-                cj
-            }
+        let axis = match cached {
+            Some(cj) => Some(cj),
+            None => match judge.judge(&fx.kind, &record.source, &record.note_text) {
+                Ok(scores) => {
+                    let cj = cache::CachedJudgment {
+                        scores: scores.clamped(),
+                        truncated,
+                    };
+                    cache.put(&key, cj)?;
+                    new_judgments += 1;
+                    Some(cj)
+                }
+                Err(e) => {
+                    log::warn!("eval::evaluate: {CHECK_JUDGE_DISTILLATION} failed on {}: {e:#}", fx.id);
+                    record.errors.push(TraceError::new(CHECK_JUDGE_DISTILLATION, &e));
+                    None
+                }
+            },
         };
-        if cj.truncated {
-            truncated_judgments += 1;
+        if let Some(cj) = axis {
+            if cj.truncated {
+                truncated_judgments += 1;
+            }
+            record.metrics.judge_distillation = Some(cj.scores);
         }
 
         let claims: Vec<String> = fx.distilled.claims.iter().map(|c| c.text.trim().to_string()).collect();
-        let claims_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, source, claims.join("\n")));
+        let claims_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, record.source, claims.join("\n")));
         let claims_key = cache::CacheKey {
             fixture_id: &fx.id,
             content_hash: &claims_hash,
@@ -332,60 +380,62 @@ pub fn evaluate(
         };
         let cached_verdicts = if opts.rebuild_cache { None } else { cache.get_claims(&claims_key)? };
         let verdicts = match cached_verdicts {
-            Some(v) if v.len() == claims.len() => v,
-            _ => {
-                let v = claim_judge
-                    .judge_claims(&fx.kind, &source, &claims)
-                    .with_context(|| format!("judging claims of fixture {}", fx.id))?;
-                if v.len() != claims.len() {
-                    eyre::bail!(
-                        "claim judge returned {} verdicts for {} claims of fixture {}",
-                        v.len(),
-                        claims.len(),
-                        fx.id
-                    );
+            Some(v) if v.len() == claims.len() => Some(v),
+            _ => match judge_claims_checked(claim_judge, &fx.kind, &record.source, &claims) {
+                Ok(v) => {
+                    cache.put_claims(&claims_key, &v)?;
+                    new_claim_judgments += 1;
+                    Some(v)
                 }
-                cache.put_claims(&claims_key, &v)?;
-                new_claim_judgments += 1;
-                v
-            }
+                Err(e) => {
+                    log::warn!("eval::evaluate: {CHECK_JUDGE_CLAIMS} failed on {}: {e:#}", fx.id);
+                    record.errors.push(TraceError::new(CHECK_JUDGE_CLAIMS, &e));
+                    None
+                }
+            },
         };
-        let support = claim_support
-            .entry(fx.kind.clone())
-            .or_insert_with(|| ClaimSupport::empty(&fx.kind));
-        for (claim, verdict) in claims.iter().zip(&verdicts) {
-            support.add(*verdict);
-            if *verdict != ClaimVerdict::Supported {
-                flagged_claims.push(FlaggedClaim {
+        if let Some(verdicts) = &verdicts {
+            let support = claim_support
+                .entry(fx.kind.clone())
+                .or_insert_with(|| ClaimSupport::empty(&fx.kind));
+            for (claim, verdict) in claims.iter().zip(verdicts) {
+                support.add(*verdict);
+                if *verdict != ClaimVerdict::Supported {
+                    flagged_claims.push(FlaggedClaim {
+                        fixture: fx.id.clone(),
+                        verdict: *verdict,
+                        text: claim.clone(),
+                    });
+                }
+            }
+            record.metrics.judge_claims = Some(verdicts.clone());
+        }
+
+        if let Some(cj) = axis {
+            per_kind.entry(fx.kind.clone()).or_default().push(cj.scores);
+            all.push(cj.scores);
+
+            if opts.emit_calibration.is_some() {
+                sheet.push(CalibrationRow {
                     fixture: fx.id.clone(),
-                    verdict: *verdict,
-                    text: claim.clone(),
+                    kind: fx.kind.clone(),
+                    claim_coverage: cj.scores.claim_coverage,
+                    anchor_validity: cj.scores.anchor_validity,
+                    summary_faithfulness: cj.scores.summary_faithfulness,
+                    human_claim_coverage: None,
+                    human_anchor_validity: None,
+                    human_summary_faithfulness: None,
                 });
             }
+            if let Some(human) = calibration.get(&fx.id) {
+                // One (human, judge) pair per axis so the 0-3 calibration math reuses
+                // the oracle eval's boundary-precision/recall + kappa directly.
+                calib_pairs.push((human.claim_coverage, cj.scores.claim_coverage));
+                calib_pairs.push((human.anchor_validity, cj.scores.anchor_validity));
+                calib_pairs.push((human.summary_faithfulness, cj.scores.summary_faithfulness));
+            }
         }
-
-        per_kind.entry(fx.kind.clone()).or_default().push(cj.scores);
-        all.push(cj.scores);
-
-        if opts.emit_calibration.is_some() {
-            sheet.push(CalibrationRow {
-                fixture: fx.id.clone(),
-                kind: fx.kind.clone(),
-                claim_coverage: cj.scores.claim_coverage,
-                anchor_validity: cj.scores.anchor_validity,
-                summary_faithfulness: cj.scores.summary_faithfulness,
-                human_claim_coverage: None,
-                human_anchor_validity: None,
-                human_summary_faithfulness: None,
-            });
-        }
-        if let Some(human) = calibration.get(&fx.id) {
-            // One (human, judge) pair per axis so the 0-3 calibration math reuses
-            // the oracle eval's boundary-precision/recall + kappa directly.
-            calib_pairs.push((human.claim_coverage, cj.scores.claim_coverage));
-            calib_pairs.push((human.anchor_validity, cj.scores.anchor_validity));
-            calib_pairs.push((human.summary_faithfulness, cj.scores.summary_faithfulness));
-        }
+        traces.push(record);
     }
 
     if let Some(path) = &opts.emit_calibration {
@@ -431,6 +481,7 @@ pub fn evaluate(
         claim_support,
         claim_support_overall,
         flagged_claims,
+        traces,
     };
     log::debug!(
         "eval::evaluate: done fixtures={} new_judgments={} composite={:.4} listicle_aggregate={:?}",
@@ -440,6 +491,21 @@ pub fn evaluate(
         report.listicle_aggregate,
     );
     Ok(EvalOutcome::Report(Box::new(report)))
+}
+
+/// Run the claim judge and hold it to its contract: exactly one verdict per
+/// claim. A short or long reply is an error for this trace, never a guess.
+fn judge_claims_checked(
+    claim_judge: &dyn ClaimJudge,
+    kind: &str,
+    source: &str,
+    claims: &[String],
+) -> Result<Vec<ClaimVerdict>> {
+    let v = claim_judge.judge_claims(kind, source, claims)?;
+    if v.len() != claims.len() {
+        eyre::bail!("claim judge returned {} verdicts for {} claims", v.len(), claims.len());
+    }
+    Ok(v)
 }
 
 /// Truncate the source to `max_chars` on a char boundary (never a byte slice).

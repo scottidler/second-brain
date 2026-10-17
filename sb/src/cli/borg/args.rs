@@ -296,6 +296,24 @@ pub struct EvalArgs {
     /// to measure repo prompts before a deploy)
     #[arg(long, value_name = "DIR")]
     pub patterns_dir: Option<PathBuf>,
+    /// text (the report) or json (one JSON record per trace, one per line)
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value = "text",
+        conflicts_with_all = ["synth_intents", "regenerate", "emit_calibration"]
+    )]
+    pub format: EvalFormat,
+}
+
+/// `sb borg eval --format`: the human report, or the per-trace JSONL
+/// contract the `eval/` tools read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum EvalFormat {
+    Text,
+    Json,
 }
 
 impl From<&EvalArgs> for borg::eval::EvalOpts {
@@ -304,9 +322,9 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
             fixtures_dir: vault::paths::expand_tilde(&a.fixtures),
             calibration_path: vault::paths::expand_tilde(&a.calibration),
             judge_model: a.judge_model.clone(),
-            // The credential var comes from borg.yml, not a flag: the caller
-            // sets it from `config.fabric.api_key`.
-            api_key: String::new(),
+            // The credential vars come from borg.yml, not a flag: the caller
+            // sets them from `config.llm.api_keys`.
+            api_keys: vault::fabric::ApiKeys::default(),
             // Resolved (tilde-expanded, canonicalized, checked) by the caller
             // through `borg::eval::resolve_patterns_dir`, which can fail.
             patterns_dir: None,

@@ -1,4 +1,6 @@
-pub use vault::config::{Normalize, deserialize_humantime, load_config, resolve_secret, serialize_humantime};
+pub use vault::config::{
+    LlmConfig, Normalize, deserialize_humantime, load_config, resolve_secret, serialize_humantime,
+};
 pub use vault::daemon::{HotkeyConfig, client_auth_token};
 
 use eyre::Result;
@@ -1197,15 +1199,6 @@ pub struct GroqConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
-pub struct LlmConfig {
-    pub provider: String,
-    pub model: String,
-    #[serde(alias = "api_key_env", alias = "api_key")]
-    pub api_key: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "kebab-case")]
 pub struct TagsConfig {
     #[serde(deserialize_with = "vault::paths::deserialize_tilde_pathbuf")]
     pub canonical_path: PathBuf,
@@ -1310,16 +1303,6 @@ impl Default for GroqConfig {
         Self {
             api_key: "GROQ_API_KEY".to_string(),
             model: "whisper-large-v3".to_string(),
-        }
-    }
-}
-
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            provider: "claude".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
-            api_key: "ANTHROPIC_API_KEY".to_string(),
         }
     }
 }

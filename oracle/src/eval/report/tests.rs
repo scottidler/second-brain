@@ -32,6 +32,7 @@ fn sample_report(calibration: Option<CalibrationPanel>, inconclusive: bool) -> E
         lift_mrr: 0.03,
         truncated_judgments: 2,
         total_judgments: 120,
+        judge_errors: 1,
         ablation: AblationReport {
             queries_touching_fact: if inconclusive { 0 } else { 6 },
             total_queries: 10,

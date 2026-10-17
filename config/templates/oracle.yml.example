@@ -98,3 +98,13 @@ retrieval:
   exclude:
     stub: true            # drop low-content notes (cortex quality = low)
     min-body-chars: 0     # 0 = off; >0 drops notes with shorter bodies
+
+# Credentials for the `sb oracle eval` relevance judge (a fabric call). Each
+# vendor maps to the env var (or file) holding its key, exported under
+# fabric's own name (ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY) on the
+# fabric child only. Unset = fabric falls back to its own .env.
+# Vendors: anthropic, gemini, openai.
+# llm:
+#   api-keys:
+#     anthropic: ESCOTE_ANTHROPIC_API_KEY
+#     gemini: GEMINI_API_KEY

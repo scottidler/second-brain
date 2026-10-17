@@ -9,7 +9,10 @@
 #[cfg(test)]
 use std::collections::HashMap;
 
+use std::process::Command;
+
 use eyre::{Result, bail};
+use vault::fabric::ApiKeys;
 
 /// Maximum graded relevance score. `0` = irrelevant, `MAX_SCORE` = perfect.
 pub const MAX_SCORE: u8 = 3;
@@ -72,6 +75,9 @@ pub struct FabricJudge {
     pub binary: String,
     /// Model name; empty = fabric's default model.
     pub model: String,
+    /// Per-vendor credential vars (`oracle.yml` `llm.api-keys`), exported
+    /// under fabric's names on the child; empty leaves fabric on its own `.env`.
+    pub api_keys: ApiKeys,
     /// Fabric pattern name (resolved under `~/.config/sb/patterns/`).
     pub pattern: String,
     /// Truncation budget (chars) for the note text sent to the judge.
@@ -86,33 +92,30 @@ const DEFAULT_JUDGE_MAX_CHARS: usize = 8_000;
 const DEFAULT_JUDGE_TIMEOUT_SECS: u64 = 60;
 
 impl FabricJudge {
-    /// A judge using the `judge-relevance` pattern and the given model
-    /// (empty string = fabric's default model).
-    pub fn new(model: impl Into<String>) -> Self {
+    /// A judge using the `judge-relevance` pattern, the given model (empty
+    /// string = fabric's default model) and per-vendor credential vars.
+    pub fn new(model: impl Into<String>, api_keys: ApiKeys) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
+            api_keys,
             pattern: "judge-relevance".to_string(),
             max_chars: DEFAULT_JUDGE_MAX_CHARS,
             timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
         }
+    }
+
+    /// The exact fabric child this judge runs.
+    pub fn command(&self) -> Command {
+        vault::fabric::command(&self.binary, &self.pattern, &self.model, &self.api_keys, 0)
     }
 }
 
 impl RelevanceJudge for FabricJudge {
     fn judge(&self, query: &str, note_title: &str, note_text: &str) -> Result<u8> {
         let input = format!("# QUERY\n{query}\n\n# NOTE TITLE\n{note_title}\n\n# NOTE\n{note_text}\n");
-        // Eval-only path: no configured credential var is threaded here, so pass
-        // "" and let fabric fall back to its own .env (prior behavior).
-        let reply = vault::fabric::run_pattern(
-            &self.pattern,
-            &input,
-            &self.binary,
-            "",
-            &self.model,
-            self.max_chars,
-            self.timeout_secs,
-        )?;
+        let reply =
+            vault::fabric::run_command(self.command(), &self.pattern, &input, self.max_chars, self.timeout_secs)?;
         parse_score(&reply)
     }
 }

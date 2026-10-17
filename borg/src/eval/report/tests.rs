@@ -67,6 +67,7 @@ fn stub_report(
         claim_support: vec![],
         claim_support_overall: ClaimSupport::empty(crate::eval::OVERALL_LABEL),
         flagged_claims: vec![],
+        traces: vec![],
     }
 }
 

@@ -366,15 +366,7 @@ impl BorgCli {
                 Ok(())
             }
             Some(Command::Eval(a)) => {
-                let opts = borg::eval::EvalOpts {
-                    api_key: config.fabric.api_key.clone(),
-                    patterns_dir: a
-                        .patterns_dir
-                        .as_deref()
-                        .map(borg::eval::resolve_patterns_dir)
-                        .transpose()?,
-                    ..borg::eval::EvalOpts::from(&a)
-                };
+                let opts = eval_opts(&config, &a)?;
                 if a.synth_intents {
                     let writer = borg::eval::fabric_intent_writer(&opts)?;
                     let report = borg::eval::synth_intents(&opts.fixtures_dir, &writer)?;
@@ -402,12 +394,26 @@ impl BorgCli {
                         );
                     }
                     borg::eval::EvalOutcome::Report(report) => {
-                        let rendered = report.render();
+                        let rendered = match a.format {
+                            args::EvalFormat::Text => report.render(),
+                            args::EvalFormat::Json => render_eval_jsonl(&report)?,
+                        };
                         print!("{rendered}");
-                        if let Some(path) = a.report {
-                            std::fs::write(&path, &rendered)
+                        if let Some(path) = &a.report {
+                            std::fs::write(path, &rendered)
                                 .with_context(|| format!("writing report to {}", path.display()))?;
-                            println!("\nreport written to {}", path.display());
+                            match a.format {
+                                args::EvalFormat::Text => println!("\nreport written to {}", path.display()),
+                                // stderr: stdout stays pure JSONL.
+                                args::EvalFormat::Json => eprintln!("report written to {}", path.display()),
+                            }
+                        }
+                        if report.all_judged_errored() {
+                            eyre::bail!(
+                                "every judged trace errored ({} of {}); see the per-trace errors",
+                                report.errored_traces(),
+                                report.traces.len()
+                            );
                         }
                     }
                 }
@@ -480,4 +486,18 @@ impl BorgCli {
             },
         }
     }
+}
+
+/// The `sb borg eval` options for `a`: the CLI flags plus the eval's
+/// credential vars, which come from borg.yml's `llm.api-keys`, never a flag.
+fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::eval::EvalOpts> {
+    Ok(borg::eval::EvalOpts {
+        api_keys: config.llm.api_keys.clone(),
+        patterns_dir: a
+            .patterns_dir
+            .as_deref()
+            .map(borg::eval::resolve_patterns_dir)
+            .transpose()?,
+        ..borg::eval::EvalOpts::from(a)
+    })
 }

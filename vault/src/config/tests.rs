@@ -18,6 +18,41 @@ fn test_llm_config_default() {
 }
 
 #[test]
+fn llm_api_key_is_the_anthropic_entry_of_api_keys() {
+    let config: LlmConfig =
+        serde_yaml::from_str("api-key: ESCOTE_ANTHROPIC_API_KEY\napi-keys:\n  gemini: GEMINI_API_KEY\n")
+            .expect("parse llm");
+    assert_eq!(config.api_key, "ESCOTE_ANTHROPIC_API_KEY");
+    assert_eq!(config.api_keys.get(Vendor::Anthropic), Some("ESCOTE_ANTHROPIC_API_KEY"));
+    assert_eq!(config.api_keys.get(Vendor::Gemini), Some("GEMINI_API_KEY"));
+}
+
+#[test]
+fn llm_api_keys_anthropic_alone_sets_api_key() {
+    let config: LlmConfig =
+        serde_yaml::from_str("api-keys:\n  anthropic: ESCOTE_ANTHROPIC_API_KEY\n").expect("parse llm");
+    assert_eq!(config.api_key, "ESCOTE_ANTHROPIC_API_KEY");
+}
+
+#[test]
+fn llm_without_keys_defaults_anthropic_to_its_fabric_name() {
+    let config: LlmConfig = serde_yaml::from_str("model: x\n").expect("parse llm");
+    assert_eq!(config.api_key, "ANTHROPIC_API_KEY");
+    assert_eq!(
+        config.api_keys.iter().collect::<Vec<_>>(),
+        vec![(Vendor::Anthropic, "ANTHROPIC_API_KEY")]
+    );
+    assert_eq!(LlmConfig::default().api_keys, config.api_keys);
+}
+
+#[test]
+fn llm_api_key_and_a_different_anthropic_entry_is_a_load_error() {
+    let err = serde_yaml::from_str::<LlmConfig>("api-key: A_KEY\napi-keys:\n  anthropic: B_KEY\n")
+        .expect_err("conflicting anthropic vars must fail");
+    assert!(err.to_string().contains("name different vars"), "{err}");
+}
+
+#[test]
 fn test_resolve_secret_from_file() {
     let dir = std::env::temp_dir().join("vault-test-secret");
     fs::create_dir_all(&dir).expect("create dir");

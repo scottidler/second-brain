@@ -185,3 +185,54 @@ fn emit_calibration_writes_sheet_and_short_circuits() {
     assert!(written.contains("query_id: q2"));
     assert!(written.contains("human:"));
 }
+
+/// The production relevance judge carries
+/// `oracle.yml`'s `llm.api-keys` into the fabric child it runs.
+#[test]
+fn fabric_judge_exports_the_configured_key_map_on_its_fabric_child() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let anthropic = dir.path().join("anthropic");
+    let gemini = dir.path().join("gemini");
+    std::fs::write(&anthropic, "anthropic-from-config").expect("write");
+    std::fs::write(&gemini, "gemini-from-config").expect("write");
+    let yaml = format!(
+        "llm:\n  api-keys:\n    anthropic: {}\n    gemini: {}\n",
+        anthropic.display(),
+        gemini.display()
+    );
+    let config: Config = serde_yaml::from_str(&yaml).expect("parse oracle.yml");
+    let judge = fabric_judge(&config, &EvalOpts::default());
+    assert_eq!(judge.api_keys, config.llm.api_keys);
+    let cmd = judge.command();
+    let env = |name: &str| {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    };
+    assert_eq!(env("ANTHROPIC_API_KEY").as_deref(), Some("anthropic-from-config"));
+    assert_eq!(env("GEMINI_API_KEY").as_deref(), Some("gemini-from-config"));
+}
+
+/// A relevance judge that fails every call.
+struct BrokenJudge;
+
+impl RelevanceJudge for BrokenJudge {
+    fn judge(&self, _query: &str, _title: &str, _text: &str) -> Result<u8> {
+        eyre::bail!("fabric -p judge-relevance failed: no key")
+    }
+}
+
+#[test]
+fn judge_errors_are_counted_and_reported() {
+    let (queries, runs) = fixture();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let outcome = evaluate(&queries, &runs, &cache, &BrokenJudge, &EvalOpts::default()).expect("evaluate");
+    let report = unwrap_report(outcome);
+    assert_eq!(report.total_judgments, 0);
+    assert!(report.judge_errors > 0);
+    assert!(
+        report
+            .render()
+            .contains(&format!("{} judge errors", report.judge_errors))
+    );
+}

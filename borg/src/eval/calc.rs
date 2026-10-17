@@ -194,7 +194,7 @@ pub fn quote_grounding(source: &str, distilled: &Distilled) -> (usize, usize) {
 }
 
 /// Counts behind the `tools-grounding` metric for one note.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ToolsGrounding {
     pub names_grounded: usize,
     pub names: usize,

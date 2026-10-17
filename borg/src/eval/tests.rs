@@ -180,7 +180,7 @@ fn rebuild_cache_forces_fresh_judgments() {
 
 #[test]
 fn truncation_flag_set_for_oversized_source() {
-    let big = "x".repeat(JUDGE_SOURCE_MAX_CHARS + 10);
+    let big = "x".repeat(JUDGE_INPUT_MAX_CHARS + 10);
     let fixtures = vec![fixture("article", "big", &big, distilled("s", &[("c", None)], None))];
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let judge = MockJudge::new(scores(2, 2, 2));
@@ -530,4 +530,266 @@ fn committed_fixtures_report_prints_a_tools_grounding_line() {
     let fixtures = load(&dir).expect("load committed fixtures");
     let line = tools_grounding_line(&fixtures);
     assert!(line.contains("tools-grounding:"), "{line}");
+}
+
+/// A distillation judge that records the `(source, note)` it was handed.
+#[derive(Default)]
+struct RecordingJudge {
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl DistillationJudge for RecordingJudge {
+    fn judge(&self, _kind: &str, source: &str, note: &str) -> Result<AxisScores> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push((source.to_string(), note.to_string()));
+        Ok(scores(3, 3, 3))
+    }
+}
+
+/// A 30,000-char source still leaves the full note text
+/// in the judge input, after fabric's head truncation at the input budget.
+#[test]
+fn a_30k_source_leaves_the_full_note_in_the_judge_input() {
+    let source = "word ".repeat(6_000);
+    assert_eq!(source.chars().count(), 30_000);
+    let mut d = distilled("a long summary of the source", &[("first claim", Some("00:01"))], None);
+    d.claims[0].quote = Some("word word".to_string());
+    d.claims[0].who = Some("the author".to_string());
+    let fixtures = vec![fixture("video", "long", &source, d.clone())];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = RecordingJudge::default();
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &judge,
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+
+    let (seen_source, seen_note) = judge.seen.lock().expect("lock")[0].clone();
+    let note = judge_note_text(&d);
+    assert_eq!(seen_note, note);
+    // What fabric actually receives: the head of the input at the budget.
+    let input = judge::distillation_input("video", &seen_note, &seen_source);
+    let sent = vault::text::truncate(&input, JUDGE_INPUT_MAX_CHARS);
+    assert!(sent.contains(&note), "the full note must survive truncation");
+    assert!(sent.contains("quote: \"word word\""));
+    assert!(seen_source.chars().count() < source.chars().count());
+    assert_eq!(report.truncated_judgments, 1);
+    assert!(report.traces[0].source_truncated);
+}
+
+/// A distillation judge that fails on any note containing `needle`.
+struct FailingJudge {
+    needle: &'static str,
+}
+
+impl DistillationJudge for FailingJudge {
+    fn judge(&self, _kind: &str, _source: &str, note: &str) -> Result<AxisScores> {
+        if note.contains(self.needle) {
+            eyre::bail!("fabric -p judge-distillation failed: vendor 503");
+        }
+        Ok(scores(2, 2, 2))
+    }
+}
+
+#[test]
+fn a_judge_error_is_recorded_on_its_trace_and_the_run_continues() {
+    let fixtures = vec![
+        fixture("article", "bad", "src", distilled("bad summary", &[("c1", None)], None)),
+        fixture(
+            "article",
+            "good",
+            "src",
+            distilled("good summary", &[("c2", None)], None),
+        ),
+    ];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &FailingJudge { needle: "bad summary" },
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("one judge error must not abort the run"),
+    );
+    let bad = report.traces.iter().find(|t| t.trace == "bad").expect("bad trace");
+    assert_eq!(bad.errors.len(), 1);
+    assert_eq!(bad.errors[0].check, CHECK_JUDGE_DISTILLATION);
+    assert!(bad.errors[0].error.contains("vendor 503"));
+    assert_eq!(bad.metrics.judge_distillation, None);
+    // Its claims still got judged.
+    assert!(bad.metrics.judge_claims.is_some());
+    let good = report.traces.iter().find(|t| t.trace == "good").expect("good trace");
+    assert!(good.errors.is_empty());
+    assert_eq!(good.metrics.judge_distillation, Some(scores(2, 2, 2)));
+    assert_eq!(report.total_judgments, 1);
+    assert_eq!(report.errored_traces(), 1);
+    assert!(!report.all_judged_errored());
+    assert!(report.render().contains("judge errors: 1 of 2 traces"));
+}
+
+#[test]
+fn every_judged_trace_erroring_is_the_one_failing_run() {
+    let fixtures = two_kinds();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &FailingJudge { needle: "summary" },
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(report.errored_traces(), 2);
+    assert!(report.all_judged_errored());
+}
+
+#[test]
+fn a_no_judge_run_never_counts_as_all_errored() {
+    let opts = EvalOpts {
+        no_judge: true,
+        ..Default::default()
+    };
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(
+        evaluate(
+            &two_kinds(),
+            &BTreeMap::new(),
+            &cache,
+            &FailingJudge { needle: "summary" },
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &opts,
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(report.errored_traces(), 0);
+    assert!(!report.all_judged_errored());
+}
+
+/// A claim judge that returns one verdict too few.
+struct ShortClaimJudge;
+
+impl ClaimJudge for ShortClaimJudge {
+    fn judge_claims(&self, _kind: &str, _source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        Ok(vec![ClaimVerdict::Supported; claims.len().saturating_sub(1)])
+    }
+}
+
+#[test]
+fn a_short_claim_verdict_list_is_an_error_row_not_an_abort() {
+    let fixtures = vec![fixture(
+        "article",
+        "two-claims",
+        "src",
+        distilled("s", &[("c1", None), ("c2", None)], None),
+    )];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 3, 3)),
+            &ShortClaimJudge,
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+    let t = &report.traces[0];
+    assert_eq!(t.errors.len(), 1);
+    assert_eq!(t.errors[0].check, CHECK_JUDGE_CLAIMS);
+    assert!(
+        t.errors[0].error.contains("1 verdicts for 2 claims"),
+        "{}",
+        t.errors[0].error
+    );
+    assert_eq!(t.metrics.judge_claims, None);
+    assert!(t.metrics.judge_distillation.is_some());
+}
+
+#[test]
+fn a_trace_record_serializes_to_the_jsonl_contract() {
+    let mut d = distilled("s", &[("c1", Some("00:01"))], None);
+    d.claims[0].quote = Some("verbatim".to_string());
+    let fixtures = vec![fixture("video", "cl-abc", "a source with verbatim words", d)];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 2, 1)),
+            &MockClaimJudge::new(ClaimVerdict::Contradicted),
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+    let json: serde_json::Value = serde_json::to_value(&report.traces[0]).expect("serialize");
+    for key in [
+        "trace",
+        "run_kind",
+        "run_id",
+        "rubric_version",
+        "kind",
+        "content_hash",
+        "source",
+        "source_truncated",
+        "note_text",
+        "claims",
+        "metrics",
+        "errors",
+    ] {
+        assert!(json.get(key).is_some(), "missing {key}: {json}");
+    }
+    assert_eq!(json["trace"], "cl-abc");
+    assert_eq!(json["run_kind"], "baseline");
+    assert_eq!(json["run_id"], "");
+    assert_eq!(json["rubric_version"], cache::RUBRIC_VERSION);
+    assert_eq!(json["claims"][0]["id"], 1);
+    assert_eq!(json["claims"][0]["quote"], "verbatim");
+    assert!(json["claims"][0].get("who").is_none(), "absent who is omitted: {json}");
+    assert_eq!(json["metrics"]["judge_distillation"]["claim_coverage"], 3);
+    assert_eq!(json["metrics"]["judge_claims"][0], "contradicted");
+    assert_eq!(json["metrics"]["quote_grounding"]["grounded"], 1);
+    // The distill hash covers exactly the judged source and note.
+    let t = &report.traces[0];
+    let expected = cache::stable_hash(&format!("{}\n{}\n{}", t.kind, t.source, t.note_text));
+    assert_eq!(t.content_hash, expected);
+}
+
+#[test]
+fn a_no_judge_run_still_emits_one_record_per_fixture() {
+    let opts = EvalOpts {
+        no_judge: true,
+        ..Default::default()
+    };
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let fixtures = two_kinds();
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 3, 3)),
+            &MockClaimJudge::new(ClaimVerdict::Supported),
+            &opts,
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(report.traces.len(), fixtures.len());
+    assert!(report.traces.iter().all(|t| t.metrics.judge_distillation.is_none()));
+    assert!(report.traces.iter().all(|t| !t.content_hash.is_empty()));
 }

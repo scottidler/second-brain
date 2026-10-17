@@ -158,10 +158,16 @@ pub fn run(config: &Config, opts: &EvalOpts) -> Result<EvalOutcome> {
         .with_context(|| format!("opening search index at {}", config.db_path().display()))?;
     let server = OracleMcpServer::new(config.clone(), db);
     let cache = cache::JudgmentCache::open(&eval_cache_path(config))?;
-    let judge = FabricJudge::new(opts.judge_model.clone());
+    let judge = fabric_judge(config, opts);
 
     let runs = retrieve(&server, &queries, opts)?;
     evaluate(&queries, &runs, &cache, &judge, opts)
+}
+
+/// The production relevance judge: `opts`' model and `config`'s
+/// `llm.api-keys`.
+pub fn fabric_judge(config: &Config, opts: &EvalOpts) -> FabricJudge {
+    FabricJudge::new(opts.judge_model.clone(), config.llm.api_keys.clone())
 }
 
 /// For each query, run every mode + the fact ablation and collect the
@@ -265,6 +271,7 @@ pub fn evaluate(
         labels.iter().map(|l| (l.clone(), Vec::new())).collect();
     let mut fact_touched = 0usize;
     let mut total_judgments = 0usize;
+    let mut judge_errors = 0usize;
     let mut truncated_judgments = 0usize;
     let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
     let mut sheet: Vec<CalibrationRow> = Vec::new();
@@ -299,7 +306,8 @@ pub fn evaluate(
                         cj
                     }
                     Err(e) => {
-                        tracing::warn!(query = %q.id, note = %path, "judge failed, skipping pair: {e}");
+                        tracing::warn!(query = %q.id, note = %path, "judge failed, skipping pair: {e:#}");
+                        judge_errors += 1;
                         continue;
                     }
                 },
@@ -378,6 +386,7 @@ pub fn evaluate(
         lift_mrr: gh.mrr - hy.mrr,
         truncated_judgments,
         total_judgments,
+        judge_errors,
         ablation: AblationReport {
             queries_touching_fact: fact_touched,
             total_queries: queries.queries.len(),

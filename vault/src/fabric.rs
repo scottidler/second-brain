@@ -3,6 +3,10 @@ use eyre::Result;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod keys;
+
+pub use keys::{ApiKeys, Vendor};
+
 /// Bound on the local probes (`which`, `fabric --version`): neither does
 /// network work, so a probe still running after this is wedged.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,25 +55,27 @@ pub fn resolve_pattern(name: &str) -> String {
     name.to_string()
 }
 
-/// Build the `fabric -p <pattern>` child `Command`, setting `ANTHROPIC_API_KEY` on the CHILD's environment ONLY.
+/// Build the `fabric -p <pattern>` child `Command`, exporting each mapped
+/// vendor credential on the CHILD's environment ONLY.
 ///
-/// `api_key_env` is the NAME of the configured credential var (e.g.
+/// `keys` maps each vendor to the NAME of the configured credential var (e.g.
 /// `ESCOTE_ANTHROPIC_API_KEY`) or a file path, resolved via
 /// [`crate::config::resolve_secret`]. Fabric (the third-party Go binary) reads
-/// the credential exclusively from the env var named literally
-/// `ANTHROPIC_API_KEY`, so when the workspace credential is stored under a
-/// persona-scoped name we translate it to fabric's required name here, on this
-/// one child process. The value is NEVER set in the parent/global env and NEVER
-/// written to a file at rest.
+/// each credential exclusively from a fixed env var
+/// ([`Vendor::fabric_env`]: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+/// `OPENAI_API_KEY`), so a key stored under a persona-scoped name is
+/// translated to fabric's required name here, on this one child process. The
+/// value is NEVER set in the parent/global env and NEVER written to a file at
+/// rest.
 ///
-/// When `api_key_env` is empty, or resolution fails, `ANTHROPIC_API_KEY` is left
-/// unset on the child and fabric falls back to its own `.env` (preserving prior
-/// behavior). A resolution failure is `warn!`-logged (the var NAME, never the
-/// value).
+/// A vendor with no entry, or whose entry fails to resolve, leaves fabric's
+/// var untouched on the child, so fabric falls back to its own `.env`. A
+/// resolution failure is `warn!`-logged (the var NAME, never the value).
 ///
-/// Factored out so it is unit-testable via `Command::get_envs()` without
+/// Public so a caller can build the exact command it runs (see
+/// [`run_command`]) and a test can read it via `Command::get_envs()` without
 /// spawning fabric.
-fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &str, max_tokens: usize) -> Command {
+pub fn command(binary: &str, pattern: &str, model: &str, keys: &ApiKeys, max_tokens: usize) -> Command {
     let mut cmd = Command::new(resolve_binary(binary));
     cmd.args(["-p", &resolve_pattern(pattern)]);
     if !model.is_empty() {
@@ -88,14 +94,18 @@ fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &
     if max_tokens > 0 {
         cmd.arg(format!("--maxTokens={max_tokens}"));
     }
-    if !api_key_env.is_empty() {
-        match crate::config::resolve_secret(api_key_env) {
+    for (vendor, var) in keys.iter() {
+        if var.is_empty() {
+            continue;
+        }
+        let fabric_env = vendor.fabric_env();
+        match crate::config::resolve_secret(var) {
             Ok(value) => {
-                cmd.env("ANTHROPIC_API_KEY", value);
+                cmd.env(fabric_env, value);
             }
             Err(e) => log::warn!(
-                "build_fabric_command: could not resolve api-key var '{api_key_env}': {e}; \
-                 leaving ANTHROPIC_API_KEY unset (fabric will fall back to its own .env)"
+                "fabric::command: could not resolve api-key var '{var}' for {vendor:?}: {e}; \
+                 leaving {fabric_env} unset (fabric will fall back to its own .env)"
             ),
         }
     }
@@ -108,8 +118,10 @@ fn build_fabric_command(binary: &str, pattern: &str, model: &str, api_key_env: &
 ///
 /// `api_key_env` names the configured credential var (or file) that carries the
 /// Anthropic key; it is translated to fabric's required `ANTHROPIC_API_KEY` on
-/// the child process only (see [`build_fabric_command`]). Pass `""` to leave the
-/// child's `ANTHROPIC_API_KEY` untouched (fabric uses its own `.env`).
+/// the child process only (see [`command`]). Pass `""` to leave the child's
+/// `ANTHROPIC_API_KEY` untouched (fabric uses its own `.env`). A caller with
+/// keys for more than one vendor builds its own [`command`] and calls
+/// [`run_command`].
 pub fn run_pattern(
     pattern: &str,
     input: &str,
@@ -143,7 +155,19 @@ pub fn run_pattern_with_max_tokens(
         "fabric::run_pattern: pattern={pattern} binary={binary} api_key_env={api_key_env} model={model} max_chars={max_chars} timeout_secs={timeout_secs} max_tokens={max_tokens} input_len={}",
         input.len()
     );
-    let cmd = build_fabric_command(binary, pattern, model, api_key_env, max_tokens);
+    let cmd = command(binary, pattern, model, &ApiKeys::anthropic(api_key_env), max_tokens);
+    run_command(cmd, pattern, input, max_chars, timeout_secs)
+}
+
+/// Run a prebuilt [`command`] with `input` on stdin (head-truncated to
+/// `max_chars` chars; 0 = no limit) and a wall-clock timeout. `pattern` only
+/// labels errors. Returns trimmed stdout, a [`FabricError::Timeout`], or a
+/// [`FabricError::Failed`] carrying stderr.
+pub fn run_command(cmd: Command, pattern: &str, input: &str, max_chars: usize, timeout_secs: u64) -> Result<String> {
+    log::debug!(
+        "fabric::run_command: pattern={pattern} max_chars={max_chars} timeout_secs={timeout_secs} input_len={}",
+        input.len()
+    );
     let input_bytes = truncate_input(input, max_chars).into_bytes();
     let label = format!("fabric -p {pattern}");
     match process::run(cmd, Some(input_bytes), Duration::from_secs(timeout_secs), &label)? {

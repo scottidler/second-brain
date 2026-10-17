@@ -42,7 +42,16 @@ groq:
 llm:
   provider: claude
   model: claude-sonnet-4-6
+  # Env var (or file) holding the Anthropic key. Also the `anthropic` entry
+  # of api-keys below; naming a different var there is a load error.
   api-key: ANTHROPIC_API_KEY
+  # Per-vendor key vars for `sb borg eval`'s fabric judges. Each value is
+  # exported under fabric's own name (ANTHROPIC_API_KEY, GEMINI_API_KEY,
+  # OPENAI_API_KEY) on the fabric child only, so `--judge-model gemini-...`
+  # needs no key in fabric's .env. Vendors: anthropic, gemini, openai.
+  # api-keys:
+  #   gemini: GEMINI_API_KEY
+  #   openai: OPENAI_API_KEY
 
 # Telegram bot — primary ingestion input.
 # allowed-chat-ids gates which chats borg listens to.

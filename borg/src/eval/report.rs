@@ -2,6 +2,8 @@
 //! summary (total / new / truncated / fallback), and the judge calibration
 //! panel — plus a plain-text renderer for `sb` to print.
 
+use serde::Serialize;
+
 use crate::config::MAX_NOTE_BYTES;
 use crate::eval::calc;
 use crate::eval::judge::{AxisScores, ClaimVerdict, HIT_THRESHOLD};
@@ -192,6 +194,106 @@ pub struct FlaggedClaim {
     pub text: String,
 }
 
+/// Quote grounding counts for one trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct QuoteGrounding {
+    pub grounded: usize,
+    pub quoted: usize,
+}
+
+/// Every metric computed for one trace. `None` means not applicable (no
+/// declared listicle, no quote, no tool) or not judged (`--no-judge`, or the
+/// judge call errored: see [`TraceRecord::errors`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TraceMetrics {
+    pub rendered_bytes: usize,
+    pub within_ceiling: bool,
+    pub listicle_survival: Option<f64>,
+    pub quote_grounding: Option<QuoteGrounding>,
+    pub tools_grounding: Option<calc::ToolsGrounding>,
+    pub placeholder_artifacts: Vec<String>,
+    pub judge_distillation: Option<AxisScores>,
+    /// One verdict per claim, in `claims` order.
+    pub judge_claims: Option<Vec<ClaimVerdict>>,
+}
+
+/// One claim as the JSONL contract carries it. `id` is the 1-based number
+/// the claim judge sees.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClaimRecord {
+    pub id: usize,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub who: Option<String>,
+}
+
+impl ClaimRecord {
+    /// Every claim of `distilled`, numbered from 1; blank quote/who dropped.
+    pub fn from_distilled(distilled: &vault::distilled::Distilled) -> Vec<Self> {
+        let present = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+        distilled
+            .claims
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Self {
+                id: i + 1,
+                text: c.text.trim().to_string(),
+                quote: present(&c.quote),
+                who: present(&c.who),
+            })
+            .collect()
+    }
+}
+
+/// A judge call that failed on one trace. Recorded and reported; the run
+/// goes on to the next trace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TraceError {
+    /// The check that failed (`judge-distillation`, `judge-claims`).
+    pub check: String,
+    pub error: String,
+}
+
+impl TraceError {
+    pub fn new(check: &str, error: &eyre::Report) -> Self {
+        Self {
+            check: check.to_string(),
+            error: format!("{error:#}"),
+        }
+    }
+}
+
+/// One trace's full eval result: the `sb borg eval --format json` record
+/// (one JSON object per line). `source` and `note_text` are exactly what the
+/// distillation judge sees, and `content_hash` is the distill hash over them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TraceRecord {
+    /// The staged trace id (the fixture slug for a golden fixture).
+    pub trace: String,
+    /// `<kind>/<trace>`, the judgment cache's fixture id.
+    pub fixture: String,
+    pub run_kind: String,
+    pub run_id: String,
+    pub rubric_version: String,
+    pub judge_model: String,
+    pub kind: String,
+    pub content_hash: String,
+    pub source: String,
+    pub source_truncated: bool,
+    pub note_text: String,
+    pub claims: Vec<ClaimRecord>,
+    pub metrics: TraceMetrics,
+    /// Judge calls that failed on this trace; empty on success.
+    pub errors: Vec<TraceError>,
+}
+
 /// Rows of a per-fixture listing shown before "... N more".
 const LIST_LIMIT: usize = 15;
 /// Chars of a flagged claim's text shown in the report.
@@ -237,9 +339,22 @@ pub struct EvalReport {
     pub claim_support_overall: ClaimSupport,
     /// Every claim judged unsupported or contradicted.
     pub flagged_claims: Vec<FlaggedClaim>,
+    /// One record per fixture, in fixture order.
+    pub traces: Vec<TraceRecord>,
 }
 
 impl EvalReport {
+    /// Traces where at least one judge call failed.
+    pub fn errored_traces(&self) -> usize {
+        self.traces.iter().filter(|t| !t.errors.is_empty()).count()
+    }
+
+    /// True when the judges ran and every judged trace carries an error: the
+    /// one case a run exits non-zero. A partly failing run still succeeds.
+    pub fn all_judged_errored(&self) -> bool {
+        self.judged && !self.traces.is_empty() && self.errored_traces() == self.traces.len()
+    }
+
     /// Plain-text report.
     pub fn render(&self) -> String {
         let mut o = String::new();
@@ -300,6 +415,21 @@ impl EvalReport {
             self.truncated_judgments,
             self.fallback_fixtures,
         ));
+
+        let errored = self.errored_traces();
+        o.push_str(&format!(
+            "judge errors: {errored} of {} traces (recorded per trace; the run continued)\n",
+            self.traces.len()
+        ));
+        for t in self.traces.iter().filter(|t| !t.errors.is_empty()).take(LIST_LIMIT) {
+            for e in &t.errors {
+                let preview: String = e.error.chars().take(CLAIM_PREVIEW_CHARS).collect();
+                o.push_str(&format!("    ERROR {} {}: {preview}\n", t.fixture, e.check));
+            }
+        }
+        if errored > LIST_LIMIT {
+            o.push_str(&format!("    ... {} more errored traces\n", errored - LIST_LIMIT));
+        }
 
         o.push_str("\nclaim support (per-claim verdicts from judge-claims):\n");
         o.push_str(&format!(

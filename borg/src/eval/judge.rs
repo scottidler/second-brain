@@ -12,8 +12,11 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use std::process::Command;
+
 use eyre::{Result, bail};
 use regex::Regex;
+use vault::fabric::ApiKeys;
 
 /// Maximum per-axis score. `0` = worst, `MAX_SCORE` = perfect.
 pub const MAX_SCORE: u8 = 3;
@@ -22,7 +25,7 @@ pub const MAX_SCORE: u8 = 3;
 pub const HIT_THRESHOLD: u8 = 2;
 
 /// The three rubric axes, each on the `0..=MAX_SCORE` scale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AxisScores {
     /// Fraction of the source's key claims the note represents.
     pub claim_coverage: u8,
@@ -97,22 +100,38 @@ impl DistillationJudge for MockJudge {
     }
 }
 
-/// Default char budget for the source text sent to the judge.
-const DEFAULT_JUDGE_MAX_CHARS: usize = 24_000;
+/// Char budget for the whole judge input. `vault::fabric` keeps the head of
+/// the input at this many chars, so the eval budgets the source to what the
+/// note leaves ([`source_budget`]) and nothing past it is ever clipped.
+pub const JUDGE_INPUT_MAX_CHARS: usize = 24_000;
 /// Default per-call fabric timeout for the judge.
 const DEFAULT_JUDGE_TIMEOUT_SECS: u64 = 90;
 
+/// The `judge-distillation` input: kind, then the note, then the source.
+/// The note goes before the source so fabric's head truncation can only ever
+/// clip the source tail, never the note being judged.
+pub fn distillation_input(kind: &str, note: &str, source: &str) -> String {
+    format!("# KIND\n{kind}\n\n# DISTILLED NOTE\n{note}\n\n# SOURCE\n{source}\n")
+}
+
+/// Chars of source that fit in a `max_chars` judge input after the framing
+/// and the full note: `max_chars - chars(distillation_input(kind, note, ""))`.
+/// 0 when the note alone fills the budget.
+pub fn source_budget(max_chars: usize, kind: &str, note: &str) -> usize {
+    max_chars.saturating_sub(distillation_input(kind, note, "").chars().count())
+}
+
 /// Production judge: runs the `judge-distillation` Fabric pattern over the
-/// `(kind, source, note)` text and parses three axis scores from the YAML reply.
+/// `(kind, note, source)` text and parses three axis scores from the YAML reply.
 #[derive(Debug, Clone)]
 pub struct FabricJudge {
     /// Fabric binary name (resolved on `PATH`).
     pub binary: String,
     /// Model name; empty = fabric's default model.
     pub model: String,
-    /// Name of the env var (or file) holding the Anthropic credential; empty
-    /// leaves fabric on its own `.env`.
-    pub api_key: String,
+    /// Per-vendor credential vars (`llm.api-keys`), exported under fabric's
+    /// names on the child; empty leaves fabric on its own `.env`.
+    pub api_keys: ApiKeys,
     /// Fabric pattern name (resolved under `~/.config/sb/patterns/`).
     pub pattern: String,
     /// Truncation budget (chars) for the text sent to the judge.
@@ -123,17 +142,21 @@ pub struct FabricJudge {
 
 impl FabricJudge {
     /// A judge using the `judge-distillation` pattern, the given model (empty
-    /// string = fabric's default model) and credential var name (empty =
-    /// fabric's own `.env`).
-    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+    /// string = fabric's default model) and per-vendor credential vars.
+    pub fn new(model: impl Into<String>, api_keys: ApiKeys) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
-            api_key: api_key.into(),
+            api_keys,
             pattern: "judge-distillation".to_string(),
-            max_chars: DEFAULT_JUDGE_MAX_CHARS,
+            max_chars: JUDGE_INPUT_MAX_CHARS,
             timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
         }
+    }
+
+    /// The exact fabric child this judge runs.
+    pub fn command(&self) -> Command {
+        vault::fabric::command(&self.binary, &self.pattern, &self.model, &self.api_keys, 0)
     }
 }
 
@@ -147,16 +170,9 @@ impl DistillationJudge for FabricJudge {
             source.len(),
             note.len()
         );
-        let input = format!("# KIND\n{kind}\n\n# SOURCE\n{source}\n\n# DISTILLED NOTE\n{note}\n");
-        let reply = vault::fabric::run_pattern(
-            &self.pattern,
-            &input,
-            &self.binary,
-            &self.api_key,
-            &self.model,
-            self.max_chars,
-            self.timeout_secs,
-        )?;
+        let input = distillation_input(kind, note, source);
+        let reply =
+            vault::fabric::run_command(self.command(), &self.pattern, &input, self.max_chars, self.timeout_secs)?;
         parse_axis_scores(&reply)
     }
 }
@@ -201,7 +217,8 @@ fn extract_axis(reply: &str, axis: &str) -> Result<u8> {
 /// Per-claim verdict from the claim judge: is this one claim backed by the
 /// source? Finer-grained than the 0-3 `summary-faithfulness` axis, which never
 /// looks at claim truth at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ClaimVerdict {
     /// The source states or directly implies the claim.
     Supported,
@@ -292,24 +309,29 @@ impl ClaimJudge for MockClaimJudge {
 pub struct FabricClaimJudge {
     pub binary: String,
     pub model: String,
-    /// Name of the env var (or file) holding the Anthropic credential; empty
-    /// leaves fabric on its own `.env`.
-    pub api_key: String,
+    /// Per-vendor credential vars (`llm.api-keys`), exported under fabric's
+    /// names on the child; empty leaves fabric on its own `.env`.
+    pub api_keys: ApiKeys,
     pub pattern: String,
     pub max_chars: usize,
     pub timeout_secs: u64,
 }
 
 impl FabricClaimJudge {
-    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn new(model: impl Into<String>, api_keys: ApiKeys) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
-            api_key: api_key.into(),
+            api_keys,
             pattern: "judge-claims".to_string(),
-            max_chars: DEFAULT_JUDGE_MAX_CHARS,
+            max_chars: JUDGE_INPUT_MAX_CHARS,
             timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
         }
+    }
+
+    /// The exact fabric child this judge runs.
+    pub fn command(&self) -> Command {
+        vault::fabric::command(&self.binary, &self.pattern, &self.model, &self.api_keys, 0)
     }
 }
 
@@ -334,15 +356,8 @@ impl ClaimJudge for FabricClaimJudge {
         // fabric keeps the head of the input at max_chars, so the source goes
         // last: truncation clips the source tail, never the claim list.
         let input = format!("# KIND\n{kind}\n\n# CLAIMS\n{numbered}\n# SOURCE\n{source}\n");
-        let reply = vault::fabric::run_pattern(
-            &self.pattern,
-            &input,
-            &self.binary,
-            &self.api_key,
-            &self.model,
-            self.max_chars,
-            self.timeout_secs,
-        )?;
+        let reply =
+            vault::fabric::run_command(self.command(), &self.pattern, &input, self.max_chars, self.timeout_secs)?;
         parse_claim_verdicts(&reply, claims.len())
     }
 }

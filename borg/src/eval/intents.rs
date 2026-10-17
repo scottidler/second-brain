@@ -40,20 +40,20 @@ pub struct FabricIntentWriter {
     pub binary: String,
     pub model: String,
     pub pattern: String,
-    /// Name of the env var (or file) holding the Anthropic credential; empty
-    /// leaves fabric on its own `.env`.
-    pub api_key: String,
+    /// Per-vendor credential vars (`llm.api-keys`), exported under fabric's
+    /// names on the child; empty leaves fabric on its own `.env`.
+    pub api_keys: vault::fabric::ApiKeys,
     pub max_chars: usize,
     pub timeout_secs: u64,
 }
 
 impl FabricIntentWriter {
-    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn new(model: impl Into<String>, api_keys: vault::fabric::ApiKeys) -> Self {
         Self {
             binary: "fabric".to_string(),
             model: model.into(),
             pattern: "synth-capture-intent".to_string(),
-            api_key: api_key.into(),
+            api_keys,
             max_chars: DEFAULT_INTENT_MAX_CHARS,
             timeout_secs: DEFAULT_INTENT_TIMEOUT_SECS,
         }
@@ -70,15 +70,8 @@ impl IntentWriter for FabricIntentWriter {
             source.len()
         );
         let input = format!("# KIND\n{kind}\n\n# SOURCE\n{source}\n");
-        let reply = vault::fabric::run_pattern(
-            &self.pattern,
-            &input,
-            &self.binary,
-            &self.api_key,
-            &self.model,
-            self.max_chars,
-            self.timeout_secs,
-        )?;
+        let cmd = vault::fabric::command(&self.binary, &self.pattern, &self.model, &self.api_keys, 0);
+        let reply = vault::fabric::run_command(cmd, &self.pattern, &input, self.max_chars, self.timeout_secs)?;
         clean_intent(&reply)
     }
 }

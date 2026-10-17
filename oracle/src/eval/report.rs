@@ -50,6 +50,8 @@ pub struct EvalReport {
     pub lift_mrr: f64,
     pub truncated_judgments: usize,
     pub total_judgments: usize,
+    /// Pairs whose judge call failed: skipped, never scored.
+    pub judge_errors: usize,
     pub ablation: AblationReport,
     pub calibration: Option<CalibrationPanel>,
 }
@@ -96,8 +98,8 @@ impl EvalReport {
         }
 
         o.push_str(&format!(
-            "\njudgments: {} total, {} from truncated bodies (low-confidence)\n",
-            self.total_judgments, self.truncated_judgments,
+            "\njudgments: {} total, {} from truncated bodies (low-confidence), {} judge errors (pairs skipped)\n",
+            self.total_judgments, self.truncated_judgments, self.judge_errors,
         ));
 
         match &self.calibration {

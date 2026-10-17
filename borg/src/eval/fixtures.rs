@@ -265,10 +265,10 @@ fn read_sorted(dir: &Path) -> Result<Vec<std::fs::DirEntry>> {
 }
 
 /// Render the distilled artifact into the plain-text "note" the judge scores:
-/// the summary, each claim (text + trailing `[anchor]` when present), then the
-/// tools the note renders (`distillers::tools_to_render`: name, URL, command).
-/// This is the same shape the judge would see in a published note's body, minus
-/// vault-specific decoration.
+/// the summary, each claim (text + trailing `[anchor]` when present, then its
+/// `who:` and `quote:` lines when present), then the tools the note renders
+/// (`distillers::tools_to_render`: name, URL, command). This is the same
+/// content a published note's body carries, minus vault-specific decoration.
 pub fn judge_note_text(distilled: &Distilled) -> String {
     let mut out = String::new();
     out.push_str("SUMMARY:\n");
@@ -284,6 +284,12 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
             }
         }
         out.push('\n');
+        if let Some(who) = claim.who.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+            out.push_str(&format!("  who: {who}\n"));
+        }
+        if let Some(quote) = claim.quote.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+            out.push_str(&format!("  quote: \"{quote}\"\n"));
+        }
     }
     let tools = distillers::tools_to_render(distilled);
     if !tools.is_empty() {

@@ -32,7 +32,7 @@ fn fabric_error_timeout_is_downcastable_through_eyre() {
 
 #[test]
 #[serial(process)]
-fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
+fn command_sets_anthropic_key_from_named_env_var() {
     // Hold ENV_LOCK for the whole env-mutation window so no parallel test
     // observes our var override.
     let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -41,7 +41,7 @@ fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
     // SAFETY: env mutation is intentional for testing child-env wiring.
     unsafe { std::env::set_var(var, "sekret-value-123") };
 
-    let cmd = build_fabric_command("fabric", "summarize", "", var, 0);
+    let cmd = command("fabric", "summarize", "", &ApiKeys::anthropic(var), 0);
     let entry = cmd
         .get_envs()
         .find(|(k, _)| *k == std::ffi::OsStr::new("ANTHROPIC_API_KEY"));
@@ -59,11 +59,11 @@ fn build_fabric_command_sets_anthropic_key_from_named_env_var() {
 
 #[test]
 #[serial(process)]
-fn build_fabric_command_leaves_anthropic_key_unset_when_env_name_empty() {
+fn command_leaves_anthropic_key_unset_when_env_name_empty() {
     // No api_key_env => the child must carry no explicit ANTHROPIC_API_KEY
     // override (fabric falls back to its own .env). get_envs() reports only
     // explicitly-set child overrides, so an empty result is the assertion.
-    let cmd = build_fabric_command("fabric", "summarize", "", "", 0);
+    let cmd = command("fabric", "summarize", "", &ApiKeys::default(), 0);
     let has_key = cmd
         .get_envs()
         .any(|(k, _)| k == std::ffi::OsStr::new("ANTHROPIC_API_KEY"));
@@ -71,6 +71,68 @@ fn build_fabric_command_leaves_anthropic_key_unset_when_env_name_empty() {
         !has_key,
         "empty api_key_env must not set ANTHROPIC_API_KEY on the child"
     );
+}
+
+/// The child-side value of `name`, if `cmd` sets it explicitly.
+fn child_env(cmd: &Command, name: &str) -> Option<String> {
+    cmd.get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+}
+
+/// With `llm.api-keys`
+/// naming a var per vendor, the fabric child carries each vendor's fabric
+/// env var set from it.
+#[test]
+#[serial(process)]
+fn command_exports_every_mapped_vendor_key_under_fabrics_name() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let vars = [
+        ("VAULT_FABRIC_TEST_ANTHROPIC_7f3a", "anthropic-value"),
+        ("VAULT_FABRIC_TEST_GEMINI_7f3a", "gemini-value"),
+        ("VAULT_FABRIC_TEST_OPENAI_7f3a", "openai-value"),
+    ];
+    // SAFETY: env mutation is intentional for testing child-env wiring; the
+    // names are unique to this test and removed below.
+    for (var, value) in vars {
+        unsafe { std::env::set_var(var, value) };
+    }
+    let keys: ApiKeys = serde_yaml::from_str(
+        "anthropic: VAULT_FABRIC_TEST_ANTHROPIC_7f3a\n\
+         gemini: VAULT_FABRIC_TEST_GEMINI_7f3a\n\
+         openai: VAULT_FABRIC_TEST_OPENAI_7f3a\n",
+    )
+    .expect("parse api-keys");
+
+    let cmd = command("fabric", "summarize", "", &keys, 0);
+    let anthropic = child_env(&cmd, "ANTHROPIC_API_KEY");
+    let gemini = child_env(&cmd, "GEMINI_API_KEY");
+    let openai = child_env(&cmd, "OPENAI_API_KEY");
+
+    for (var, _) in vars {
+        unsafe { std::env::remove_var(var) };
+    }
+    assert_eq!(anthropic.as_deref(), Some("anthropic-value"));
+    assert_eq!(gemini.as_deref(), Some("gemini-value"));
+    assert_eq!(openai.as_deref(), Some("openai-value"));
+}
+
+#[test]
+fn command_leaves_a_vendor_unset_when_its_var_does_not_resolve() {
+    let keys = ApiKeys::default().with(Vendor::Gemini, "VAULT_FABRIC_TEST_NEVER_SET_GEMINI_9b1e");
+    let cmd = command("fabric", "summarize", "", &keys, 0);
+    assert_eq!(child_env(&cmd, "GEMINI_API_KEY"), None);
+    assert_eq!(child_env(&cmd, "ANTHROPIC_API_KEY"), None);
+}
+
+#[test]
+fn command_reads_a_file_backed_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("gemini-key");
+    std::fs::write(&path, "file-gemini-value\n").expect("write key file");
+    let keys = ApiKeys::default().with(Vendor::Gemini, path.to_string_lossy());
+    let cmd = command("fabric", "summarize", "", &keys, 0);
+    assert_eq!(child_env(&cmd, "GEMINI_API_KEY").as_deref(), Some("file-gemini-value"));
 }
 
 #[test]
@@ -145,8 +207,8 @@ fn test_resolve_pattern_canonical_path_for_present_file() {
 /// on PATH (which has no such flag) is not handed an argument it will reject.
 #[test]
 #[serial(process)]
-fn build_fabric_command_omits_max_tokens_flag_when_zero() {
-    let cmd = build_fabric_command("fabric", "summarize", "", "", 0);
+fn command_omits_max_tokens_flag_when_zero() {
+    let cmd = command("fabric", "summarize", "", &ApiKeys::default(), 0);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
     assert!(
         !args.iter().any(|a| a.starts_with("--maxTokens")),
@@ -156,8 +218,8 @@ fn build_fabric_command_omits_max_tokens_flag_when_zero() {
 
 #[test]
 #[serial(process)]
-fn build_fabric_command_passes_max_tokens_flag_when_set() {
-    let cmd = build_fabric_command("fabric", "summarize", "", "", 16384);
+fn command_passes_max_tokens_flag_when_set() {
+    let cmd = command("fabric", "summarize", "", &ApiKeys::default(), 16384);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
     assert!(
         args.iter().any(|a| a == "--maxTokens=16384"),
@@ -169,8 +231,8 @@ fn build_fabric_command_passes_max_tokens_flag_when_set() {
 /// silently drop the model and fall back to fabric's DEFAULT_MODEL.
 #[test]
 #[serial(process)]
-fn build_fabric_command_keeps_model_alongside_max_tokens() {
-    let cmd = build_fabric_command("fabric", "summarize", "claude-sonnet-5", "", 8192);
+fn command_keeps_model_alongside_max_tokens() {
+    let cmd = command("fabric", "summarize", "claude-sonnet-5", &ApiKeys::default(), 8192);
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
     assert!(
         args.iter().any(|a| a == "claude-sonnet-5"),

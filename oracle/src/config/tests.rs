@@ -186,3 +186,32 @@ fn default_matches_empty_yaml_and_is_nonzero() {
         "interval must be non-zero or tokio::time::interval panics"
     );
 }
+
+#[test]
+fn llm_api_keys_parse_per_vendor() {
+    let cfg: Config = serde_yaml::from_str(
+        "llm:\n  api-keys:\n    anthropic: ESCOTE_ANTHROPIC_API_KEY\n    gemini: GEMINI_API_KEY\n",
+    )
+    .expect("llm block loads");
+    assert_eq!(
+        cfg.llm.api_keys.get(vault::fabric::Vendor::Anthropic),
+        Some("ESCOTE_ANTHROPIC_API_KEY")
+    );
+    assert_eq!(
+        cfg.llm.api_keys.get(vault::fabric::Vendor::Gemini),
+        Some("GEMINI_API_KEY")
+    );
+}
+
+#[test]
+fn llm_block_absent_is_an_empty_key_map() {
+    let cfg: Config = serde_yaml::from_str("").expect("empty yaml loads");
+    assert!(cfg.llm.api_keys.is_empty());
+}
+
+#[test]
+fn llm_unknown_key_errors() {
+    let err = serde_yaml::from_str::<Config>("llm:\n  api-key: ESCOTE_ANTHROPIC_API_KEY\n")
+        .expect_err("oracle's llm block has no api-key");
+    assert!(err.to_string().contains("api-key"), "{err}");
+}

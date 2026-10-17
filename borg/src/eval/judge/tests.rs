@@ -111,3 +111,66 @@ fn claim_verdict_code_round_trips() {
     }
     assert_eq!(ClaimVerdict::from_code('x'), None);
 }
+
+#[test]
+fn distillation_input_puts_the_note_before_the_source() {
+    let input = distillation_input("video", "THE NOTE", "THE SOURCE");
+    let note_at = input.find("THE NOTE").expect("note present");
+    let source_at = input.find("THE SOURCE").expect("source present");
+    assert!(note_at < source_at, "{input}");
+}
+
+#[test]
+fn source_budget_is_what_the_note_and_framing_leave() {
+    let note = "n".repeat(1_000);
+    let budget = source_budget(24_000, "article", &note);
+    let framed = distillation_input("article", &note, "").chars().count();
+    assert_eq!(budget, 24_000 - framed);
+    assert_eq!(
+        distillation_input("article", &note, &"s".repeat(budget))
+            .chars()
+            .count(),
+        24_000
+    );
+}
+
+#[test]
+fn source_budget_is_zero_when_the_note_fills_the_input() {
+    assert_eq!(source_budget(100, "article", &"n".repeat(500)), 0);
+}
+
+/// The child env value `name` set on `cmd`, if any.
+fn child_env(cmd: &Command, name: &str) -> Option<String> {
+    cmd.get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new(name))
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+}
+
+/// Both borg judges carry the configured
+/// `llm.api-keys` map into the fabric child they run.
+#[test]
+fn both_judges_export_the_configured_key_map_on_their_fabric_child() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gemini = dir.path().join("gemini");
+    let openai = dir.path().join("openai");
+    std::fs::write(&gemini, "gemini-from-config").expect("write");
+    std::fs::write(&openai, "openai-from-config").expect("write");
+    let yaml = format!(
+        "llm:\n  api-keys:\n    gemini: {}\n    openai: {}\n",
+        gemini.display(),
+        openai.display()
+    );
+    let config: crate::config::Config = serde_yaml::from_str(&yaml).expect("parse borg.yml");
+    let opts = crate::eval::EvalOpts {
+        judge_model: "gemini-2.5-flash".to_string(),
+        api_keys: config.llm.api_keys.clone(),
+        ..Default::default()
+    };
+    let (judge, claim_judge) = crate::eval::fabric_judges(&opts).expect("judges");
+    assert_eq!(judge.api_keys, config.llm.api_keys);
+    assert_eq!(claim_judge.api_keys, config.llm.api_keys);
+    for cmd in [judge.command(), claim_judge.command()] {
+        assert_eq!(child_env(&cmd, "GEMINI_API_KEY").as_deref(), Some("gemini-from-config"));
+        assert_eq!(child_env(&cmd, "OPENAI_API_KEY").as_deref(), Some("openai-from-config"));
+    }
+}

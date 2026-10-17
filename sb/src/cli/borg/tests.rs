@@ -34,3 +34,68 @@ fn harvest_dormant_after_flag_env_default_precedence() {
     assert_eq!(from_flag.harvest.dormant_after.as_deref(), Some("1d"));
     unsafe { std::env::remove_var("BORG_HARVEST_DORMANT_AFTER") };
 }
+
+#[derive(Parser)]
+struct EvalHarness {
+    #[command(flatten)]
+    eval: args::EvalArgs,
+}
+
+/// `sb borg eval` hands borg.yml's `llm.api-keys` to the
+/// eval, so both judges see the configured map.
+#[test]
+fn eval_opts_carry_borg_yml_llm_api_keys() {
+    let config: borg::config::Config =
+        serde_yaml::from_str("llm:\n  api-key: ESCOTE_ANTHROPIC_API_KEY\n  api-keys:\n    gemini: GEMINI_API_KEY\n")
+            .unwrap();
+    let h = EvalHarness::try_parse_from(["sb", "--staged", "--no-judge"]).unwrap();
+    let opts = eval_opts(&config, &h.eval).unwrap();
+    assert_eq!(opts.api_keys, config.llm.api_keys);
+    assert_eq!(
+        opts.api_keys.get(vault::fabric::Vendor::Anthropic),
+        Some("ESCOTE_ANTHROPIC_API_KEY")
+    );
+    assert_eq!(opts.api_keys.get(vault::fabric::Vendor::Gemini), Some("GEMINI_API_KEY"));
+}
+
+#[test]
+fn eval_format_defaults_to_text_and_takes_json_in_any_case() {
+    let h = EvalHarness::try_parse_from(["sb"]).unwrap();
+    assert_eq!(h.eval.format, args::EvalFormat::Text);
+    let h = EvalHarness::try_parse_from(["sb", "--format", "JSON"]).unwrap();
+    assert_eq!(h.eval.format, args::EvalFormat::Json);
+    assert!(EvalHarness::try_parse_from(["sb", "--format", "yaml"]).is_err());
+    assert!(EvalHarness::try_parse_from(["sb", "--format", "json", "--regenerate"]).is_err());
+}
+
+#[test]
+fn render_eval_jsonl_writes_one_parseable_line_per_trace() {
+    let opts = borg::eval::EvalOpts {
+        fixtures_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/eval/distill-fixtures"),
+        no_judge: true,
+        ..Default::default()
+    };
+    let fixtures = borg::eval::load(&opts.fixtures_dir).unwrap();
+    let cache = borg::eval::cache::JudgmentCache::open_memory().unwrap();
+    // --no-judge: the judges are never called.
+    let (judge, claim_judge) = borg::eval::fabric_judges(&opts).unwrap();
+    let outcome = borg::eval::evaluate(
+        &fixtures,
+        &std::collections::BTreeMap::new(),
+        &cache,
+        &judge,
+        &claim_judge,
+        &opts,
+    )
+    .unwrap();
+    let borg::eval::EvalOutcome::Report(report) = outcome else {
+        panic!("expected a report");
+    };
+    let jsonl = render_eval_jsonl(&report).unwrap();
+    let lines: Vec<&str> = jsonl.lines().collect();
+    assert_eq!(lines.len(), fixtures.len());
+    for line in lines {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["run_kind"], "baseline");
+    }
+}

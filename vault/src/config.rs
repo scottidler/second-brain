@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::fabric::{ApiKeys, Vendor};
+
 /// Post-deserialization normalization hook run by [`load_config`] on every
 /// loaded config, regardless of which path in the fallback chain produced it.
 /// Lets a config type derive fields from others so the two can never drift
@@ -100,23 +102,85 @@ impl Default for ScanConfig {
     }
 }
 
-/// Shared LLM configuration used by both borg and cortex.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+/// borg's `llm:` block (`borg::config::LlmConfig` re-exports it).
+///
+/// `api-key` names the Anthropic credential var (or file). `api-keys` maps
+/// each vendor to its var for the fabric child (`vault::fabric::command`).
+/// `api-key` IS the Anthropic entry: after load, `api_keys` always carries
+/// `anthropic -> api_key`, so the two can never diverge. Setting both to
+/// different vars is a load error, never a silent pick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawLlmConfig", rename_all = "kebab-case")]
 pub struct LlmConfig {
     pub provider: String,
     pub model: String,
-    #[serde(alias = "api_key_env", alias = "api_key", alias = "api-key")]
     pub api_key: String,
+    pub api_keys: ApiKeys,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
+        let api_key = DEFAULT_ANTHROPIC_KEY_VAR.to_string();
         Self {
             provider: "claude".to_string(),
             model: "claude-sonnet-4-6".to_string(),
-            api_key: "ANTHROPIC_API_KEY".to_string(),
+            api_keys: ApiKeys::anthropic(&api_key),
+            api_key,
         }
+    }
+}
+
+/// The Anthropic credential var when neither `api-key` nor
+/// `api-keys.anthropic` is set.
+const DEFAULT_ANTHROPIC_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// The `llm:` block as written, before `api-key` and `api-keys.anthropic`
+/// are reconciled into one Anthropic entry.
+#[derive(Debug, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct RawLlmConfig {
+    provider: String,
+    model: String,
+    #[serde(alias = "api_key_env", alias = "api_key")]
+    api_key: Option<String>,
+    api_keys: ApiKeys,
+}
+
+impl Default for RawLlmConfig {
+    fn default() -> Self {
+        let defaults = LlmConfig::default();
+        Self {
+            provider: defaults.provider,
+            model: defaults.model,
+            api_key: None,
+            api_keys: ApiKeys::default(),
+        }
+    }
+}
+
+impl TryFrom<RawLlmConfig> for LlmConfig {
+    type Error = String;
+
+    fn try_from(raw: RawLlmConfig) -> std::result::Result<Self, Self::Error> {
+        let mapped = raw.api_keys.get(Vendor::Anthropic).map(str::to_string);
+        let api_key = match (raw.api_key, mapped) {
+            (Some(single), Some(mapped)) if single != mapped => {
+                return Err(format!(
+                    "llm.api-key ({single}) and llm.api-keys.anthropic ({mapped}) name different vars; \
+                     set one (api-key is the anthropic entry)"
+                ));
+            }
+            (Some(single), _) => single,
+            (None, Some(mapped)) => mapped,
+            (None, None) => DEFAULT_ANTHROPIC_KEY_VAR.to_string(),
+        };
+        let api_keys = raw.api_keys.with(Vendor::Anthropic, api_key.clone());
+        Ok(Self {
+            provider: raw.provider,
+            model: raw.model,
+            api_key,
+            api_keys,
+        })
     }
 }
 

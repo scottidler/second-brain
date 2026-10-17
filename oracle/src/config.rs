@@ -39,6 +39,21 @@ pub struct Config {
     /// built-in default (vector-only, stub-exclude, no rerank/transform).
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+
+    /// Credentials for oracle's own fabric calls (the eval relevance judge).
+    #[serde(default)]
+    pub llm: LlmConfig,
+}
+
+/// oracle's `llm:` block.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LlmConfig {
+    /// `vendor -> env var (or file) holding its key` (`anthropic`, `gemini`,
+    /// `openai`), exported under fabric's names on the judge's fabric child.
+    /// Empty leaves fabric on its own `.env`.
+    #[serde(default)]
+    pub api_keys: vault::fabric::ApiKeys,
 }
 
 impl Default for Config {
@@ -55,6 +70,7 @@ impl Default for Config {
             watcher: WatcherConfig::default(),
             inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
             retrieval: RetrievalConfig::default(),
+            llm: LlmConfig::default(),
         }
     }
 }

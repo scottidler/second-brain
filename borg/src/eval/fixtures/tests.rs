@@ -86,6 +86,38 @@ fn judge_note_text_renders_summary_and_anchored_claims() {
 }
 
 #[test]
+fn judge_note_text_renders_quote_and_who_under_each_claim() {
+    let d = Distilled {
+        summary: "s".to_string(),
+        claims: vec![
+            Claim {
+                text: "attributed claim".to_string(),
+                anchor: Some("01:02".to_string()),
+                who: Some("@simonw".to_string()),
+                quote: Some("agents need a sandbox".to_string()),
+                ..Default::default()
+            },
+            Claim {
+                text: "blank extras".to_string(),
+                who: Some("  ".to_string()),
+                quote: Some(String::new()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let text = judge_note_text(&d);
+    assert!(
+        text.contains("- attributed claim [01:02]\n  who: @simonw\n  quote: \"agents need a sandbox\"\n"),
+        "{text}"
+    );
+    // Blank who/quote render nothing, not an empty line.
+    assert!(text.contains("- blank extras\n"), "{text}");
+    assert_eq!(text.matches("who:").count(), 1, "{text}");
+    assert_eq!(text.matches("quote:").count(), 1, "{text}");
+}
+
+#[test]
 fn judge_note_text_includes_the_tools_section() {
     let d = Distilled {
         summary: "s".to_string(),

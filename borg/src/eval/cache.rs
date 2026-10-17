@@ -15,10 +15,12 @@ use crate::eval::judge::{AxisScores, ClaimVerdict};
 
 /// Rubric version embedded in the cache key. Bump when `judge-distillation.md`
 /// or the score semantics change, to invalidate all prior judgments.
-pub const RUBRIC_VERSION: &str = "v1";
+/// v2: the note renders each claim's quote and who, and goes before a source
+/// budgeted to what the note leaves.
+pub const RUBRIC_VERSION: &str = "v2";
 /// Rubric version for per-claim verdicts. Bump when `judge-claims.md` or the
-/// verdict semantics change.
-pub const CLAIMS_RUBRIC_VERSION: &str = "v1";
+/// verdict semantics change. v2: the source is the v2 budgeted source.
+pub const CLAIMS_RUBRIC_VERSION: &str = "v2";
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
