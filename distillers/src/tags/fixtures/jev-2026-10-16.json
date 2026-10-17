@@ -1,0 +1,492 @@
+{
+  "recorded": "2026-10-16 on ripr: POST https://api.typesafe.ai/v1/systemone, model jev-latest, every canonical tag as a noul question with its canonical-tags.yml descriptions: entry as criteria.true. The key rode only in the Authorization header; the response body below is verbatim and carries no credential.",
+  "title": "Building a fast CLI in Rust with clap",
+  "text": "A walkthrough of writing a command-line tool in Rust: argument parsing with clap derive, error handling with eyre, and shipping a single static binary. Covers testing the CLI with assert_cmd and publishing to crates.io.",
+  "threshold": 0.9,
+  "max_per_note": 8,
+  "expected": [
+    "cli",
+    "programming",
+    "rust",
+    "software-engineering",
+    "tech",
+    "tutorial"
+  ],
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "agents": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "ai": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "ai-safety": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "air-raid": {
+        "type": "noul",
+        "noul": 0.0
+      },
+      "anthropic": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "api": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "architecture": {
+        "type": "noul",
+        "noul": 0.15
+      },
+      "auth": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "automation": {
+        "type": "noul",
+        "noul": 0.15
+      },
+      "autonomous-agents": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "battery": {
+        "type": "noul",
+        "noul": 0.0
+      },
+      "blocking": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "books": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "career": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "chatgpt": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "claude": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "cli": {
+        "type": "noul",
+        "noul": 0.99
+      },
+      "coaching": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "college-football": {
+        "type": "noul",
+        "noul": 0.0
+      },
+      "context-engineering": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "cooking": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "counter": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "creative-writing": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "css": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "cursor": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "daily-notes": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "data": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "database": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "defense": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "design": {
+        "type": "noul",
+        "noul": 0.08
+      },
+      "devops": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "diy": {
+        "type": "noul",
+        "noul": 0.07
+      },
+      "docker": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "drills": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "enterprise-ai": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "entertainment": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "exercise": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "fiction": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "finance": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "fitness": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "football": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "future-of-work": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "gaming": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "gemini": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "git": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "github": {
+        "type": "noul",
+        "noul": 0.05
+      },
+      "hardware": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "health": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "high-school-football": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "home-automation": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "homelab": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "human-ai-collaboration": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "infrastructure": {
+        "type": "noul",
+        "noul": 0.05
+      },
+      "inside-zone": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "iot": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "k8s": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "knowledge-management": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "language-learning": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "life": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "linux": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "llm": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "markdown": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "mcp": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "multi-agent": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "music": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "neovim": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "networking": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "nfl": {
+        "type": "noul",
+        "noul": 0.0
+      },
+      "nix": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "noita": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "note-taking": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "nutrition": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "obsidian": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "offense": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "offensive-line": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "open-source": {
+        "type": "noul",
+        "noul": 0.56
+      },
+      "openai": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "outside-zone": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "para-method": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "parenting": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "pass-protection": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "performance": {
+        "type": "noul",
+        "noul": 0.36
+      },
+      "pkm": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "politics": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "privacy": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "productivity": {
+        "type": "noul",
+        "noul": 0.19
+      },
+      "programming": {
+        "type": "noul",
+        "noul": 0.99
+      },
+      "prompt-engineering": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "python": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "quarterback": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "reading": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "research": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "rpo": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "rust": {
+        "type": "noul",
+        "noul": 0.99
+      },
+      "saas": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "sandboxing": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "science": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "second-brain": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "security": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "software-engineering": {
+        "type": "noul",
+        "noul": 0.99
+      },
+      "spanish": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "spread-offense": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "synth": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "tech": {
+        "type": "noul",
+        "noul": 0.99
+      },
+      "templates": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "terminal": {
+        "type": "noul",
+        "noul": 0.38
+      },
+      "travel": {
+        "type": "noul",
+        "noul": 0.0
+      },
+      "tutorial": {
+        "type": "noul",
+        "noul": 0.96
+      },
+      "typescript": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "vibe-coding": {
+        "type": "noul",
+        "noul": 0.06
+      },
+      "voice": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "web-development": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "webassembly": {
+        "type": "noul",
+        "noul": 0.01
+      },
+      "work": {
+        "type": "noul",
+        "noul": 0.41
+      },
+      "workflow": {
+        "type": "noul",
+        "noul": 0.67
+      },
+      "writing": {
+        "type": "noul",
+        "noul": 0.07
+      },
+      "youth-football": {
+        "type": "noul",
+        "noul": 0.0
+      }
+    },
+    "usage": {
+      "input_tokens": 4955,
+      "output_tokens": 1998
+    }
+  }
+}

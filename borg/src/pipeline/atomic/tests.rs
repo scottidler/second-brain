@@ -9,6 +9,7 @@ fn canon(max: usize, protected: &[&str]) -> vault::canonical::CanonicalSet {
         no_segment: std::collections::HashSet::new(),
         no_classifier: protected.iter().map(|t| (*t).to_string()).collect(),
         max_per_note: max,
+        description: std::collections::HashMap::new(),
     }
 }
 

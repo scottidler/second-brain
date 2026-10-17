@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eyre::{Context, Result, eyre};
 use serde::{Deserialize, Serialize};
@@ -22,17 +22,23 @@ use vault::canonical::{self, CanonicalSet, TagMapping};
 #[cfg(test)]
 mod tests;
 
-/// The API's hard ceiling on labels per call (observed in the tool
-/// schema 2026-09-20). The vocabulary is larger, so production always shards.
-pub const MAX_LABELS_PER_CALL: usize = 100;
+/// TypeSafe's API root. Production always talks to this host; only a
+/// `test-util` build can swap it, through `TagsClassifierConfig::base_url`.
+const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 
-/// The keyless (public) tier's ceiling on texts per call. An authenticated
-/// workspace key raises it to 1,000, but the default path is keyless, so every
-/// batch chunks at the lower number: one limit, no branch, and a batch that is
-/// correct whether or not a token is configured.
-pub const MAX_TEXTS_PER_CALL: usize = 200;
+/// The one endpoint the jev classifier calls: one `state` against N questions.
+const SYSTEMONE_PATH: &str = "/v1/systemone";
 
-const DEFAULT_ENDPOINT: &str = "https://classifier.dev/v1/classify";
+/// What a 429's retry must leave for the retried request itself: the retry
+/// runs only if `delay + RETRY_REQUEST_ALLOWANCE` still fits the deadline.
+const RETRY_REQUEST_ALLOWANCE: Duration = Duration::from_secs(1);
+
+/// The TypeSafe key's env var when `api-key` is not set.
+const DEFAULT_API_KEY_ENV: &str = "ESCOTE_TYPESAFE_API_KEY";
+
+/// `jev-latest` rather than a pinned id: `/v1/models` lists only
+/// `jev-latest` and `jev-preview`, so a pin can 400 once it is retired.
+const DEFAULT_MODEL: &str = "jev-latest";
 
 /// Where a candidate tag came from. Provenance decides which implementations
 /// are allowed to consume it.
@@ -78,7 +84,7 @@ pub struct TagInput<'a> {
 /// summary (design doc, API Design).
 ///
 /// This is a data-boundary number, not a tuning knob: `text` is shipped
-/// verbatim to classifier.dev, so an untruncated body means a whole
+/// verbatim to TypeSafe by the jev classifier, so an untruncated body means a whole
 /// transcript of captured audio leaves the machine. Both callers clip
 /// through `body_excerpt` (borg: `TagSources::from_body`; cortex:
 /// `classify::classifier_text`).
@@ -113,7 +119,7 @@ impl Confidence {
 pub enum TagMethod {
     Deterministic,
     FabricClosed,
-    ClassifierDev,
+    Jev,
 }
 
 impl TagMethod {
@@ -122,7 +128,7 @@ impl TagMethod {
         match self {
             TagMethod::Deterministic => "deterministic",
             TagMethod::FabricClosed => "fabric-closed",
-            TagMethod::ClassifierDev => "classifier-dev",
+            TagMethod::Jev => "jev",
         }
     }
 }
@@ -151,11 +157,6 @@ impl TagOutput {
 pub trait TagClassifier: Send + Sync {
     fn classify(&self, input: &TagInput) -> Result<TagOutput>;
 
-    /// Overridden by `ClassifierDev`, which sends up to 1,000 texts per call.
-    fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
-        inputs.iter().map(|i| self.classify(i)).collect()
-    }
-
     fn method(&self) -> TagMethod;
 }
 
@@ -167,31 +168,36 @@ pub enum ClassifierKind {
     #[default]
     Deterministic,
     FabricClosed,
-    ClassifierDev,
+    Jev,
 }
 
 /// The `tags.classifier` block, identical in `borg.yml` and `cortex.yml`.
+///
+/// Unknown keys are an error, so a stale key from an older classifier fails
+/// the load naming the field instead of being silently ignored.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct TagsClassifierConfig {
     pub classifier: ClassifierKind,
     pub threshold: f32,
-    /// NAME of the env var holding an OPTIONAL classifier.dev workspace token,
-    /// never the token itself. Empty (the default) means the keyless public
-    /// tier, which is what classifier.dev serves without credentials.
-    ///
-    /// Deliberately not the old `api-key-env` / `CLASSIFY_API_KEY` pair. That
-    /// key was rejected upstream (`401 invalid_api_key`) while still being
-    /// present in every shell and in the secrets manifest, so every classify
-    /// fell back to `deterministic` and nothing said so. A fresh name means a
-    /// stale value cannot quietly reintroduce that state: set this only when
-    /// a workspace key from classifier.dev/app/keys is actually wanted.
-    pub token_env: String,
     /// Runs when the selected impl errors. Borg marks the receipt degraded;
     /// cortex holds the note only if the fallback also returns `Low`.
     pub fallback: ClassifierKind,
-    pub endpoint: String,
+    /// One deadline per `classify`: request, any 429 sleep, the retry, and
+    /// the body read all fit inside it.
     pub timeout_secs: u64,
+    /// NAME of the env var (or a secret file path, per
+    /// `vault::config::resolve_secret`) holding the TypeSafe key, never the
+    /// key itself. A name that resolves empty fails every jev classify before
+    /// any request, so the fallback runs.
+    pub api_key: String,
+    /// The jev model id sent on every request.
+    pub model: String,
+    /// Test seam: the API root a stub serves. Not in yml and absent from a
+    /// release build, so production always calls `DEFAULT_BASE_URL`.
+    #[cfg(any(test, feature = "test-util"))]
+    #[serde(skip)]
+    pub base_url: Option<String>,
 }
 
 impl Default for TagsClassifierConfig {
@@ -199,10 +205,12 @@ impl Default for TagsClassifierConfig {
         Self {
             classifier: ClassifierKind::Deterministic,
             threshold: 0.9,
-            token_env: String::new(),
             fallback: ClassifierKind::Deterministic,
-            endpoint: DEFAULT_ENDPOINT.to_string(),
             timeout_secs: 30,
+            api_key: DEFAULT_API_KEY_ENV.to_string(),
+            model: DEFAULT_MODEL.to_string(),
+            #[cfg(any(test, feature = "test-util"))]
+            base_url: None,
         }
     }
 }
@@ -281,7 +289,7 @@ fn build_kind(
             // needs nothing rather than hand back a classifier that always errors.
             None => Box::new(Deterministic::new(canon.clone(), mapping.clone())),
         },
-        ClassifierKind::ClassifierDev => Box::new(ClassifierDev::new(canon.clone(), mapping.clone(), cfg)),
+        ClassifierKind::Jev => Box::new(Jev::new(canon.clone(), mapping.clone(), cfg)),
     }
 }
 
@@ -337,35 +345,6 @@ fn rank_and_cap(mut scored: Vec<(String, f32)>, max_per_note: usize) -> Vec<(Str
     scored.retain(|(tag, _)| seen.insert(tag.clone()));
     scored.truncate(max_per_note);
     scored
-}
-
-/// Split a sorted label list into shards of at most `MAX_LABELS_PER_CALL`,
-/// **evenly**: the shard-invariance trial validated a 59/58 partition and panel r4 OQ8 pins it,
-/// because a greedy 100/17 split is an untested co-label context. Re-run the
-/// shard-invariance trial before the vocabulary passes ~200 labels.
-pub fn shard_labels(sorted_labels: &[String]) -> Vec<Vec<String>> {
-    if sorted_labels.is_empty() {
-        return Vec::new();
-    }
-    let shards = sorted_labels.len().div_ceil(MAX_LABELS_PER_CALL);
-    let per = sorted_labels.len().div_ceil(shards);
-    sorted_labels.chunks(per).map(<[String]>::to_vec).collect()
-}
-
-/// Merge per-shard score maps into one ranking. Valid because the API returns
-/// independent per-label probabilities rather than a softmax: in the
-/// shard-invariance trial, re-partitioning moved scores no more than two identical calls do.
-pub fn merge_shard_scores(shard_scores: &[HashMap<String, f32>]) -> Vec<(String, f32)> {
-    let mut merged: HashMap<String, f32> = HashMap::new();
-    for shard in shard_scores {
-        for (label, score) in shard {
-            let slot = merged.entry(label.clone()).or_insert(*score);
-            if *score > *slot {
-                *slot = *score;
-            }
-        }
-    }
-    merged.into_iter().collect()
 }
 
 /// Apply the threshold, then rank and cap. Selection and promotion share the
@@ -540,73 +519,140 @@ impl TagClassifier for FabricClosedVocab {
     }
 }
 
-// ---------------------------------------------------------- classifier.dev
+// ------------------------------------------------------------------- jev
 
-/// Multi-label classifier.dev over the sorted vocabulary, sharded.
-pub struct ClassifierDev {
+/// TypeSafe's jev model, called directly at `POST /v1/systemone`: one request
+/// per note, every canonical tag a `noul` question, each tag's
+/// `descriptions:` entry as its `criteria.true` (the best-scoring question
+/// shape against the gold tags, per `docs/design/2026-10-16-jev-tag-classifier.md`).
+///
+/// Holds the RESOLVED key, never the env var name alone, and deliberately
+/// derives no `Debug` so the key cannot reach a log line through `{:?}`.
+pub struct Jev {
     canon: CanonicalSet,
     mapping: TagMapping,
     threshold: f32,
-    token_env: String,
+    api_key_name: String,
+    api_key: String,
+    model: String,
     endpoint: String,
     timeout: Duration,
 }
 
 #[derive(Deserialize)]
-struct ClassifyResult {
-    #[serde(default)]
-    scores: HashMap<String, f32>,
-    #[serde(default)]
-    model: Option<String>,
+struct SystemOneReply {
+    model: String,
+    answers: HashMap<String, SystemOneAnswer>,
 }
 
 #[derive(Deserialize)]
-struct ClassifyResponse {
+struct SystemOneAnswer {
     #[serde(default)]
-    results: Vec<ClassifyResult>,
+    noul: Option<f64>,
 }
 
-/// `multi` is classifier.dev's multi-label switch; `multi_label` is not a field
-/// it reads, and only worked because a numeric `max_labels` also enables it.
-fn request_body(labels: &[String], texts: &[String], max_labels: usize) -> serde_json::Value {
-    serde_json::json!({
-        "inputs": texts,
-        "labels": labels,
-        "multi": true,
-        "max_labels": max_labels,
-    })
+/// One HTTP exchange, before its status is judged.
+struct Exchange {
+    status: u16,
+    body: String,
+    request_id: Option<String>,
+    retry_delay: Option<Duration>,
 }
 
-/// classifier.dev answers from a non-Jev LLM when Jev fails (`ling-*`,
-/// `mercury-*`), and those scores are not comparable to Jev's. Such an answer,
-/// or one naming no model, fails the call so the fallback runs and the ingest
-/// is marked degraded instead of accepting it as a Jev answer.
-fn ensure_jev(response: &ClassifyResponse) -> Result<()> {
-    for (i, result) in response.results.iter().enumerate() {
-        match result.model.as_deref() {
-            Some(model) if model.starts_with("jev") => {
-                log::debug!("ensure_jev: result {i} answered by {model}");
-            }
-            other => {
-                return Err(eyre!(
-                    "classifier.dev result {i} was answered by {other:?}, not Jev; refusing non-Jev scores"
-                ));
-            }
+/// A 429's wait: `retry-after-ms` (integer milliseconds), else `Retry-After`
+/// (integer seconds), whichever parses first. `None` when neither does, which
+/// the caller treats as "do not retry".
+fn retry_delay(retry_after_ms: Option<&str>, retry_after: Option<&str>) -> Option<Duration> {
+    retry_after_ms
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .or_else(|| {
+            retry_after
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs)
+        })
+}
+
+/// The error for a non-200 answer. Carries the status, `detail.error_type`,
+/// `detail.message` and the request id, never the request body or the key.
+///
+/// A 422 is FastAPI's validation body, whose `detail` is a list of
+/// `{type, loc, msg, input}` and whose `input` echoes the whole request; only
+/// `loc` and `msg` survive. A body that is not JSON contributes nothing.
+fn api_error(status: u16, body: &str, request_id: Option<&str>) -> eyre::Report {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let detail = parsed.as_ref().and_then(|v| v.get("detail"));
+    let (error_type, message) = match detail {
+        Some(serde_json::Value::Object(d)) => (
+            d.get("error_type").and_then(|v| v.as_str()).map(str::to_string),
+            d.get("message").and_then(|v| v.as_str()).map(str::to_string),
+        ),
+        Some(serde_json::Value::Array(items)) => {
+            let messages: Vec<String> = items
+                .iter()
+                .map(|item| {
+                    let loc: Vec<String> = item
+                        .get("loc")
+                        .and_then(|l| l.as_array())
+                        .map(|l| {
+                            l.iter()
+                                .map(|p| p.as_str().map(str::to_string).unwrap_or_else(|| p.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let msg = item.get("msg").and_then(|m| m.as_str()).unwrap_or("invalid");
+                    format!("{}: {msg}", loc.join("."))
+                })
+                .collect();
+            (Some("validation_error".to_string()), Some(messages.join("; ")))
         }
-    }
-    Ok(())
+        _ => (None, None),
+    };
+    eyre!(
+        "jev returned {status}: error_type={} message={} request_id={}",
+        error_type.as_deref().unwrap_or("unknown"),
+        message.as_deref().unwrap_or("none"),
+        request_id.unwrap_or("none")
+    )
 }
 
-impl ClassifierDev {
+impl Jev {
+    /// Resolve `cfg.api-key` once, here. A name that does not resolve leaves
+    /// the key empty, and every `classify` then errors before any request.
     pub fn new(canon: CanonicalSet, mapping: TagMapping, cfg: &TagsClassifierConfig) -> Self {
+        let api_key = vault::config::resolve_secret(&cfg.api_key)
+            .map(|k| k.trim().to_string())
+            .unwrap_or_default();
+        log::debug!(
+            "Jev::new: api_key={} resolved={} model={} timeout_secs={}",
+            cfg.api_key,
+            !api_key.is_empty(),
+            cfg.model,
+            cfg.timeout_secs
+        );
         Self {
             canon,
             mapping,
             threshold: cfg.threshold,
-            token_env: cfg.token_env.clone(),
-            endpoint: cfg.endpoint.clone(),
+            api_key_name: cfg.api_key.clone(),
+            api_key,
+            model: cfg.model.clone(),
+            endpoint: format!("{}{SYSTEMONE_PATH}", Self::base_url(cfg)),
             timeout: Duration::from_secs(cfg.timeout_secs),
         }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    fn base_url(cfg: &TagsClassifierConfig) -> String {
+        cfg.base_url
+            .as_deref()
+            .map(|b| b.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+    }
+
+    #[cfg(not(any(test, feature = "test-util")))]
+    fn base_url(_cfg: &TagsClassifierConfig) -> String {
+        DEFAULT_BASE_URL.to_string()
     }
 
     fn sorted_vocabulary(&self) -> Vec<String> {
@@ -615,105 +661,147 @@ impl ClassifierDev {
         v
     }
 
-    /// The optional workspace token, resolved from the configured env var.
-    ///
-    /// `None` on the keyless path, which is the default: no `token-env` named,
-    /// or the named variable absent or empty. A NAMED-but-unset variable is
-    /// not an error, because falling through to the public tier is a working
-    /// request, not a broken one.
-    fn token(&self) -> Option<String> {
-        if self.token_env.is_empty() {
-            return None;
-        }
-        match std::env::var(&self.token_env) {
-            Ok(v) if !v.trim().is_empty() => Some(v),
-            _ => {
-                log::debug!(
-                    "ClassifierDev::token: {} names no value; using the keyless tier",
-                    self.token_env
-                );
-                None
+    /// One `noul` question per canonical tag. A tag with a description gets
+    /// it as `criteria.true`; a tag without one is asked by name alone.
+    fn request_body(&self, state: &str) -> serde_json::Value {
+        let mut questions = serde_json::Map::new();
+        for tag in self.sorted_vocabulary() {
+            let mut question = serde_json::json!({
+                "type": "noul",
+                "instructions": format!("Is this text about {tag}?"),
+            });
+            if let Some(description) = self.canon.description.get(&tag) {
+                question["criteria"] = serde_json::json!({ "true": description });
             }
+            questions.insert(tag, question);
         }
+        serde_json::json!({
+            "model": self.model,
+            "state": state,
+            "questions": questions,
+        })
     }
 
-    fn post(&self, labels: &[String], texts: &[String]) -> Result<ClassifyResponse> {
-        let body = request_body(labels, texts, self.canon.max_per_note);
+    /// One POST bounded by what is left of `deadline`. Transport errors and
+    /// timeouts are `Err`; every HTTP status comes back for the caller to judge.
+    fn send(&self, body: &serde_json::Value, deadline: Instant) -> Result<Exchange> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(eyre!("jev: the {:?} deadline ran out before the request", self.timeout));
+        }
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
+            .timeout_global(Some(remaining))
             .http_status_as_error(false)
             .build()
             .new_agent();
-        let mut request = agent.post(&self.endpoint).header("content-type", "application/json");
-        if let Some(token) = self.token() {
-            request = request.header("authorization", &format!("Bearer {token}"));
-        }
-        let mut response = request.send_json(&body).context("classifier.dev request failed")?;
+        let mut response = agent
+            .post(&self.endpoint)
+            .header("content-type", "application/json")
+            .header("authorization", &format!("Bearer {}", self.api_key))
+            .send_json(body)
+            .with_context(|| format!("jev request to {} failed", self.endpoint))?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let request_id = header("x-typesafe-request-id");
+        let retry_delay = retry_delay(header("retry-after-ms").as_deref(), header("retry-after").as_deref());
         let status = response.status().as_u16();
         let text = response
             .body_mut()
             .read_to_string()
-            .context("failed to read classifier.dev response body")?;
-        if status != 200 {
-            return Err(eyre!("classifier.dev returned {status}: {text}"));
-        }
-        let parsed: ClassifyResponse =
-            serde_json::from_str(&text).wrap_err_with(|| format!("failed to parse classifier.dev response: {text}"))?;
-        ensure_jev(&parsed)?;
-        Ok(parsed)
-    }
-
-    /// Shared by `classify` and `classify_batch`: one call per (text chunk x
-    /// label shard), merged per input. Any call failing fails the batch, so a
-    /// partial vocabulary never produces a tag set that looks complete.
-    ///
-    /// Two ceilings apply and both are the API's, not ours: at most
-    /// `MAX_LABELS_PER_CALL` labels (the vocabulary is 117, so production
-    /// always shards) and at most `MAX_TEXTS_PER_CALL` texts. Before the
-    /// chunking the whole batch went in one request, which `summarize
-    /// --backfill` and `classify --retag` can make thousands of notes long.
-    fn classify_texts(&self, inputs: &[TagInput]) -> Result<Vec<TagOutput>> {
-        let texts: Vec<String> = inputs.iter().map(|i| format!("{}\n\n{}", i.title, i.text)).collect();
-        let shards = shard_labels(&self.sorted_vocabulary());
+            .context("failed to read the jev response body")?;
         log::debug!(
-            "ClassifierDev::classify_texts: texts={} shards={} chunk={} threshold={}",
-            texts.len(),
-            shards.len(),
-            MAX_TEXTS_PER_CALL,
-            self.threshold
+            "Jev::send: status={status} request_id={} bytes={}",
+            request_id.as_deref().unwrap_or("none"),
+            text.len()
         );
-
-        let mut per_input: Vec<Vec<HashMap<String, f32>>> = vec![Vec::new(); inputs.len()];
-        for shard in &shards {
-            // Offset walks with the chunks so a result lands on the input it
-            // came from; `per_input` is indexed over the WHOLE batch.
-            let mut offset = 0usize;
-            for chunk in texts.chunks(MAX_TEXTS_PER_CALL) {
-                let response = self.post(shard, chunk)?;
-                if response.results.len() != chunk.len() {
-                    return Err(eyre!(
-                        "classifier.dev returned {} results for {} inputs",
-                        response.results.len(),
-                        chunk.len()
-                    ));
-                }
-                for (slot, result) in per_input[offset..].iter_mut().zip(response.results) {
-                    slot.push(result.scores);
-                }
-                offset += chunk.len();
-            }
-        }
-
-        Ok(inputs
-            .iter()
-            .zip(per_input)
-            .map(|(input, shard_scores)| self.finish(input, &shard_scores))
-            .collect())
+        Ok(Exchange {
+            status,
+            body: text,
+            request_id,
+            retry_delay,
+        })
     }
 
-    fn finish(&self, input: &TagInput, shard_scores: &[HashMap<String, f32>]) -> TagOutput {
-        let merged = merge_shard_scores(shard_scores);
-        let mut selected = select_above_threshold(&merged, self.threshold, self.canon.max_per_note);
+    /// POST, retrying one 429 when its advertised delay plus a request still
+    /// fits inside `deadline`. A 429 with no usable delay, one whose delay
+    /// does not fit, or a second 429 is `Err`.
+    fn post(&self, body: &serde_json::Value, deadline: Instant) -> Result<String> {
+        let first = self.send(body, deadline)?;
+        if first.status != 429 {
+            return Self::accept(first);
+        }
+        let request_id = first.request_id.as_deref().unwrap_or("none");
+        let Some(delay) = first.retry_delay else {
+            return Err(eyre!(
+                "jev returned 429 with no usable retry-after-ms or Retry-After header: request_id={request_id}"
+            ));
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if delay + RETRY_REQUEST_ALLOWANCE > remaining {
+            return Err(eyre!(
+                "jev returned 429 asking for {delay:?}, which does not fit the {remaining:?} left of the deadline: request_id={request_id}"
+            ));
+        }
+        log::debug!("Jev::post: 429, retrying once after {delay:?} (request_id={request_id})");
+        std::thread::sleep(delay);
+        let second = self.send(body, deadline)?;
+        if second.status == 429 {
+            return Err(eyre!(
+                "jev returned 429 again after one retry: request_id={}",
+                second.request_id.as_deref().unwrap_or("none")
+            ));
+        }
+        Self::accept(second)
+    }
+
+    fn accept(exchange: Exchange) -> Result<String> {
+        if exchange.status == 200 {
+            return Ok(exchange.body);
+        }
+        Err(api_error(
+            exchange.status,
+            &exchange.body,
+            exchange.request_id.as_deref(),
+        ))
+    }
+
+    /// The per-tag scores, one per canonical tag. Malformed JSON, a tag we
+    /// asked about but got no answer for, a `noul` outside `[0, 1]`, or an
+    /// answer from a non-jev model is `Err`. Keys we did not ask for drop.
+    fn scores(&self, text: &str) -> Result<Vec<(String, f32)>> {
+        let reply: SystemOneReply =
+            serde_json::from_str(text).map_err(|e| eyre!("jev returned malformed JSON ({} bytes): {e}", text.len()))?;
+        if !reply.model.starts_with("jev") {
+            return Err(eyre!(
+                "jev answer came from model {:?}, not jev; refusing its scores",
+                reply.model
+            ));
+        }
+        log::debug!("Jev::scores: served model={}", reply.model);
+        let mut scores = Vec::with_capacity(self.canon.all.len());
+        for tag in self.sorted_vocabulary() {
+            let answer = reply
+                .answers
+                .get(&tag)
+                .ok_or_else(|| eyre!("jev answer is missing tag {tag:?}"))?;
+            let noul = answer
+                .noul
+                .ok_or_else(|| eyre!("jev answer for tag {tag:?} carries no noul score"))?;
+            if !(0.0..=1.0).contains(&noul) {
+                return Err(eyre!("jev noul {noul} for tag {tag:?} is outside [0, 1]"));
+            }
+            scores.push((tag, noul as f32));
+        }
+        Ok(scores)
+    }
+
+    fn finish(&self, input: &TagInput, scores: &[(String, f32)]) -> TagOutput {
+        let mut selected = select_above_threshold(scores, self.threshold, self.canon.max_per_note);
 
         // Author candidates join at tier 0, above anything the model scored.
         for tag in author_tags(input, &self.canon, &self.mapping) {
@@ -732,34 +820,43 @@ impl ClassifierDev {
             tags: selected.iter().map(|(t, _)| t.clone()).collect(),
             scores: Some(selected),
             confidence,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         }
     }
 }
 
-impl TagClassifier for ClassifierDev {
+impl TagClassifier for Jev {
     fn classify(&self, input: &TagInput) -> Result<TagOutput> {
-        let mut out = self.classify_texts(std::slice::from_ref(input))?;
-        out.pop()
-            .ok_or_else(|| eyre!("classifier.dev returned no result for a single input"))
-    }
-
-    fn classify_batch(&self, inputs: &[TagInput]) -> Vec<Result<TagOutput>> {
-        match self.classify_texts(inputs) {
-            Ok(outputs) => outputs.into_iter().map(Ok).collect(),
-            Err(e) => {
-                // Whole-batch failure: one shard short means every input's
-                // ranking is missing part of the vocabulary.
-                inputs
-                    .iter()
-                    .map(|_| Err(eyre!("classifier.dev batch failed: {e}")))
-                    .collect()
-            }
+        log::debug!(
+            "Jev::classify: title_len={} text_len={} candidates={}",
+            input.title.len(),
+            input.text.len(),
+            input.candidates.len()
+        );
+        if self.api_key.is_empty() {
+            return Err(eyre!(
+                "jev: no TypeSafe key; {} resolves empty, so no request was sent",
+                self.api_key_name
+            ));
         }
+        // Empty text is a guaranteed 422 that would degrade the receipt, so
+        // no request: author tags only, `Low` if there are none.
+        if input.text.trim().is_empty() {
+            log::debug!("Jev::classify: empty text, no request");
+            return Ok(self.finish(input, &[]));
+        }
+
+        let deadline = Instant::now() + self.timeout;
+        let body = self.request_body(&format!("{}\n\n{}", input.title, input.text));
+        let text = self.post(&body, deadline)?;
+        let scores = self.scores(&text)?;
+        let out = self.finish(input, &scores);
+        log::debug!("Jev::classify: tags={:?} confidence={:?}", out.tags, out.confidence);
+        Ok(out)
     }
 
     fn method(&self) -> TagMethod {
-        TagMethod::ClassifierDev
+        TagMethod::Jev
     }
 }
 

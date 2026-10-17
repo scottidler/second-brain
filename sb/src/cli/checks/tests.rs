@@ -90,13 +90,13 @@ mod drift {
     use super::super::*;
     use serial_test::serial;
 
-    struct EnvGuard {
+    pub(super) struct EnvGuard {
         key: &'static str,
         original: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
+        pub(super) fn set(key: &'static str, value: &Path) -> Self {
             let original = std::env::var_os(key);
             // SAFETY: env mutation for path-resolution tests; restored on Drop.
             unsafe { std::env::set_var(key, value) };
@@ -313,11 +313,14 @@ fn installed_vault_arg_reads_the_vault_flag_from_exec_start() {
 /// A unit installed with `--vault` is current even when the config names a
 /// different root: the flag, not the config, was install's input.
 /// Serial with the XDG tests: `desired_systemd_unit` reads the service config
-/// under `XDG_CONFIG_HOME`, which those tests repoint.
+/// under `XDG_CONFIG_HOME`, which those tests repoint. This one repoints it
+/// too, at an empty dir: left alone it parsed the host's live cortex.yml, so
+/// the test's outcome depended on whatever that file held.
 #[test]
 #[serial_test::serial(env_xdg)]
 fn cortex_drift_uses_the_vault_the_unit_was_installed_with() {
     let tmp = tempfile::TempDir::new().unwrap();
+    let _guard = drift::EnvGuard::set("XDG_CONFIG_HOME", &tmp.path().join("xdg-config"));
     let flag_vault = tmp.path().join("flag-vault");
     let config_vault = tmp.path().join("config-vault");
     std::fs::create_dir_all(&flag_vault).unwrap();

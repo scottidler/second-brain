@@ -560,10 +560,9 @@ fn classifier_findings() -> Vec<Finding> {
 
     // Name the auth path in both outcomes: "it works" and "it works keylessly"
     // are different facts, and so are the two ways it can fail.
-    let auth = match cfg.token_env.as_str() {
-        "" => "keyless public tier".to_string(),
-        var if std::env::var(var).is_ok_and(|v| !v.trim().is_empty()) => format!("token from {var}"),
-        var => format!("keyless public tier; {var} names no value"),
+    let auth = match vault::config::resolve_secret(&cfg.api_key) {
+        Ok(key) if !key.trim().is_empty() => format!("key from {}", cfg.api_key),
+        _ => format!("{} names no value", cfg.api_key),
     };
 
     let canon = vault::canonical::CanonicalSet {
@@ -571,6 +570,7 @@ fn classifier_findings() -> Vec<Finding> {
         no_segment: std::collections::HashSet::new(),
         no_classifier: std::collections::HashSet::new(),
         max_per_note: 3,
+        description: std::collections::HashMap::new(),
     };
     let mapping = vault::canonical::TagMapping::default();
     let classifier = distillers::tags::build(cfg, &canon, &mapping, None);

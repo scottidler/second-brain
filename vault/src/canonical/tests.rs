@@ -29,6 +29,7 @@ fn test_canonical_set() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        description: std::collections::HashMap::new(),
     }
 }
 
@@ -210,6 +211,7 @@ fn segment_match_skips_no_segment_tags_in_both_matchers() {
         no_segment: ["work", "life"].iter().map(|s| s.to_string()).collect(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        description: std::collections::HashMap::new(),
     };
     let mapping = TagMapping::new();
 
@@ -276,6 +278,7 @@ fn protecting_set(protected: &[&str], max_per_note: usize) -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: protected.iter().map(|s| (*s).to_string()).collect(),
         max_per_note,
+        description: std::collections::HashMap::new(),
     }
 }
 
@@ -383,4 +386,54 @@ fn shipped_canonical_tags_file_parses_and_holds_its_invariants() {
             "guard-list tag {guarded:?} is not in the vocabulary"
         );
     }
+}
+
+// ---- per-tag descriptions (sent to jev as criteria.true) ----
+
+/// A `descriptions:` key that is not a canonical tag fails the parse, the
+/// same fail-closed rule an unknown top-level key gets. It is checked on the
+/// serde path itself, so `load` and tag-promote's buffer check both see it.
+#[test]
+fn a_non_canonical_description_key_fails_to_load() {
+    let yaml =
+        "tags:\n  tech:\n    - rust\ndescriptions:\n  rust: \"the Rust language\"\n  kubernetes: \"stale name\"\n";
+    let err = serde_yaml::from_str::<CanonicalTagsFile>(yaml).expect_err("a stranger key must not parse");
+    assert!(format!("{err}").contains("kubernetes"), "error names the key: {err}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("canonical-tags.yml");
+    std::fs::write(&path, yaml).expect("write");
+    assert!(CanonicalTagsFile::load(&path).is_err(), "load fails closed too");
+}
+
+#[test]
+fn descriptions_are_optional_and_reach_the_canonical_set() {
+    let bare: CanonicalTagsFile = serde_yaml::from_str("tags:\n  tech:\n    - rust\n").expect("parses");
+    assert!(bare.canonical_set().description.is_empty());
+
+    let yaml = "tags:\n  tech:\n    - rust\n    - cli\ndescriptions:\n  rust: \"the Rust language\"\n";
+    let set = serde_yaml::from_str::<CanonicalTagsFile>(yaml)
+        .expect("parses")
+        .canonical_set();
+    assert_eq!(
+        set.description.get("rust").map(String::as_str),
+        Some("the Rust language")
+    );
+    assert!(!set.description.contains_key("cli"), "a tag may go without one");
+}
+
+/// The shipped vocabulary carries a non-empty description for every tag:
+/// a tag without one gets the weaker name-only question.
+#[test]
+fn the_shipped_file_describes_every_canonical_tag() {
+    let file: CanonicalTagsFile = serde_yaml::from_str(SHIPPED_CANONICAL_TAGS).expect("shipped file parses");
+    let set = file.canonical_set();
+    let mut missing: Vec<&String> = set
+        .all
+        .iter()
+        .filter(|t| set.description.get(*t).is_none_or(|d| d.trim().is_empty()))
+        .collect();
+    missing.sort();
+    assert!(missing.is_empty(), "canonical tags with no description: {missing:?}");
+    assert_eq!(set.description.len(), set.all.len());
 }

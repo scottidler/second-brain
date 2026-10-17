@@ -16,3 +16,35 @@
 ### Open questions
 - C at 0.90 F1 (0.733) is below the classifier.dev baselines A0 (0.741) and A2 (0.788), which were measured on 53 notes and `wire.json`'s 900-char clip. The gate passes; whether that gap matters is Scott's call.
 - 7 of 53 gold notes are gone (vault commit `6ab13d50`), so gold is now 46 notes. Refresh gold before the next calibration?
+
+## Phase 1: Jev classifier, callers compiled green
+### Design decisions
+- The non-canonical `descriptions:` check runs on the serde path, not in `load` (`vault/src/canonical.rs:CanonicalTagsFile`, via `#[serde(try_from = "RawCanonicalTagsFile")]`): `sb cortex tag-promote` parses its candidate buffer with `serde_yaml::from_str`, never `load`, so a check living only in `load` would miss the one path that writes the file.
+- `descriptions:` sits at the end of `config/canonical-tags.yml`, one double-quoted line per tag in group order: `cortex/src/proposals.rs:insert_tags_into_group` finds a group by an exact `  <group>:` line and ends a group at the first non-entry line, so a trailing block of `  <tag>: "..."` lines can never be mistaken for a group header.
+- The key resolves once in `Jev::new` through `vault::config::resolve_secret`, trimmed, unwrap-or-empty (`distillers/src/tags.rs:Jev::new`): same as `GeminiClient::from_config`; an unresolved name errors at `classify`, before any request, naming the variable. `Jev` derives no `Debug`, so the key cannot reach a log line through `{:?}`.
+- One deadline per `classify`: each request's ureq `timeout_global` is what is left of `Instant::now() + timeout-secs`: `distillers/src/tags.rs:Jev::send`.
+- 429: the retry runs only if `delay + RETRY_REQUEST_ALLOWANCE` (1s) fits what is left of the deadline (`distillers/src/tags.rs:Jev::post`): the doc says "delay plus a request" without saying how long a request is, so 1s stands in for one (Phase 0 measured 0.08-0.92s).
+- Error text: status, `detail.error_type`, `detail.message`, `x-typesafe-request-id`: `distillers/src/tags.rs:api_error`. A FastAPI 422 (`detail` is a list) reports `validation_error` plus each item's `loc: msg`, so `input` is dropped. A body that is not JSON contributes nothing, because a 5xx body could hold anything.
+- `noul` missing or null counts as malformed (`Err`), the same as out of range: `distillers/src/tags.rs:Jev::scores`.
+- The live fixture `distillers/src/tags/fixtures/jev-2026-10-16.json` was recorded on ripr: one synthetic Rust-CLI note, all 117 questions with criteria. 200 in 0.14s, served `jev-1.13.0`. Body checked for the key: 0 hits, saved verbatim. It carries `expected` (the ≥0.9 set) for the 200 stub test.
+- The stub tests read the key from a temp secret file (`api-key: <path>`) rather than setting an env var, so no test mutates the process environment: `distillers/src/tags/tests/jev.rs:jev_for`.
+- Break-the-code evidence (each mutation applied, the tests run, the file restored): a second `post` per classify → 14 jev tests fail, incl. the 1-request test; dropping `criteria` → 2 fail; appending the response body to the error → the 422 and 500 tests fail; removing the empty-key guard → both key tests fail; removing the empty-text guard → `empty_text_sends_no_request` fails.
+### Deviations
+- `finish` now takes one score list (`&[(String, f32)]`) instead of per-shard maps. The spec says keep `finish` unchanged, but its input was `merge_shard_scores` output, and that function is deleted. Same rules: author tags at tier 0, cap, subset guard, High/Low.
+- `sb/src/cli/checks.rs` auth line: the compile fix reads `api-key` through `resolve_secret` ("key from X" / "X names no value"). The hint still names classifier.dev; Phase 2 owns that wording.
+- `borg/src/pipeline/tags/tests.rs:classifier_failure_degrades_visibly` had to change to compile. It set `token_env`/`endpoint` and `ClassifierKind::ClassifierDev`, not only the `TagMethod` the spec lists. I used the change Phase 2 specifies (an api-key name that resolves empty, no network) rather than invent an interim one. Phase 2's remaining borg work (stub 200/500 pipeline tests) is untouched.
+- `sb/src/cli/checks/tests.rs:cortex_drift_uses_the_vault_the_unit_was_installed_with` now repoints `XDG_CONFIG_HOME` at an empty temp dir, which meant making `drift::EnvGuard` `pub(super)`. Root cause: `cortex::daemon::desired_systemd_unit` loads `vault::paths::cortex_config()`, and the test never repointed XDG, so it parsed ripr's live `~/.config/sb/cortex.yml`. That file still says `classifier: classifier-dev` (operator step 1), which the new binary rejects. The test had depended on host state all along; this change only made that visible.
+- 11 `CanonicalSet { .. }` struct literals across vault/sb/borg/cortex/distillers tests gained `description: HashMap::new()`. That is mechanical, forced by the new field.
+- Deleted classifier.dev tests, replaced as follows:
+  - `the_default_config_names_no_token_env` → inverted as `the_default_config_names_the_typesafe_key_and_jev_latest`
+  - `an_unset_or_blank_token_env_resolves_keyless` → inverted as `an_unresolved_api_key_errors_without_a_request` + `a_blank_key_file_errors_without_a_request` (there is no keyless path now)
+  - `only_jev_answers_are_accepted` → `a_non_jev_model_is_an_error`
+  - `shards_are_sorted_and_merge_to_recorded_scores`, `the_text_chunk_ceiling_is_the_public_tier_limit`, `the_request_uses_the_multi_field` → deleted with the code they pinned
+  - `outputs_are_canonical_and_capped` lost its classifier.dev-fixture half; the jev 200 test now asserts the cap and the vocabulary subset against the new fixture.
+### Tradeoffs
+- `try_from` raw-struct split vs a validate call in `load`: covers every parse path at the cost of duplicating the field list once.
+- A hand-rolled `std::net` HTTP/1.1 stub vs pulling a server crate into distillers dev-deps: no new dependency; ureq sends `content-length`, so the stub only reads that framing.
+- No `classifier-dev`-value rejection test: the Phase 1 grep forbids the string in `distillers/src`. The stale `token-env` / `endpoint` / `base-url` keys are tested instead, and serde's unknown-variant error covers the old variant (seen live in the sb failure above: `unknown variant ..., expected one of deterministic, fabric-closed, jev`).
+### Open questions
+- `the_shipped_file_describes_every_canonical_tag` pins a description for every canonical tag, as the spec asks. `sb cortex tag-promote --apply` writes no description, so the first promotion turns that test red until someone adds a `descriptions:` line. That forces a description for every new tag, which arguably is the point. Keep it, or relax it to "every description key is canonical" only?
+- ripr's live `~/.config/sb/cortex.yml` (and `borg.yml`) still say `classifier-dev`. Any `sb` built from this commit fails to load them until operator step 1. Expected per the doc's rollout, but worth knowing before any interim `otto install` on ripr.

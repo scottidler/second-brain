@@ -15,6 +15,7 @@ fn test_canon() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        description: std::collections::HashMap::new(),
     }
 }
 
@@ -27,7 +28,7 @@ fn protecting_canon(protected: &[&str]) -> CanonicalSet {
 }
 
 /// A classifier that answers with whatever the test asked for, or errors.
-/// Reports `ClassifierDev` so a test can tell its answer apart from the
+/// Reports `Jev` so a test can tell its answer apart from the
 /// `Deterministic` fallback's in `cortex-classified-by`.
 struct Stub {
     tags: Vec<String>,
@@ -62,12 +63,12 @@ impl TagClassifier for Stub {
             tags: self.tags.clone(),
             scores: None,
             confidence: self.confidence,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         })
     }
 
     fn method(&self) -> TagMethod {
-        TagMethod::ClassifierDev
+        TagMethod::Jev
     }
 }
 
@@ -205,7 +206,7 @@ fn test_build_enrichment_fields_unions_tags() {
             tags: vec!["ai".to_string(), "llm".to_string()],
             scores: None,
             confidence: Confidence::High,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         },
         reason: "test".to_string(),
     };
@@ -233,7 +234,7 @@ fn test_build_enrichment_fields_unions_tags() {
     assert!(
         fields
             .iter()
-            .any(|(k, v)| k == "cortex-classified-by" && v == &serde_yaml::Value::String("classifier-dev".to_string()))
+            .any(|(k, v)| k == "cortex-classified-by" && v == &serde_yaml::Value::String("jev".to_string()))
     );
 }
 
@@ -250,7 +251,7 @@ fn test_build_enrichment_fields_cap_keeps_preserved() {
             tags: vec!["ai".to_string()],
             scores: None,
             confidence: Confidence::High,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         },
         reason: "test".to_string(),
     };
@@ -706,7 +707,7 @@ fn enrichment_cap_keeps_the_protected_tag_when_the_note_already_exceeds_it() {
             tags: vec!["ai".to_string()],
             scores: None,
             confidence: Confidence::High,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         },
         reason: "test".to_string(),
     };
@@ -861,12 +862,12 @@ impl TagClassifier for StoppingStub {
             tags: self.tags.clone(),
             scores: None,
             confidence: Confidence::High,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         })
     }
 
     fn method(&self) -> TagMethod {
-        TagMethod::ClassifierDev
+        TagMethod::Jev
     }
 }
 
@@ -1021,12 +1022,12 @@ impl TagClassifier for FirstCallOnlyStub {
             tags: vec!["rust".to_string()],
             scores: None,
             confidence: Confidence::High,
-            method: TagMethod::ClassifierDev,
+            method: TagMethod::Jev,
         })
     }
 
     fn method(&self) -> TagMethod {
-        TagMethod::ClassifierDev
+        TagMethod::Jev
     }
 }
 

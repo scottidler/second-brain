@@ -6,24 +6,68 @@ use std::path::Path;
 /// `canonical-tags.yml`. Unknown keys are an error: a mistyped
 /// `no-classifer-tags:` would otherwise parse as an absent (empty) protect
 /// list and every capping path would drop the tags it was meant to keep.
+///
+/// Deserialized through `RawCanonicalTagsFile` so a `descriptions:` key that
+/// is not a canonical tag fails every parse path (`load`, and the
+/// `serde_yaml::from_str` calls `sb cortex tag-promote` makes on its
+/// candidate buffer), not only the one that remembered to check.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(try_from = "RawCanonicalTagsFile")]
 pub struct CanonicalTagsFile {
-    #[serde(default = "default_max_per_note")]
     pub max_per_note: usize,
-    #[serde(default = "default_max_canonical")]
     pub max_canonical: usize,
     /// Tags tier-2 segment matching may never mint on its own (e.g. `work` and
     /// `life` out of raw `work-life-balance`). Absent in files written before
     /// this field existed, hence the default.
-    #[serde(default)]
     pub no_segment_match: Vec<String>,
     /// Tags no capping path may drop: the classifier recovers 0 of 17 of them
     /// from note text (tags-only design doc). Reaches every consumer through
     /// `CanonicalSet::no_classifier`.
-    #[serde(default)]
     pub no_classifier_tags: Vec<String>,
     pub tags: HashMap<String, Vec<String>>,
+    /// `descriptions:`, tag -> text. The jev classifier sends each as that
+    /// tag's `criteria.true`, which measured better than the bare tag name.
+    /// Every key must be a canonical tag; a tag without one is asked by name.
+    pub descriptions: HashMap<String, String>,
+}
+
+/// The on-disk shape, before the cross-field check `CanonicalTagsFile`
+/// adds on top of it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawCanonicalTagsFile {
+    #[serde(default = "default_max_per_note")]
+    max_per_note: usize,
+    #[serde(default = "default_max_canonical")]
+    max_canonical: usize,
+    #[serde(default)]
+    no_segment_match: Vec<String>,
+    #[serde(default)]
+    no_classifier_tags: Vec<String>,
+    tags: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    descriptions: HashMap<String, String>,
+}
+
+impl TryFrom<RawCanonicalTagsFile> for CanonicalTagsFile {
+    type Error = String;
+
+    fn try_from(raw: RawCanonicalTagsFile) -> std::result::Result<Self, Self::Error> {
+        let all: HashSet<&String> = raw.tags.values().flatten().collect();
+        let mut strangers: Vec<&String> = raw.descriptions.keys().filter(|k| !all.contains(k)).collect();
+        if !strangers.is_empty() {
+            strangers.sort();
+            return Err(format!("descriptions: keys {strangers:?} are not canonical tags"));
+        }
+        Ok(Self {
+            max_per_note: raw.max_per_note,
+            max_canonical: raw.max_canonical,
+            no_segment_match: raw.no_segment_match,
+            no_classifier_tags: raw.no_classifier_tags,
+            tags: raw.tags,
+            descriptions: raw.descriptions,
+        })
+    }
 }
 
 /// The loaded canonical-tag vocabulary shared by borg, cortex, and
@@ -42,6 +86,8 @@ pub struct CanonicalSet {
     /// instead of in it is how sweep came to cap without one.
     pub no_classifier: HashSet<String>,
     pub max_per_note: usize,
+    /// Per-tag description, from `descriptions:`. Empty for a tag without one.
+    pub description: HashMap<String, String>,
 }
 
 /// Matches `max-per-note` in the shipped `config/canonical-tags.yml`
@@ -74,6 +120,7 @@ impl CanonicalTagsFile {
             no_segment: self.no_segment_match.iter().cloned().collect(),
             no_classifier: self.no_classifier_tags.iter().cloned().collect(),
             max_per_note: self.max_per_note,
+            description: self.descriptions.clone(),
         }
     }
 }

@@ -26,6 +26,7 @@ fn test_canon() -> CanonicalSet {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 7,
+        description: std::collections::HashMap::new(),
     }
 }
 
@@ -84,6 +85,7 @@ fn tags_schema_rules_fire_once_each() {
         no_segment: HashSet::new(),
         no_classifier: HashSet::new(),
         max_per_note: 3,
+        description: std::collections::HashMap::new(),
     };
     let config = TagsConfig::default();
 

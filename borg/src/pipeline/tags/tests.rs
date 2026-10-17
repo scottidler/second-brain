@@ -9,6 +9,7 @@ fn canon(max: usize, protected: &[&str]) -> vault::canonical::CanonicalSet {
         no_segment: std::collections::HashSet::new(),
         no_classifier: protected.iter().map(|t| (*t).to_string()).collect(),
         max_per_note: max,
+        description: std::collections::HashMap::new(),
     }
 }
 
@@ -250,15 +251,14 @@ async fn classifier_failure_degrades_visibly() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = config_with_fixture_canonical(dir.path());
     config.tags.classifier = distillers::tags::TagsClassifierConfig {
-        classifier: distillers::tags::ClassifierKind::ClassifierDev,
+        classifier: distillers::tags::ClassifierKind::Jev,
         threshold: 0.9,
-        // Keyless, like production. The error path comes from the
-        // unreachable endpoint below (port 1), not from a missing
-        // credential: an absent token is a valid keyless request now.
-        token_env: String::new(),
         fallback: distillers::tags::ClassifierKind::Deterministic,
-        endpoint: "http://127.0.0.1:1/classify".to_string(),
         timeout_secs: 1,
+        // An api-key name that resolves empty: jev errors before any
+        // request, so the error path needs no network at all.
+        api_key: "BORG_TEST_UNSET_TYPESAFE_KEY_4e1a7c".to_string(),
+        ..distillers::tags::TagsClassifierConfig::default()
     };
 
     let mut sources = TagSources::from_summary("title", "text");
