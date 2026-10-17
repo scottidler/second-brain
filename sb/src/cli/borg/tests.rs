@@ -319,3 +319,25 @@ fn remediate_is_a_dry_run_unless_apply_and_apply_needs_remediate() {
     assert!(EvalHarness::try_parse_from(["sb", "--remediate", "--unscored"]).is_err());
     assert!(EvalHarness::try_parse_from(["sb", "--remediate", "--judge-model", "x"]).is_err());
 }
+
+#[test]
+fn weekly_is_its_own_mode_and_takes_a_report_copy_and_a_patterns_dir() {
+    let h = EvalHarness::try_parse_from(["sb", "--weekly"]).unwrap();
+    assert!(h.eval.weekly);
+    let h =
+        EvalHarness::try_parse_from(["sb", "--weekly", "--report", "r.md", "--patterns-dir", "borg/patterns"]).unwrap();
+    assert_eq!(h.eval.report, Some(std::path::PathBuf::from("r.md")));
+    for flag in [
+        &["--unscored"][..],
+        &["--inject"],
+        &["--remediate"],
+        &["--staged"],
+        &["--format", "json"],
+        &["--judge-model", "m"],
+        &["--apply-candidate", "c.md"],
+    ] {
+        let mut argv = vec!["sb", "--weekly"];
+        argv.extend_from_slice(flag);
+        assert!(EvalHarness::try_parse_from(argv).is_err(), "{flag:?} must conflict");
+    }
+}

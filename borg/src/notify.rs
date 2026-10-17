@@ -164,6 +164,58 @@ impl Telegram {
     }
 }
 
+/// A destination for one plain-text summary message. [`Telegram`] is the
+/// production sink; a test supplies a recorder, so the "exactly one message"
+/// and "the disable gate holds" properties are proved without a network.
+#[async_trait::async_trait]
+pub trait MessageSink {
+    /// Send `text` as one message. `Err` carries why it was not delivered.
+    async fn send(&self, text: &str) -> std::result::Result<(), String>;
+}
+
+#[async_trait::async_trait]
+impl MessageSink for Telegram {
+    async fn send(&self, text: &str) -> std::result::Result<(), String> {
+        let bot = self.bot.clone();
+        let chat_id = self.default_chat_id;
+        let text = text.to_string();
+        let future = async move { bot.send_message(chat_id, text).await };
+        match tokio::time::timeout(Duration::from_millis(TELEGRAM_TIMEOUT_MS), future).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("telegram send failed: {e}")),
+            Err(_) => Err(format!("telegram send timed out after {TELEGRAM_TIMEOUT_MS}ms")),
+        }
+    }
+}
+
+/// What [`announce`] did with a summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Announced {
+    Sent,
+    /// `real_notifications_disabled()` was set: nothing left the process.
+    Suppressed,
+    Failed(String),
+}
+
+/// Send `text` to `sink` as exactly one message, unless `disabled`. The gate is
+/// a parameter so a test can open it; production goes through [`announce`].
+pub async fn announce_unless<S: MessageSink + ?Sized>(sink: &S, text: &str, disabled: bool) -> Announced {
+    if disabled {
+        log::debug!("notify::announce: suppressed (notifications disabled)");
+        return Announced::Suppressed;
+    }
+    match sink.send(text).await {
+        Ok(()) => Announced::Sent,
+        Err(e) => Announced::Failed(e),
+    }
+}
+
+/// [`announce_unless`] behind the process-wide disable gate
+/// ([`real_notifications_disabled`]: `cfg!(test)`, `BORG_DISABLE_NOTIFICATIONS`).
+pub async fn announce<S: MessageSink + ?Sized>(sink: &S, text: &str) -> Announced {
+    announce_unless(sink, text, real_notifications_disabled()).await
+}
+
 /// Escape HTML special characters for Telegram messages.
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")

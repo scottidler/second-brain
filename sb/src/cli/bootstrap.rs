@@ -152,6 +152,10 @@ pub(crate) const PATTERNS: &[(&str, &str)] = &[
         include_str!("../../../borg/patterns/obsidian-youtube-slides.md"),
     ),
     (
+        "eval-cluster-failures.md",
+        include_str!("../../../borg/patterns/eval-cluster-failures.md"),
+    ),
+    (
         "extract-entities.md",
         include_str!("../../../borg/patterns/extract-entities.md"),
     ),
@@ -413,7 +417,7 @@ async fn register_systemd_units() -> Result<()> {
         println!("{line}");
     }
 
-    // The daily eval timer: the same units-then-enable shape, but this one is
+    // The daily eval timer and the weekly report timer: the same units-then-enable shape, but this one is
     // enabled here (`enable --now`) because nothing else would turn it on.
     // A config that cannot render the units (llm.api-keys named but no
     // eval.env-bootstrap) fails the bootstrap, loudly, after every other unit
@@ -426,7 +430,11 @@ async fn register_systemd_units() -> Result<()> {
     for args in borg::eval::timer::enable_commands() {
         run_systemctl(&args)?;
     }
-    println!("Enabled and started {}", borg::eval::timer::EVAL_TIMER);
+    println!(
+        "Enabled and started {} and {}",
+        borg::eval::timer::EVAL_TIMER,
+        borg::eval::timer::REPORT_TIMER
+    );
 
     Ok(())
 }

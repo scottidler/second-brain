@@ -815,6 +815,7 @@ fn borg_findings() -> Vec<Finding> {
         Ok(_) => {}
         Err(e) => findings.push(Finding::info(format!("harvest drift check failed: {e}"))),
     }
+    findings.extend(eval::findings(&borg_cfg));
     // Receipts DB summary: open read-only, group by status, group failures
     // by stage. Reported as info (the file may not exist yet on a fresh
     // install, which is fine).
@@ -1433,6 +1434,7 @@ fn current_hostname() -> String {
     borg::config::current_hostname().unwrap_or_default()
 }
 
+mod eval;
 mod fabric_patterns;
 mod stop_timeout;
 #[cfg(test)]

@@ -341,6 +341,21 @@ pub struct EvalArgs {
     /// re-distill through the daemon's /ingest, carrying replay-of
     #[arg(long, requires = "remediate")]
     pub apply: bool,
+    /// Cluster the failing scored traces with ONE model call and write
+    /// `~/.local/share/sb/borg/eval-reports/<date>.md`: the categories (count
+    /// and example traces), the Remediated section, each judge check's trust
+    /// state and the measured candidates. Sends ONE Telegram summary
+    /// (suppressed by BORG_DISABLE_NOTIFICATIONS). This is what
+    /// `sb-eval-report.service` runs weekly
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "staged", "unscored", "inject", "remediate", "synth_intents", "regenerate", "emit_calibration",
+            "no_judge", "judge_model", "rebuild_cache", "staging_root", "sample", "count", "limit", "format",
+            "candidate_split", "candidate_pattern", "apply_candidate", "pattern"
+        ]
+    )]
+    pub weekly: bool,
     /// The distill pattern a candidate replaces (`distill-video`,
     /// `distill-article`, ...), for --candidate-split and --candidate-pattern
     #[arg(long, value_name = "NAME")]

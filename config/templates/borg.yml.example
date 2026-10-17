@@ -334,6 +334,18 @@ harvest:
 #   candidate:
 #     max-coverage-cut: 0.10
 #     distill-workers: 4              # distills in flight while scoring
+#   # Weekly failure clusters (sb-eval-report.timer): `sb borg eval --weekly`
+#   # makes ONE clustering call over the failing scored traces, writes
+#   # ~/.local/share/sb/borg/eval-reports/<date>.md (categories, the
+#   # Remediated section, each judge check's trust state, candidates) and
+#   # sends ONE Telegram message. `sb doctor` warns when the newest report is
+#   # older than stale-after-days. `sb bootstrap` writes and enables the units
+#   # (same env-bootstrap as the daily eval).
+#   report:
+#     schedule: "Sun *-*-* 06:00:00"  # systemd OnCalendar, the one value in the timer
+#     model: gemini-2.5-pro           # clustering call (omit = the default judge)
+#     max-failures: 200               # failing traces shown to the call
+#     stale-after-days: 8
 
 # Intake - raw-input sidecars. Every trace gets <vault>/system/intake/<trace>.txt
 # holding the verbatim bytes it arrived with (or a short descriptor for binary

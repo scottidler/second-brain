@@ -18,6 +18,15 @@ pub const DEFAULT_MAX_COVERAGE_CUT: f64 = 0.10;
 /// Default `eval.candidate.distill-workers`: distills in flight while a
 /// candidate pattern is scored.
 const DEFAULT_CANDIDATE_DISTILL_WORKERS: usize = 4;
+/// Default `eval.report.schedule`: Sunday morning, after the daily 05:00 eval
+/// has scored the week's last ingests.
+const DEFAULT_REPORT_SCHEDULE: &str = "Sun *-*-* 06:00:00";
+/// Default `eval.report.max-failures`: failing traces one weekly clustering
+/// call is shown; the rest are counted and named in the report.
+const DEFAULT_REPORT_MAX_FAILURES: usize = 200;
+/// Default `eval.report.stale-after-days`: `sb doctor` warns when the newest
+/// weekly report is older than this (a weekly cadence plus a day of slack).
+const DEFAULT_REPORT_STALE_AFTER_DAYS: i64 = 8;
 /// The default judge: a Gemini model, because the distiller is Anthropic and
 /// self-preference is a documented judge bias. First in the default
 /// `judge-models`, and the model `sb borg eval --staged` judges with when
@@ -64,6 +73,40 @@ pub struct EvalConfig {
     /// How a candidate distill pattern is scored against the current one
     /// (`--candidate-pattern`, `--apply-candidate`).
     pub candidate: CandidateConfig,
+    /// The weekly failure-cluster report (`sb borg eval --weekly`).
+    pub report: ReportConfig,
+}
+
+/// The `eval.report:` block: the weekly failure-cluster report that
+/// `sb-eval-report.timer` runs.
+///
+/// Like the eval timer, the timer bakes only `OnCalendar` (`schedule`);
+/// `max-failures` and the model are read from borg.yml by the service's own
+/// ExecStart at fire time.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ReportConfig {
+    /// systemd `OnCalendar` expression for `sb-eval-report.timer`.
+    pub schedule: String,
+    /// Fabric `-m` for the one clustering call. `None` uses the default judge
+    /// (`eval.judge-models[0]`), so the call goes to a vendor `llm.api-keys`
+    /// already carries a key for.
+    pub model: Option<String>,
+    /// Failing traces shown to the clustering call.
+    pub max_failures: usize,
+    /// `sb doctor` warns when the newest report is older than this many days.
+    pub stale_after_days: i64,
+}
+
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            schedule: DEFAULT_REPORT_SCHEDULE.to_string(),
+            model: None,
+            max_failures: DEFAULT_REPORT_MAX_FAILURES,
+            stale_after_days: DEFAULT_REPORT_STALE_AFTER_DAYS,
+        }
+    }
 }
 
 /// The `eval.candidate:` block: the coverage floor of the candidate metric
@@ -134,6 +177,12 @@ impl EvalConfig {
         if self.candidate.distill_workers == 0 {
             eyre::bail!("eval.candidate.distill-workers must be at least 1");
         }
+        if self.report.max_failures == 0 {
+            eyre::bail!("eval.report.max-failures must be at least 1");
+        }
+        if self.report.stale_after_days < 1 {
+            eyre::bail!("eval.report.stale-after-days must be at least 1");
+        }
         Ok(())
     }
 }
@@ -148,6 +197,7 @@ impl Default for EvalConfig {
             trust: TrustConfig::default(),
             inject_workers: DEFAULT_INJECT_WORKERS,
             candidate: CandidateConfig::default(),
+            report: ReportConfig::default(),
         }
     }
 }

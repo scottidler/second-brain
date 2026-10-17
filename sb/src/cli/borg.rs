@@ -6,6 +6,7 @@ pub mod extension;
 mod render;
 mod tools;
 pub mod wait;
+mod weekly;
 
 pub use args::*;
 use render::*;
@@ -409,6 +410,9 @@ impl BorgCli {
                 }
                 if a.remediate {
                     return run_eval_remediate(&config, a.apply).await;
+                }
+                if a.weekly {
+                    return weekly::run(&config, &opts, &a).await;
                 }
                 match borg::eval::run(&opts)? {
                     borg::eval::EvalOutcome::CalibrationSheet(path) => {

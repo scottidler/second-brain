@@ -105,5 +105,69 @@ fn eval_block_parses_and_rejects_unknown_keys() {
 fn bootstrap_enables_the_timer_now_after_a_daemon_reload() {
     let [reload, enable] = enable_commands();
     assert_eq!(reload, ["--user", "daemon-reload"]);
-    assert_eq!(enable, ["--user", "enable", "--now", "sb-eval.timer"]);
+    assert_eq!(
+        enable,
+        ["--user", "enable", "--now", "sb-eval.timer", "sb-eval-report.timer"]
+    );
+}
+
+fn report_units(config: &Config) -> Result<(String, String)> {
+    render_report_units(
+        &PathBuf::from("/home/tester"),
+        &PathBuf::from("/home/tester/.cargo/bin/sb"),
+        Some(&PathBuf::from("/home/tester/.config/sb/borg.yml")),
+        config,
+    )
+}
+
+#[test]
+fn report_service_runs_eval_weekly_and_its_timer_bakes_only_the_report_schedule() {
+    let mut config = keyless();
+    config.eval.report.schedule = "Mon *-*-* 07:30:00".to_string();
+    config.eval.env_bootstrap = Some(bootstrap());
+    let (service, timer) = report_units(&config).unwrap();
+    assert!(
+        service.contains(
+            "\nExecStart=/home/tester/.cargo/bin/sb borg --config /home/tester/.config/sb/borg.yml eval --weekly\n"
+        ),
+        "{service}"
+    );
+    assert!(service.contains("Type=oneshot"));
+    assert!(
+        service.contains("EnvironmentFile=-/run/user/1000/sb-eval.env"),
+        "the clustering call needs the vendor keys:\n{service}"
+    );
+    assert!(timer.contains("OnCalendar=Mon *-*-* 07:30:00"), "{timer}");
+    assert!(
+        !timer.contains("05:00:00"),
+        "the report must not borrow the daily schedule:\n{timer}"
+    );
+    for baked in ["ExecStart", "--weekly", "max-failures"] {
+        assert!(!timer.contains(baked), "timer must not bake `{baked}`:\n{timer}");
+    }
+}
+
+#[test]
+fn report_units_refuse_named_keys_without_a_bootstrap() {
+    let config: Config = serde_yaml::from_str("llm:\n  api-keys:\n    gemini: GEMINI_API_KEY\n").unwrap();
+    let err = report_units(&config).unwrap_err().to_string();
+    assert!(err.contains("GEMINI_API_KEY"), "{err}");
+}
+
+#[test]
+fn report_block_parses_validates_and_rejects_unknown_keys() {
+    let config: Config = serde_yaml::from_str(
+        "eval:\n  report:\n    schedule: weekly\n    model: gemini-2.5-pro\n    max-failures: 50\n    stale-after-days: 9\n",
+    )
+    .unwrap();
+    assert_eq!(config.eval.report.max_failures, 50);
+    assert_eq!(config.eval.report.model.as_deref(), Some("gemini-2.5-pro"));
+    config.eval.validate().unwrap();
+    assert!(serde_yaml::from_str::<Config>("eval:\n  report:\n    shedule: x\n").is_err());
+    let mut bad = config.eval.clone();
+    bad.report.max_failures = 0;
+    assert!(bad.validate().unwrap_err().to_string().contains("max-failures"));
+    let mut bad = config.eval;
+    bad.report.stale_after_days = 0;
+    assert!(bad.validate().unwrap_err().to_string().contains("stale-after-days"));
 }

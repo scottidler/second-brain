@@ -280,3 +280,65 @@ fn real_notifications_disabled_under_cargo_test() {
         "real_notifications_disabled() must return true under cfg!(test)"
     );
 }
+
+/// Records every message it is asked to send.
+#[derive(Default)]
+struct RecordingSink {
+    sent: std::sync::Mutex<Vec<String>>,
+    fail_with: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl MessageSink for RecordingSink {
+    async fn send(&self, text: &str) -> Result<(), String> {
+        if let Some(e) = &self.fail_with {
+            return Err(e.clone());
+        }
+        self.sent.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+#[test]
+fn announce_sends_the_text_as_exactly_one_message() {
+    let sink = RecordingSink::default();
+    let result = block_on(announce_unless(&sink, "sb eval 2026-10-17: 2 failing", false));
+    assert_eq!(result, Announced::Sent);
+    assert_eq!(*sink.sent.lock().unwrap(), ["sb eval 2026-10-17: 2 failing"]);
+}
+
+#[test]
+fn announce_sends_nothing_while_notifications_are_disabled() {
+    let sink = RecordingSink::default();
+    let result = block_on(announce_unless(&sink, "text", true));
+    assert_eq!(result, Announced::Suppressed);
+    assert!(sink.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_process_gate_is_closed_under_test_so_announce_never_leaves_the_process() {
+    assert!(real_notifications_disabled());
+    let sink = RecordingSink::default();
+    assert_eq!(block_on(announce(&sink, "text")), Announced::Suppressed);
+    assert!(sink.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn announce_reports_a_delivery_failure_instead_of_swallowing_it() {
+    let sink = RecordingSink {
+        fail_with: Some("telegram send timed out".to_string()),
+        ..RecordingSink::default()
+    };
+    assert_eq!(
+        block_on(announce_unless(&sink, "text", false)),
+        Announced::Failed("telegram send timed out".to_string())
+    );
+}

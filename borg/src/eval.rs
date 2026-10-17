@@ -28,6 +28,7 @@ pub mod report;
 pub mod scores;
 pub mod timer;
 pub mod trust;
+pub mod weekly;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
