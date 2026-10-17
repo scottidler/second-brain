@@ -55,12 +55,12 @@ pub(crate) fn real_notifications_disabled() -> bool {
     // `cfg!(test)` catches borg's own `cargo test`/`cargo test -p borg`.
     // `CARGO_TARGET_TMPDIR` is set by cargo when running integration tests
     // for any crate. `NEXTEST_RUN_ID` is set by `cargo nextest`. The
-    // explicit env override is for shell debugging when an operator wants
-    // to exercise the binary without producing real toasts.
+    // explicit env override silences all three sinks (desktop, Telegram,
+    // Signal) for an operator, e.g. on the daemon unit during an ingest flood.
     cfg!(test)
         || std::env::var_os("CARGO_TARGET_TMPDIR").is_some()
         || std::env::var_os("NEXTEST_RUN_ID").is_some()
-        || std::env::var_os("BORG_DISABLE_DESKTOP_NOTIFY").is_some()
+        || std::env::var_os("BORG_DISABLE_NOTIFICATIONS").is_some()
 }
 
 /// Telegram notification sink. Clone-cheap: `Bot` is an HTTP client wrapper.
