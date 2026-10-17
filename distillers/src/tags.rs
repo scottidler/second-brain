@@ -215,6 +215,27 @@ impl Default for TagsClassifierConfig {
     }
 }
 
+impl TagsClassifierConfig {
+    /// The daemon-start warning when `classifier` or `fallback` is `jev` and
+    /// `api-key` resolves empty, else `None`. Shared by borg and cortex, whose
+    /// daemons alone get the key env: a warning rather than an error because
+    /// the other slot still tags notes. Every jev classify fails until the key
+    /// is set, so the warning names the field, the variable and the keep secret.
+    pub fn empty_jev_key_warning(&self) -> Option<String> {
+        let uses_jev = self.classifier == ClassifierKind::Jev || self.fallback == ClassifierKind::Jev;
+        let resolves = vault::config::resolve_secret(&self.api_key).is_ok_and(|k| !k.trim().is_empty());
+        if !uses_jev || resolves {
+            return None;
+        }
+        Some(format!(
+            "tags.classifier uses jev but tags.classifier.api-key ({}) resolves empty; \
+             every jev classify fails and the fallback runs until it is set \
+             (keep secret `escote-typesafe-api-key`)",
+            self.api_key
+        ))
+    }
+}
+
 /// Sync port over a Fabric pattern invocation.
 ///
 /// The crate's `FabricCaller` is `#[async_trait]`, and `TagClassifier` is sync

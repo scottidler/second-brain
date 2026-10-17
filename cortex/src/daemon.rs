@@ -74,12 +74,24 @@ pub async fn run(vault_root: &Path, config: &Config, opts: &DaemonOpts) -> Resul
     }
 }
 
+/// Checks that read the daemon's environment, run once before the watcher
+/// starts. An empty jev key (`tags.classifier` or its fallback) only WARNs:
+/// the other classifier slot still tags notes, and classify holds a note back
+/// only when both return `Low`.
+fn validate_daemon_start(config: &Config) -> Result<()> {
+    if let Some(warning) = config.tags.classifier.empty_jev_key_warning() {
+        log::warn!("{warning}");
+    }
+    Ok(())
+}
+
 /// Start filesystem watcher and run actions on changes using async tokio::select! loop.
 async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     // First thing, before the startup sweep: from here on SIGTERM/SIGINT set the
     // stop flag instead of killing the process, so work can stop at a check point.
     let stop = crate::shutdown::StopHandle::listen();
     crate::startup::validate_canonical_assets()?;
+    validate_daemon_start(config)?;
     let daemon_config = &config.daemon;
     let poll_interval = Duration::from_secs(daemon_config.poll_interval);
 
@@ -1204,5 +1216,7 @@ use model_load::StartupModel;
 mod stop_budget;
 use stop_budget::ensure_stop_budget;
 
+#[cfg(test)]
+mod jev;
 #[cfg(test)]
 mod tests;

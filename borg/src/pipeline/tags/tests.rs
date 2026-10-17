@@ -277,6 +277,89 @@ async fn classifier_failure_degrades_visibly() {
     );
 }
 
+/// The jev route the stub serves; the same path `Jev` posts to.
+const SYSTEMONE: &str = "/v1/systemone";
+
+/// What jev answers for the fixture vocabulary (`rust`, `llm`): `rust` at 0.99
+/// clears the 0.9 threshold, `llm` at 0.02 does not.
+const JEV_ANSWER: &str =
+    r#"{"model":"jev-1.13.0","answers":{"rust":{"type":"noul","noul":0.99},"llm":{"type":"noul","noul":0.02}}}"#;
+
+/// A config whose jev classifier talks to `base_url` with a key read from a
+/// temp secret file (no process-env mutation) and `deterministic` as the
+/// fallback.
+fn jev_config(dir: &std::path::Path, base_url: String) -> Config {
+    let key_path = dir.join("typesafe-key");
+    std::fs::write(&key_path, "borg-stub-key-not-real\n").expect("write key");
+    let mut config = config_with_fixture_canonical(dir);
+    config.tags.classifier = distillers::tags::TagsClassifierConfig {
+        classifier: distillers::tags::ClassifierKind::Jev,
+        fallback: distillers::tags::ClassifierKind::Deterministic,
+        timeout_secs: 5,
+        api_key: key_path.to_string_lossy().into_owned(),
+        base_url: Some(base_url),
+        ..distillers::tags::TagsClassifierConfig::default()
+    };
+    config
+}
+
+/// `finalize_tags` through the `base_url` seam against a
+/// 200 stub. The stub is served by this test's current-thread runtime while
+/// `finalize_tags` runs sync `ureq` on its `spawn_blocking` thread, so the
+/// two never share a thread. The input carries no candidates, so
+/// `deterministic` would return nothing: the `rust` tag can only have come
+/// from jev, and `degraded` is false because the classifier did not error.
+///
+/// Break-the-code evidence (implementation notes): stubbing the route with a
+/// 500 fails both assertions (no tags, degraded).
+#[tokio::test]
+async fn jev_stub_200_tags_the_note_without_degrading() {
+    use crate::youtube::engine::stub;
+    let (base_url, hits) = stub::serve(vec![(SYSTEMONE, vec![(200, JEV_ANSWER.to_string())])]).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = jev_config(dir.path(), base_url);
+
+    let outcome = finalize_tags(TagSources::from_summary("Async Rust", "a guide to tokio"), &config).await;
+
+    assert_eq!(outcome.tags, vec!["rust".to_string()], "jev's score selects the tag");
+    assert!(!outcome.degraded, "a 200 must not mark the receipt degraded");
+    assert_eq!(hits.get(SYSTEMONE), 1, "one request per classify");
+}
+
+/// A 500 from jev runs the fallback and marks the
+/// outcome degraded. The model candidate `llm` reaches the note only through
+/// `deterministic`, which jev ignores, so it proves the fallback ran.
+///
+/// Break-the-code evidence (implementation notes): forcing `degraded` to
+/// `false` on the fallback arm of `finalize_tags` fails the `degraded`
+/// assertion.
+#[tokio::test]
+async fn jev_stub_500_runs_the_fallback_and_degrades() {
+    use crate::youtube::engine::stub;
+    let (base_url, hits) = stub::serve(vec![(
+        SYSTEMONE,
+        vec![(
+            500,
+            r#"{"detail":{"error_type":"internal","message":"boom"}}"#.to_string(),
+        )],
+    )])
+    .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = jev_config(dir.path(), base_url);
+
+    let mut sources = TagSources::from_summary("Async Rust", "a guide to tokio");
+    sources.model.push(hygiene::sanitize_tag("llm"));
+    let outcome = finalize_tags(sources, &config).await;
+
+    assert!(outcome.degraded, "a jev 500 must mark the outcome degraded");
+    assert_eq!(
+        outcome.tags,
+        vec!["llm".to_string()],
+        "the deterministic fallback tagged the note"
+    );
+    assert_eq!(hits.get(SYSTEMONE), 1);
+}
+
 /// Design doc success criterion: publisher-supplied candidates (a creator's
 /// own hashtag, yt-dlp tags) that map to a canonical tag are recorded to
 /// `author-tags` so a later `--retag` can recover them even when the

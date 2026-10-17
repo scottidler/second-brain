@@ -170,7 +170,12 @@ impl Config {
     /// resolve. A gemini engine with no fallback and an empty key is a hard
     /// error; a gemini engine that can still fall back, or a gemini fallback,
     /// with an empty key only WARNs: the other engine still serves ingest.
+    /// An empty jev key (`tags.classifier` or its fallback) also only WARNs:
+    /// the other classifier slot still tags notes.
     pub fn validate_daemon_start(&self) -> Result<()> {
+        if let Some(warning) = self.tags.classifier.empty_jev_key_warning() {
+            log::warn!("{warning}");
+        }
         let yt = &self.youtube;
         let uses_gemini = yt.engine == YoutubeEngine::Gemini || yt.fallback == Some(YoutubeEngine::Gemini);
         if !uses_gemini {

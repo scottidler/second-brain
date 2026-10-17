@@ -48,3 +48,23 @@
 ### Open questions
 - `the_shipped_file_describes_every_canonical_tag` pins a description for every canonical tag, as the spec asks. `sb cortex tag-promote --apply` writes no description, so the first promotion turns that test red until someone adds a `descriptions:` line. That forces a description for every new tag, which arguably is the point. Keep it, or relax it to "every description key is canonical" only?
 - ripr's live `~/.config/sb/cortex.yml` (and `borg.yml`) still say `classifier-dev`. Any `sb` built from this commit fails to load them until operator step 1. Expected per the doc's rollout, but worth knowing before any interim `otto install` on ripr.
+
+## Phase 2: Borg and cortex wiring, doctor, daemon-start check
+### Design decisions
+- One shared check, `TagsClassifierConfig::empty_jev_key_warning` (`distillers/src/tags.rs`), returns the WARN text when `classifier` or `fallback` is `jev` and `api-key` resolves empty. Borg (`Config::validate_daemon_start`, `borg/src/config/engine.rs`) and cortex (`daemon::validate_daemon_start`, called from `start_watching` in `cortex/src/daemon.rs`) both log it. The `tags.classifier` block is identical in both ymls, so the condition lives once beside the config type. The warning names the field, the variable and the keep secret `escote-typesafe-api-key`.
+- The borg warn runs before the youtube early return in `validate_daemon_start`, which used to return for any non-gemini config.
+- The borg 200/500 pipeline tests reuse `crate::youtube::engine::stub::serve` (route `/v1/systemone`): it reads the full content-length body before answering, which the older single-read `borg/src/stub.rs` does not. Key rides a temp secret file, so no env mutation. The stub is served by the `#[tokio::test]` current-thread runtime and `finalize_tags` runs sync ureq on `spawn_blocking`, per the doc's Testing Strategy warning.
+- The tests prove jev ran from the data, not a flag: the 200 test passes no candidates, so `deterministic` would return nothing and `rust` can only come from jev's 0.99. The 500 test passes a model candidate `llm`, which only `deterministic` consumes.
+- `sb doctor`: the hint now names `api.typesafe.ai`, `tags.classifier.api-key` and `escote-typesafe-api-key`. The probe already posted to `/v1/systemone` through `distillers::tags::build` (the endpoint is `Jev`'s only one), so no code change there; the doc comment says so.
+- `classifier_failure_degrades_visibly` (Phase 1) confirmed to meet the bullet: an api-key name that resolves empty, no network.
+- Comments updated in `borg/src/pipeline/tags.rs`, `borg/src/pipeline/handlers.rs`, `cortex/src/classify.rs`.
+- Bite checks (mutate, run, restore): 200 test with the stub returning 500 fails (`left: []`); `Ok(out) => (out.tags, false)` on the fallback arm fails the 500 test and `classifier_failure_degrades_visibly`; the borg and the cortex WARN each replaced by a no-op fails their daemon-start test.
+### Deviations
+- The spec says the 200 case asserts `method == Jev`. `TagOutcome` carries no method, and adding a field only for a test is the wrong seam. The tag set (only jev's score can select `rust`) and the single stub hit stand in for it.
+- The spec calls for a daemon-start WARN "in cortex" with the same shape as borg. Cortex had no `validate_daemon_start`, so a small one now exists in `daemon.rs` and is called from `start_watching`.
+- No `sb doctor` test: `classifier_findings` loads the live borg config and makes a live request, as before; there is no seam to stub without new code the spec does not ask for.
+### Tradeoffs
+- A shared method on the config type vs two copies of the condition: one place for the message and the rule.
+- WARN not error on an empty key, even when `classifier: jev` and the fallback is `deterministic`: matches the doc and the gemini fallback precedent; ingest keeps working, degraded.
+### Open questions
+- None.

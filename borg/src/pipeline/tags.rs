@@ -53,7 +53,7 @@ pub(crate) async fn get_or_init_canonical(config: &Config) -> Option<std::sync::
 /// provenance is gone, which is why candidates are built before it.
 pub(crate) struct TagSources<'a> {
     pub title: &'a str,
-    /// What the classifier scores, and - under `classifier-dev` - what leaves
+    /// What the classifier scores, and - under `jev` - what leaves
     /// the machine. The note summary when one exists, else a
     /// `CLASSIFIER_TEXT_CHARS` body excerpt. Never a whole transcript, which
     /// is why the two constructors are the only way to set it.
@@ -73,7 +73,7 @@ impl<'a> TagSources<'a> {
 
     /// A note with no summary: only the head of the body is scored. Audio is
     /// the case that matters - without this clip the whole transcript was
-    /// POSTed to classifier.dev verbatim (implementation audit r1, M3).
+    /// POSTed to TypeSafe verbatim (implementation audit r1, M3).
     pub fn from_body(title: &'a str, body: &str) -> Self {
         Self::build(title, distillers::tags::body_excerpt(body))
     }
@@ -160,7 +160,7 @@ pub(crate) async fn finalize_tags(sources: TagSources<'_>, config: &Config) -> T
     let title = sources.title.to_string();
     let text = sources.text;
 
-    // `spawn_blocking`: the trait is sync by design, and `ClassifierDev` makes
+    // `spawn_blocking`: the trait is sync by design, and `Jev` makes
     // a blocking HTTP call. Running it on the async worker would stall the
     // runtime for the length of the request.
     let result = tokio::task::spawn_blocking(move || {

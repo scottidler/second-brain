@@ -1055,7 +1055,7 @@ pub(crate) async fn process_audio_inner(
     // (excerpted as classifier `text` when there is no summary yet) and the
     // distiller output are model-side. `from_body` is load-bearing on the
     // no-summary leg: the transcript is verbatim captured audio, and under
-    // `classifier-dev` the whole of it used to be POSTed to a third-party API.
+    // `jev` the whole of it would be POSTed to TypeSafe.
     let mut sources = if distilled.summary.is_empty() {
         TagSources::from_body(&title, &transcript_text)
     } else {

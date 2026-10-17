@@ -536,7 +536,7 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
 /// Live probe of the configured tag classifier.
 ///
 /// The exact counterpart to `fabric_live_probe_findings`, for the other
-/// inference dependency. `tags.classifier` selecting `classifier-dev` and the
+/// inference dependency. `tags.classifier` selecting `jev` and the
 /// key env var being SET both look healthy statically, and neither says the
 /// key is accepted: on a rejected key every ingest silently falls back to
 /// `deterministic` and lands `cortex-classified-by: deterministic`, every
@@ -545,8 +545,8 @@ fn fabric_live_probe_findings() -> Vec<Finding> {
 ///
 /// Warn, not error: a transient outage should not turn doctor red, and the
 /// fallback means ingest keeps working. The probe sends a three-label
-/// vocabulary rather than the real one so it is a single cheap request, not a
-/// sharded pass over 117 tags.
+/// vocabulary rather than the real one so it is a single cheap request. It posts
+/// to the same `/v1/systemone` endpoint as ingest.
 fn classifier_findings() -> Vec<Finding> {
     let Ok(config) = borg::config::load_config::<borg::config::Config>(None) else {
         return vec![Finding::info("borg config unavailable; classifier not probed")];
@@ -587,7 +587,7 @@ fn classifier_findings() -> Vec<Finding> {
         Err(e) => vec![Finding::warn(
             format!("classifier live probe failed: {e:#}"),
             format!(
-                "every ingest is silently falling back to {:?} ({auth}). Check egress to the endpoint, and if a token is configured, that it is a live workspace key from classifier.dev/app/keys; drill in with `sb borg log --degraded --since 24h`",
+                "every ingest is silently falling back to {:?} ({auth}). Check egress to api.typesafe.ai, and that `tags.classifier.api-key` resolves a live key (keep secret `escote-typesafe-api-key`); drill in with `sb borg log --degraded --since 24h`",
                 cfg.fallback
             ),
         )],

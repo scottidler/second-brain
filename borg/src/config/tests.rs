@@ -1389,3 +1389,45 @@ fn youtube_engine_validate_yt_dlp_default_ignores_gemini_keys() {
         .expect("yt-dlp only needs no gemini keys at daemon start");
     assert!(vault::capture::warns_containing("SB_TEST_YOUTUBE_ENGINE_QUIET_KEY").is_empty());
 }
+
+/// Jev classifier daemon start: an empty key with `classifier: jev` (or a
+/// jev fallback) WARNs at daemon start and the daemon still starts, because
+/// the other slot still tags notes.
+#[test]
+fn daemon_start_warns_and_starts_when_jev_key_is_empty() {
+    vault::capture::install();
+    for (marker, yaml) in [
+        (
+            "SB_TEST_BORG_JEV_PRIMARY_KEY",
+            "tags:\n  classifier:\n    classifier: jev\n    api-key: SB_TEST_BORG_JEV_PRIMARY_KEY\n",
+        ),
+        (
+            "SB_TEST_BORG_JEV_FALLBACK_KEY",
+            "tags:\n  classifier:\n    fallback: jev\n    api-key: SB_TEST_BORG_JEV_FALLBACK_KEY\n",
+        ),
+    ] {
+        let config = youtube_engine_config(yaml);
+        config.validate().expect("structure is fine");
+        config
+            .validate_daemon_start()
+            .unwrap_or_else(|e| panic!("an empty jev key must not stop the daemon ({marker}): {e}"));
+        assert_eq!(vault::capture::warns_containing(marker).len(), 1, "{marker}");
+    }
+}
+
+#[test]
+fn daemon_start_is_quiet_when_jev_key_resolves_or_jev_is_unused() {
+    vault::capture::install();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key_file = dir.path().join("typesafe-key");
+    fs::write(&key_file, "not-a-real-key\n").expect("write");
+    let resolved = youtube_engine_config(&format!(
+        "tags:\n  classifier:\n    classifier: jev\n    api-key: {}\n",
+        key_file.display()
+    ));
+    resolved.validate_daemon_start().expect("starts");
+    let unused = youtube_engine_config("tags:\n  classifier:\n    api-key: SB_TEST_BORG_JEV_UNUSED_KEY\n");
+    unused.validate_daemon_start().expect("starts");
+    assert!(vault::capture::warns_containing("SB_TEST_BORG_JEV_UNUSED_KEY").is_empty());
+    assert!(vault::capture::warns_containing(&key_file.display().to_string()).is_empty());
+}

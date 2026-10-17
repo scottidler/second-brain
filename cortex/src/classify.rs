@@ -85,7 +85,7 @@ pub fn run_with_notes(
 /// The configured tag classifier plus the `fallback` that runs when it errors,
 /// and the vocabulary both were built from.
 ///
-/// Cortex holds the pair rather than one classifier because a classifier.dev
+/// Cortex holds the pair rather than one classifier because a jev (TypeSafe)
 /// outage must not stall promotion of notes borg already tagged at ingest: the
 /// fallback (`deterministic` by default) confirms those locally from the note's
 /// own `tags` and `author-tags`, and only a `Low` result holds a note back.
@@ -251,7 +251,7 @@ impl ClassifyResult {
 /// The note text a classifier scores: its `## Summary` when it has one, else
 /// the head of the body, clipped through the shared
 /// `distillers::tags::body_excerpt` so borg and cortex send the same amount
-/// of a summary-less note to classifier.dev.
+/// of a summary-less note to TypeSafe.
 fn classifier_text(note: &Note) -> String {
     ::vault::search::parse_body_summary(&note.body).unwrap_or_else(|| distillers::tags::body_excerpt(&note.body))
 }
