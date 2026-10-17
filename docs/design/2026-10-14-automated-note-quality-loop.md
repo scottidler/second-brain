@@ -208,6 +208,7 @@ sb-eval.timer (daily) ──> sb borg eval --unscored --format json
   - The quoting goes at oracle's natural-language boundary: the BM25 arm of `run_search_mode` (`oracle/src/server/pipeline.rs:155`) and the hybrid helper `bm25_paths` (`:46`).
   - It does NOT go in `search_filter` (`vault/src/search/query.rs:249-256`). `find_similar` (`query.rs:46-58`) already sends a constructed `"a" OR "b"` expression through that path, and quoting it again turns the OR into a literal (a probe in round 2 measured `rust OR python` drop from 3 matches to 1).
   - The fix carries regression tests for punctuation, embedded quotes, and `find_similar`'s constructed query.
+  - By design, a query typed into oracle's BM25 arm loses FTS5 operator semantics: `OR`, `NOT`, `NEAR` and phrase quotes become literal words, because every query on that path is natural language (implementation audit probes: `rust OR python` 500 -> 102 matches, `kubernetes NOT docker` 128 -> 42).
 - The cross-crate join (borg eval scores x oracle retrieval) lives in `sb`, because borg does not depend on oracle.
 
 **Remediation**
