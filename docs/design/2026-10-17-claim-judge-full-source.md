@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-17
-**Status:** Approved for build (2026-10-18, Scott: option B). Phase 0 is closed by its claim-level numbers; no re-run. Phases 1-3 as written.
+**Status:** Implemented, Phases 1-2 (2026-10-18, commits 4dca6a6 and 1eb86e3 on main). Phase 3 (ship via `otto deploy`, re-measure with `--inject` on ripr) is pending Scott's release go.
 **Review Passes Completed:** 3/5 (draft, correctness, edge cases); panel round 1 folded (staff seat only)
 
 ## Summary
@@ -90,7 +90,7 @@ Fixture (kind, distilled, full source)
   - Not judgeable: `{"applicable":false,"reason":"source-over-cap","source_chars":N,"cap":C}`, `error` null.
   - **A cap change re-opens coverage.** `is_covered` (`scores.rs:270-297`) treats a `source-over-cap` row as not current when its `source_chars` is at or under the configured cap. Raising the cap re-queues exactly the traces that now fit, and nothing else.
     - Signature: `is_covered(&self, trace, content_hash, required, claims_cap: usize)`. `ScoreStore` holds only a connection, so the cap is a parameter, not store state.
-    - Predicate, added to the coverage query: `AND NOT (json_extract(metrics_json, '$.reason') = 'source-over-cap' AND json_extract(metrics_json, '$.source_chars') <= ?4)`. JSON1 ships with rusqlite's `bundled` feature (`Cargo.toml:47`).
+    - Predicate, added to the coverage query: `AND NOT (json_extract(metrics_json, '$.reason') IS ?5 AND COALESCE(json_extract(metrics_json, '$.source_chars') <= ?4, 1))` with `?5 = 'source-over-cap'`. **Corrected in Phase 1 (2026-10-18):** the form first written here, `= 'source-over-cap' AND source_chars <= ?4`, is NULL for every ordinary row (no `reason` key), and `NOT (NULL)` is NULL, so no trace would ever be covered. `IS` and `COALESCE` make the predicate false, not NULL, on a row without the key. The existing test `a_trace_with_every_required_check_current_and_clean_is_covered` fails under the first form (implementation notes, Phase 1, break 5). JSON1 ships with rusqlite's `bundled` feature (`Cargo.toml:47`).
     - Both callers get the cap from `EvalOpts.claims_source_max_chars`: `backlog::find_backlog` (`backlog.rs:53`, call at `:82`, reached from `sb/src/cli/borg.rs:539`) and `weekly::remediated::collect` (`remediated.rs:81`, call at `:201`, reached from `sb/src/cli/borg/weekly.rs`). Each takes a new `claims_cap: usize` argument.
   - `content_hash` stays the distill hash (`eval.rs:565`). Remediate and backlog key on it (`remediate.rs:221`, `backlog.rs:80`).
 - Claims cache key: `stable_hash(kind \n full source \n claims)`, plus fixture id, model and rubric. Same shape as `eval.rs:411`, but over the full source.
