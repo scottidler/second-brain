@@ -450,8 +450,12 @@ fn mark_block_scalar_bodies(lines: &[String]) -> Vec<bool> {
 /// emits it. All claim-kind fields are serde-defaulted, so a pattern that omits
 /// `kind` / `who` / `quote` (every older pattern) parses unchanged and
 /// the forward-compat `ClaimKind` shim absorbs any drifting `kind:` value.
+/// `text` is defaulted too: a stray list item with no `text` (a model once
+/// emitted `- set: null`) becomes an empty claim the callers drop, instead of
+/// failing the whole note's parse.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PatternClaim {
+    #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub anchor: Option<String>,
@@ -468,8 +472,12 @@ impl PatternClaim {
     /// text and dropping empty optional decorations. Empty-text filtering is
     /// the caller's responsibility (the per-kind distillers already do it).
     pub fn into_claim(self) -> Claim {
+        let text = self.text.trim().to_string();
+        if text.is_empty() {
+            log::warn!("PatternClaim::into_claim: claim with no text; dropping it");
+        }
         Claim {
-            text: self.text.trim().to_string(),
+            text,
             anchor: self.anchor.filter(|s| !s.is_empty()),
             kind: self.kind,
             who: self.who.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),

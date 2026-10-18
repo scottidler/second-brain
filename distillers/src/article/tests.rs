@@ -111,6 +111,46 @@ async fn fabric_error_falls_back_with_error_reason() {
 }
 
 #[tokio::test]
+async fn claim_item_without_text_is_dropped_not_fatal() {
+    let fake = FakeFabric::new();
+    fake.set_response(
+        PATTERN,
+        r#"
+summary: "An article on distributed consensus."
+claims:
+  - text: "Raft uses a leader-based approach."
+    kind: position
+  - set: null
+  - text: "Paxos's vocabulary obscures its semantics."
+tags: []
+links: []
+"#,
+    );
+    let distilled = make_distiller(fake)
+        .distill(DistillInputs {
+            transcript: "Article body about Raft and Paxos.",
+            source_url: None,
+            title_hint: None,
+            repo_metadata: None,
+            video_metadata: None,
+            capture_note: None,
+            session_metadata: None,
+        })
+        .await
+        .expect("distill");
+
+    assert!(distilled.meta.validation.fallback_reason.is_none());
+    let texts: Vec<&str> = distilled.claims.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Raft uses a leader-based approach.",
+            "Paxos's vocabulary obscures its semantics."
+        ]
+    );
+}
+
+#[tokio::test]
 async fn malformed_yaml_falls_back_with_raw_output() {
     let fake = FakeFabric::new();
     fake.set_response(PATTERN, "this is not yaml: [unclosed");
