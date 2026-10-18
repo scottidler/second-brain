@@ -197,7 +197,7 @@ Arm totals:
 | one call | 70 | 5 | 0.132 (9 over 68 judged) | 12.39 | 0.50 / 0.34 / 0.16 (143/96/47) | 45.1 / 89.3 / 153.5 | 164 |
 
 - **One-call fallbacks, each traced to its raw output.** All five are single-call output errors. None is a window error or a timeout:
-  - `cl-ad229f9f` r1: one claim carries `kind: null`. `PatternClaim.kind` (`distillers/src/parse.rs:459`) is a `ClaimKind` with `#[serde(default)]`, which accepts a missing key but rejects an explicit null, so one bad claim fails the whole note.
+  - `cl-ad229f9f` r1: the claims list holds a stray `- set: null` item with no `text`. serde fails with `claims[3]: missing field text` (line 45), so the whole note falls back. (Corrected 2026-10-18: this line first blamed `kind: null`, but an explicit null kind already parses on a686fec; replaying the raw output through `parse_pattern_yaml` gave the error above.) Fixed in `fb4bdf5`: `PatternClaim.text` is serde-defaulted, and every caller drops empty claims.
   - `cl-b14d7e33` r1 and `cl-0222aa9e` r3: the `summary` string has no closing `"`, so the parse fails at `tldr:`.
   - `cl-38cd120a` r4: the whole YAML came back on one line.
   - `cl-0222aa9e` r4: fabric `empty response` after 164s.
