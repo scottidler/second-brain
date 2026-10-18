@@ -89,6 +89,9 @@ Fixture (kind, distilled, full source)
   - Judged: `{"verdicts":[...]}` as today.
   - Not judgeable: `{"applicable":false,"reason":"source-over-cap","source_chars":N,"cap":C}`, `error` null.
   - **A cap change re-opens coverage.** `is_covered` (`scores.rs:270-297`) treats a `source-over-cap` row as not current when its `source_chars` is at or under the configured cap. Raising the cap re-queues exactly the traces that now fit, and nothing else.
+    - Signature: `is_covered(&self, trace, content_hash, required, claims_cap: usize)`. `ScoreStore` holds only a connection, so the cap is a parameter, not store state.
+    - Predicate, added to the coverage query: `AND NOT (json_extract(metrics_json, '$.reason') = 'source-over-cap' AND json_extract(metrics_json, '$.source_chars') <= ?4)`. JSON1 ships with rusqlite's `bundled` feature (`Cargo.toml:47`).
+    - Both callers get the cap from `EvalOpts.claims_source_max_chars`: `backlog::find_backlog` (`backlog.rs:53`, call at `:82`, reached from `sb/src/cli/borg.rs:539`) and `weekly::remediated::collect` (`remediated.rs:81`, call at `:201`, reached from `sb/src/cli/borg/weekly.rs`). Each takes a new `claims_cap: usize` argument.
   - `content_hash` stays the distill hash (`eval.rs:565`). Remediate and backlog key on it (`remediate.rs:221`, `backlog.rs:80`).
 - Claims cache key: `stable_hash(kind \n full source \n claims)`, plus fixture id, model and rubric. Same shape as `eval.rs:411`, but over the full source.
 - In memory: `TraceRecord.metrics.judge_claims` (`eval.rs:447`) changes from `Option<Vec<ClaimVerdict>>` to a three-state enum:
@@ -96,21 +99,21 @@ Fixture (kind, distilled, full source)
 ```rust
 pub enum ClaimsOutcome {
     Judged(Vec<ClaimVerdict>),
-    NotJudgeable { source_chars: usize },
+    NotJudgeable { source_chars: usize, cap: usize },
     NotRun,
 }
 ```
 
-  `NotRun` is today's `None`. The name says why each case has no verdicts.
+  `NotRun` is today's `None`. The name says why each case has no verdicts. `NotJudgeable` carries the cap that applied, because `rows_from_record` (`scores.rs:375`) builds the stored row and the weekly text from the record alone.
 
 - JSONL shape (`TraceMetrics`, serialized at `report.rs:207`), via a custom serialize:
   - `Judged` keeps today's array of verdict strings, so `tests.rs:765` and the `uv` contract are unchanged.
-  - `NotJudgeable` serializes as `{"applicable":false,"reason":"source-over-cap","source_chars":N}`.
+  - `NotJudgeable` serializes as `{"applicable":false,"reason":"source-over-cap","source_chars":N,"cap":C}`.
   - `NotRun` serializes as `null`.
 - Consumers, each with a decided behavior:
   - **`rows_from_record`** (`scores.rs:375-391`): writes the row shapes above.
   - **`inject::flags`** (`inject.rs:240-252`): `NotJudgeable` -> excluded (see API Design).
-  - **`candidate::NoteCounts::of`** (`candidate.rs:209`) and the sample-complete check (`candidate.rs:827`): over-cap traces are removed from the candidate sample before scoring. Baseline and candidate share a source, so both sides drop together. The sample is not marked incomplete. The report prints how many were dropped.
+  - **`candidate::NoteCounts::of`** (`candidate.rs:209`) and the sample-complete check (`candidate.rs:827`): over-cap traces are removed from the candidate sample before scoring. The filter runs at the top of `candidate::score` (`candidate.rs:659`), over the loaded fixtures, before any distill call. Baseline and candidate share a source, so both sides drop together. The sample is not marked incomplete. The report prints how many were dropped.
   - **`candidate::feedback_for`** (`candidate.rs:856`): `NotJudgeable` gives no claim feedback, and says so in the feedback text.
   - **`agreement::trace_flag` / `claim_support`** (`agreement.rs:158,168-176`): these read stored JSON, not the enum. No type change. A test proves `applicable:false` rows are not raters.
   - **Weekly remediated report** (`weekly/remediated.rs:218-232`): a trace whose only non-failing required check was `not judgeable` reports `Outcome::NotJudgeable` ("judge-claims not judgeable: source N chars > cap C"), never `Passed`.
@@ -132,7 +135,7 @@ pub enum ClaimsOutcome {
 **Model:** opus (operator run on ripr; makes paid calls)
 - **Isolation: Phase 0 never touches the live eval DB.**
   - `run_eval_inject` opens `vault::paths::borg_eval_cache_path()` (`sb/src/cli/borg.rs:600`). That path follows `XDG_DATA_HOME` (`vault/src/paths.rs:48-56`).
-  - Run with `XDG_DATA_HOME=<scratchpad>/xdg`, holding a copy of `eval-cache.db`.
+  - Run with `XDG_DATA_HOME=<scratchpad>/xdg`, holding a copy of `eval-cache.db`. The path must be absolute: `xdg_data_dir` silently ignores a relative value and falls back to the live `~/.local/share` (`vault/src/paths.rs:48-56`).
   - Use a scratch `borg.yml` with an absolute `staging.root` pointing at the live stages, because the default staging path also follows `XDG_DATA_HOME`.
   - The edited pattern goes in a scratch dir passed as `--patterns-dir` (accepted with `--inject`, `sb/src/cli/borg/args.rs:299-303`).
 - **Throwaway local build, never committed:**
@@ -163,6 +166,7 @@ pub enum ClaimsOutcome {
   - It also records p50/p99/max latency per model and the 250-400k results.
   - The go rule is evaluated in writing with the numbers.
   - `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select count(*) from judge_trust where measured_at > '<phase-0 start>'"` returns 0.
+  - `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select count(*) from eval_scores where scored_at > '<phase-0 start>'"` returns 0. `run_inject` writes `eval_scores` rows too (`inject.rs:566-570`), not only trust rows, and an unclassed record keeps its baseline `run_kind`, so the check counts every kind. Run it with the nightly `sb-eval` timer paused, or it counts that run's rows.
 
 #### Phase 1: Full-source claims judging + not judgeable
 **Model:** opus
@@ -218,6 +222,7 @@ pub enum ClaimsOutcome {
 - 2026-10-17: Fitting sources keep whole-source judging. Nothing changes for them except the rubric version and the deleted cut-off line, which they never triggered.
 - 2026-10-17: `judge-distillation` is out of scope. Its weakness is its rubric, not the cut.
 - 2026-10-17: No new verdict (`not-located` etc.). With the whole source in view, "the source does not say it" is a true `unsupported`.
+- 2026-10-18 (panel round 3, architect seat): 2 must-fixes and 3 cheap wins folded in. `is_covered` gains a `claims_cap` argument and a JSON1 predicate, threaded from both callers. `NotJudgeable` carries its cap. Phase 0 proves zero inject `eval_scores` rows too, and requires an absolute `XDG_DATA_HOME`. The candidate filter's location is named. Dropped: the architect's N+1 concern on `is_covered` (one indexed query per trace, as today).
 - 2026-10-17 (panel round 1, staff seat): all 7 must-fixes and 4 cheap wins folded in. Phase 0 isolation, the bucket rule, the per-judge go rule with an error ceiling, the uncensored timeout, every consumer of the outcome, the cap-change re-coverage, config threading, and a Phase 3 bar that fails when trust fails.
 - 2026-10-17 (panel round 1, deferred with reason):
   - The cost upper bound: no observed problem, and `eval.limit` caps daily load.
