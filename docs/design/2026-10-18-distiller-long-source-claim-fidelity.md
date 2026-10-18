@@ -149,6 +149,7 @@ after:  source -> <= single-call-max-chars ? one call
 - **Success criteria:**
   - `cargo test -p distillers long_source_is_one_call` passes: a 200,000-char article, video, thread, session and voicenote each make exactly one distill call through `FakeFabric`, with the whole input after truncation.
   - `cargo test -p distillers over_ceiling_records_window` passes with an explicit 1,000-char ceiling: the entry is present and `is_degraded()` is true. It fails with the push removed.
+  - `cargo test -p borg regenerate_dispatcher_uses_single_call_ceiling` passes: `regenerate_dispatcher` built from a borg config with a 300,000-char ceiling distills a 200,000-char article in one call. It fails if the eval dispatcher falls back to the default.
   - `rg -n "token-cap" config/templates/borg.yml.example` prints nothing.
 
 #### Phase 2: Delete the chunk/reduce path
@@ -180,7 +181,11 @@ after:  source -> <= single-call-max-chars ? one call
   - **reproduced:** the error appears in any run (this beats the other two);
   - **corrected:** the claim is present in 3+ of 5 runs and both judges call it supported;
   - **omitted:** the claim is absent in 3+ of 5 runs.
-- A baseline-unreproduced error is reported, never counted as fixed. A source with more than one run missing a verdict after the retry is inconclusive and leaves both counts.
+- A baseline-unreproduced error is reported, never counted as fixed.
+- Missing verdicts:
+  - an error seen in any run is reproduced, even when other runs of that source miss verdicts;
+  - otherwise, a source with more than one run missing a verdict after the retry is inconclusive and leaves both counts;
+  - the both-judge mean is divided by the runs with complete verdicts, never by 5.
 - **Success criteria:**
   - Every countable core error is corrected or omitted. At least 3 of the 6 must be countable, or the result is inconclusive.
   - The mean both-judge flagged claims per run falls by at least half against Phase 0's chunked arm.
@@ -210,6 +215,7 @@ after:  source -> <= single-call-max-chars ? one call
   - wall time against the 1800s timeout;
   - the hedge-rule wording and the explicit pattern list;
   - the deployed-version probe after ship.
+- 2026-10-18 (panel round 2, on the pre-rework snapshot `1a5deb8`): the dispute closed for the author. Both seats confirmed all five reduce fallbacks set `reduce-selection-failed` (`session.rs:408`, `article.rs:493`, `video.rs:421`, `thread.rs:420`, `voicenote.rs:332`), which `is_degraded()` reads and every publish site ORs into the receipt. Moot after the rework, which deletes the reduce path. Two findings that carry over are folded: a borg-side test that the eval dispatcher uses the ceiling (Phase 1), and the missing-verdict precedence and denominator (Phase 4).
 - 2026-10-18: the token-cap question sent to Scott is withdrawn. One ceiling replaces it, set from Phase 0.
 
 ## Alternatives Considered
