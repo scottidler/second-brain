@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-17
-**Status:** Draft
+**Status:** Blocked (Phase 0 waits on the long-source distiller fix; see Phase 0 results)
 **Review Passes Completed:** 3/5 (draft, correctness, edge cases); panel round 1 folded (staff seat only)
 
 ## Summary
@@ -207,7 +207,8 @@ Claims-call latency in seconds, successful calls only:
 - **Go rule, as written:**
   - claude-sonnet-5: over-window 0.59 < 0.80, FAIL. Mutated-claim rate 1.00, pass. Errors 3/82 pairs, pass. Fitting 0.86 >= 0.85, pass. 250-400k set: 1 error, FAIL (the rule asks for zero).
   - gemini-2.5-pro: over-window 0.57 < 0.80, FAIL. Fitting 0.69 < 0.85, FAIL. Mutated-claim rate 1.00, pass. Errors 0, pass. 250-400k set: 0 errors, paired catch 0.57.
-  - **Both judges fail, so the written rule says no-go.** The claim-level data says the failure is not long-context reading. Alternative 2 (the evidence locator) does not change whether the original note is flagged, so the no-go branch as written would not move these numbers. Decision pending with Scott.
+  - **Both judges fail, so the written rule says no-go.** The claim-level data says the failure is not long-context reading. Alternative 2 (the evidence locator) does not change whether the original note is flagged, so the no-go branch as written would not move these numbers.
+- **Decision (Scott, 2026-10-18): fix the distiller first, then re-run Phase 0.** The six both-flagged claims were checked against their sources. Each one goes beyond its source: a miscount (9 repos read as 9 languages, `cl-2db85dab`), two clusters merged into one (`cl-9e724b4b`), a word swap (ID linebacker -> backside linebacker, `cl-2de2b08b`), a hedged question stated as a position (`cl-0222aa9e`), an invented count of three reviews (`hv-29b2f05e`), and a lesson the session never states (`hv-16d375ce`). Truncation is ruled out: each note's `meta.input-tokens` covers its whole source. `distillers/src/validate.rs` checks structure only, so no step compares a claim to its source before publish. The distiller fix is tested on the notes already flagged: the 15 over-window originals that either judge flagged (`cl-56dd5199 cl-9e724b4b cl-ad229f9f cl-b14d7e33 cl-2db85dab hv-12ae5acc hv-16d375ce hv-29b2f05e hv-2fe2ec93 hv-5194d942 cl-0222aa9e cl-1ed09284 cl-2de2b08b cl-33faf56c cl-38cd120a`), with the six both-flagged ones as the core.
 
 #### Phase 1: Full-source claims judging + not judgeable
 **Model:** opus
@@ -258,6 +259,7 @@ Claims-call latency in seconds, successful calls only:
 
 ## Resolved Decisions
 
+- 2026-10-18 (Phase 0): fix the distiller's long-source claim errors first, then re-run Phase 0. Reason: the judges catch the planted swap (25/27 and 26/27 over-window), and the paired metric fails on originals the distiller already got wrong. The fix's test set is the already-flagged originals.
 - 2026-10-17: Full source over evidence windows (Alternative 2), gated by Phase 0. Reason: it is the direct fix for the measured cause and needs no retrieval layer. The locator stays parked with a revisit condition.
 - 2026-10-17: Judgeability is keyed on source length alone, so a baseline and its candidate never split across the line.
 - 2026-10-17: Fitting sources keep whole-source judging. Nothing changes for them except the rubric version and the deleted cut-off line, which they never triggered.
