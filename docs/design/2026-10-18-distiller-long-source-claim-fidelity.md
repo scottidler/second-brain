@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-18
-**Status:** Ready to build (Phase 0 waits on Scott's go)
+**Status:** Draft. Phase 0 went no-go (2026-10-18), so per the go rule this doc returns to Alternative 1: keep chunking, repair the reduce step.
 **Review Passes Completed:** 5/5 on the reworked design (draft, correctness, clarity, edge cases, excellence); panel rounds 1-3 folded (round 3 reviewed the rework; rounds 1-2 reviewed the earlier chunk-repair design it replaces)
 
 ## Summary
@@ -145,6 +145,101 @@ after:  source -> <= single-call-max-chars ? one call
     - every test-source call finishes inside its timeout and inside 1800s.
   - Live `eval_scores` and `judge_trust` row counts are unchanged after the run.
 - If the go rule fails, this doc returns to Draft with Alternative 1.
+
+##### Phase 0 results (2026-10-18, ripr)
+
+- **Run:** a throwaway build of a686fec (a distillers routing patch plus a harness example, never committed) re-distilled the 14 test sources through the full `Dispatcher`, 5 runs per arm, 4 in flight. Every output's claims were judged against the full source by claude-sonnet-5 and gemini-2.5-pro (`max_chars` 0, 600s, one retry, the claim-judge Phase 0 pattern with the cut-off rule deleted). `hv-12ae5acc` was not run on its own: its body is byte-identical to `hv-16d375ce` (same md5), so the `hv-16d375ce` rows stand for both.
+- **Arms:**
+  - chunked: ripr's production values (`fabric.max-content-chars` 100,000, timeout 600s, session `token-cap` 12,000, `--maxTokens` 16384) and the deployed patterns, which are byte-identical to a686fec.
+  - one call: routing threshold and `token_cap` lifted, `max_chars` 0, timeout 1,500s, the Data Model budget written as a `Claim budget: N` line at the start of the input, and the six single-call patterns reading it.
+- **Served model:** every distill call in both arms and every probe went to `claude-sonnet-5`. fabric's `DEFAULT_MODEL` on ripr is `claude-sonnet-5` (`~/.config/fabric/.env`), the same as `llm.model`, so ripr has one served distill model. This answers the Dependencies line that could not read it.
+- **Isolation held:** the live `eval-cache.db` reads `eval_scores` 4934 and `judge_trust` 11 before (17:16:23Z) and after the run, with 0 rows of either newer than the 17:16:27Z start. The harness never opens the eval DB. `sb-eval.timer` was stopped for the run and restarted after.
+- **Calls:** chunked made 180 distill calls with 0 errors. One call made 70, with 1 error (`empty response`). The claims judge: claude-sonnet-5 returned `empty response` on 5 runs even after the retry (`hv-5194d942` 4 runs, `cl-38cd120a` 1), and gemini-2.5-pro never failed.
+
+Per source, arm and run (r1/r2/r3/r4/r5). Flagged = claims that both judges call not supported. `m` = a verdict still missing after the retry. Anchored claims are binned by the anchor's share of the video's duration, summed over the 5 runs.
+
+| source | kind | chars | arm | both-judge flagged | claims | anchored claims early/middle/late | fallbacks | wall s |
+|---|---|---|---|---|---|---|---|---|
+| `cl-56dd5199` | article | 83,554 | chunked | 0/0/0/0/0 | 11/11/14/12/12 | n/a | 0 | 59/72/70/71/79 |
+| `cl-56dd5199` | article | 83,554 | one call | 0/0/0/0/0 | 14/14/14/14/14 | n/a | 0 | 79/70/72/89/118 |
+| `cl-9e724b4b` | article | 43,213 | chunked | 0/0/0/0/0 | 10/10/10/10/10 | n/a | 0 | 45/37/40/42/39 |
+| `cl-9e724b4b` | article | 43,213 | one call | 0/0/0/0/0 | 10/10/10/10/10 | n/a | 0 | 53/57/52/46/23 |
+| `cl-ad229f9f` | article | 44,090 | chunked | 0/0/0/0/0 | 10/10/10/10/10 | n/a | 0 | 26/40/39/39/40 |
+| `cl-ad229f9f` | article | 44,090 | one call | 0/0/0/0/0 | 0/10/10/10/10 | n/a | r1 yaml-parse-error | 39/40/39/41/38 |
+| `cl-b14d7e33` | article | 215,357 | chunked | 0/0/0/0/0 | 10/10/11/11/8 | n/a | r1-r5 partial-chunk-failure | 44/62/54/72/45 |
+| `cl-b14d7e33` | article | 215,357 | one call | 0/0/0/0/1 | 0/22/22/22/22 | n/a | r1 yaml-parse-error | 103/99/89/77/80 |
+| `cl-2db85dab` | repo | 85,381 | chunked | 0/0/0/0/0 | 0/10/10/10/10 | n/a | r1 yaml-parse-error | 70/74/47/87/62 |
+| `cl-2db85dab` | repo | 85,381 | one call | 0/0/0/0/0 | 14/14/14/14/14 | n/a | 0 | 72/77/75/81/76 |
+| `hv-16d375ce` | session | 30,998 | chunked | 0/0/0/0/0 | 10/10/10/10/10 | n/a | 0 | 17/17/20/18/16 |
+| `hv-16d375ce` | session | 30,998 | one call | 0/0/0/0/1 | 10/10/10/10/10 | n/a | 0 | 30/24/24/23/24 |
+| `hv-29b2f05e` | session | 49,759 | chunked | 0/1/0/0/0 | 8/8/9/9/8 | n/a | 0 | 16/16/18/14/16 |
+| `hv-29b2f05e` | session | 49,759 | one call | 1/0/0/0/0 | 10/12/12/12/12 | n/a | 0 | 18/18/21/20/18 |
+| `hv-2fe2ec93` | session | 147,608 | chunked | 0/0/0/0/0 | 9/10/9/9/10 | n/a | 0 | 14/14/16/16/15 |
+| `hv-2fe2ec93` | session | 147,608 | one call | 1/0/0/0/0 | 18/18/18/18/18 | n/a | 0 | 29/27/28/27/30 |
+| `hv-5194d942` | session | 183,051 | chunked | m/m/m/0/0 | 10/9/10/9/9 | n/a | 0 | 14/14/15/14/13 |
+| `hv-5194d942` | session | 183,051 | one call | 0/0/0/m/0 | 13/14/13/13/12 | n/a | 0 | 24/22/22/20/19 |
+| `cl-0222aa9e` | video | 66,421 | chunked | 0/0/0/0/0 | 10/10/11/12/9 | 0/24/28 (0.00/0.46/0.54) | 0 | 31/32/34/26/23 |
+| `cl-0222aa9e` | video | 66,421 | one call | 0/0/0/0/0 | 14/14/0/0/14 | 0/32/10 (0.00/0.76/0.24) | r3 yaml-parse-error, r4 fabric-error | 130/75/57/164/45 |
+| `cl-1ed09284` | video | 34,656 | chunked | 0/0/0/0/0 | 10/10/10/10/10 | 27/0/23 (0.54/0.00/0.46) | 0 | 43/37/60/55/34 |
+| `cl-1ed09284` | video | 34,656 | one call | 1/1/0/0/0 | 10/10/10/10/10 | 26/3/21 (0.52/0.06/0.42) | 0 | 57/63/36/36/43 |
+| `cl-2de2b08b` | video | 53,172 | chunked | 0/0/0/1/0 | 10/9/10/10/8 | 23/8/16 (0.49/0.17/0.34) | 0 | 31/31/35/30/40 |
+| `cl-2de2b08b` | video | 53,172 | one call | 0/0/0/0/0 | 12/12/12/12/12 | 41/10/9 (0.68/0.17/0.15) | 0 | 44/60/48/36/34 |
+| `cl-33faf56c` | video | 78,145 | chunked | 1/0/1/0/0 | 11/13/14/10/10 | 12/28/18 (0.21/0.48/0.31) | 0 | 46/49/46/35/36 |
+| `cl-33faf56c` | video | 78,145 | one call | 1/0/0/0/0 | 14/14/14/14/14 | 38/28/4 (0.54/0.40/0.06) | 0 | 51/93/46/43/34 |
+| `cl-38cd120a` | video | 116,973 | chunked | 0/1/1/0/0 | 13/9/12/9/16 | 26/20/13 (0.44/0.34/0.22) | r5 reduce-selection-failed | 96/53/56/54/45 |
+| `cl-38cd120a` | video | 116,973 | one call | m/0/0/0/2 | 16/16/16/0/16 | 38/23/3 (0.59/0.36/0.05) | r4 yaml-parse-error | 79/82/59/65/153 |
+
+Arm totals:
+
+| arm | outputs | fallbacks | both-judge flagged per run | claims per note | video anchors early/middle/late | distill call p50 / p90 / max s | output wall max s |
+|---|---|---|---|---|---|---|---|
+| chunked | 70 | 7 | 0.090 (6 over 67 judged) | 10.03 | 0.33 / 0.30 / 0.37 (88/80/98) | 16.6 / 42.0 / 87.2 | 96 |
+| one call | 70 | 5 | 0.132 (9 over 68 judged) | 12.39 | 0.50 / 0.34 / 0.16 (143/96/47) | 45.1 / 89.3 / 153.5 | 164 |
+
+- **One-call fallbacks, each traced to its raw output.** All five are single-call output errors. None is a window error or a timeout:
+  - `cl-ad229f9f` r1: one claim carries `kind: null`. `PatternClaim.kind` (`distillers/src/parse.rs:459`) is a `ClaimKind` with `#[serde(default)]`, which accepts a missing key but rejects an explicit null, so one bad claim fails the whole note.
+  - `cl-b14d7e33` r1 and `cl-0222aa9e` r3: the `summary` string has no closing `"`, so the parse fails at `tldr:`.
+  - `cl-38cd120a` r4: the whole YAML came back on one line.
+  - `cl-0222aa9e` r4: fabric `empty response` after 164s.
+- **Chunked fallbacks:**
+  - `cl-b14d7e33`: `partial-chunk-failure` in 5 of 5 runs. All 8 calls returned each time, so a chunk's YAML fails to parse.
+  - `cl-2db85dab` r1: a single call (repo), with an unescaped `"` inside `summary`.
+  - `cl-38cd120a` r5: `reduce-selection-failed`.
+
+Size probes, one call, once each:
+
+| probe | pattern | source chars | input tokens | wall s | claims | anchors early/middle/late | result |
+|---|---|---|---|---|---|---|---|
+| `hv-a158c300` | session (session model) | 2,474,263 | 618,716 | 104 | 21 (budget 24) | n/a | pass. gemini-2.5-pro flags 0 of 21. claude-sonnet-5's judge reply continued the transcript instead of giving verdicts, twice |
+| `hv-a158c300` | article (fabric's default model) | 2,474,263 | 618,570 | 48 | 0 | n/a | fail, `yaml-parse-error`. The call completed, so the window held. The model continued the session transcript instead of distilling it: the `hv-e5d240` failure `frame_input_as_data` exists for, and the article pattern has no data frame |
+| `cl-31951716` | article | 628,353 | 157,092 | 16 | 0 | n/a | not a usable probe. Its staged source is undecoded binary (PDF bytes), and the model said so. It is an article, not the largest video |
+| `ht-99d3c5` (added: the largest staged video) | video | 510,171 | 127,547 | 66 | 24 (budget 24) | 19/1/4 | pass, with anchors in all three thirds. Both judges flag 0 |
+
+- **Ceiling default:** 2,474,263 chars, the largest size that passed on the one served model (`claude-sonnet-5`, `hv-a158c300` through the session pattern). No probe hit an API context error or a timeout.
+- **Latency for the timeout keys:** one-call distill calls on the 14 sources (31k-215k chars) ran p50 45s, p90 89s, max 153.5s on success, and 164s for the empty response. The 618k-token probe took 104s. Wall time tracks output size, not input size: `hv-5194d942` (183k chars) ran p50 22s while `cl-56dd5199` (84k) ran p50 72s. No measured call used more than 164s of its 1,500s timeout, and the data shows no per-100k-chars slope.
+
+Core errors in the chunked arm (reproduced = the error in 3+ of 5 runs):
+
+| trace | chunked runs with the error | mark | evidence |
+|---|---|---|---|
+| `hv-29b2f05e` | 3/5 (r1, r2, r5) | reproduced | r1 "All three security reviews concluded no vulnerabilities...", r2 "Across all three reviewed diffs...", r5 "All three reviewed harness/schema-validation diffs...". One call: 0/5 state a review count |
+| `cl-2de2b08b` | 1/5 (r4) | baseline-unreproduced | r4 "pulls the center to the backside linebacker", which both judges call contradicted. r3 says "ID linebacker", r2 "inside linebacker", r1 "the linebacker", r5 omits it |
+| `cl-0222aa9e` | 0/5 | baseline-unreproduced | no run states the interviewer's hedged question as a position. r3 carries the founder's pushback, attributed, which both judges support |
+| `cl-2db85dab` | 0/5 | baseline-unreproduced | r2 and r4 name the 8 languages. r1 fell back, and r3 and r5 omit it |
+| `cl-9e724b4b` | 1/5 (r4) | baseline-unreproduced | r4 "a multi-region cluster combining a home Proxmox/Raspberry Pi infrastructure, Vultr cloud workers, and an OVH worker node" (gemini-2.5-pro unsupported). One call r1 makes the same merge |
+| `hv-16d375ce` | 0/5 | baseline-unreproduced | no chunked run has the "Reusable pattern" lesson, and both judges flag no claim in any chunked run |
+
+- **Go rule, as written:**
+  - Zero fallback or parse failures in the one-call arm: 5 of 70. FAIL.
+  - One-call mean both-judge flagged per run at or below chunked: 0.132 against 0.090. FAIL.
+  - Claims per note within `eval.candidate.max-coverage-cut` (0.10): one call 12.39 against chunked 10.03, no cut (+23%). Pass. The key bounds a cut (`borg/src/config/eval.rs:18`).
+  - Each video third at least 0.8 of the chunked share: early 0.50 against a 0.26 floor, pass. Middle 0.34 against 0.24, pass. Late 0.16 against 0.29, FAIL. Every long video moves claims out of the last third: `cl-2de2b08b` 0.34 -> 0.15, `cl-33faf56c` 0.31 -> 0.06, `cl-38cd120a` 0.22 -> 0.05.
+  - Every test-source call inside its timeout and inside 1800s: max 164s. Pass.
+  - **No-go: three of five clauses fail. This doc returns to Draft with Alternative 1.**
+- **Beyond the rule:**
+  - One call fixed the one core error that reproduced: `hv-29b2f05e` went from 3/5 to 0/5, so windowing was its cause.
+  - 5 of 6 core errors do not reproduce on the current code in 5 runs, and both arms flag about 1 claim per 10 runs. Phase 4's "at least 3 of the 6 must be countable" bar would be inconclusive under either design.
+  - Head bias is the loss that stands on its own. The fallbacks are output-format errors that both paths share.
 
 #### Phase 1: One ceiling, one call
 **Model:** opus
