@@ -224,6 +224,21 @@ fn an_unscored_side_is_an_error_never_a_pass() {
 }
 
 #[test]
+fn a_cap_below_the_judge_budget_still_buckets_over_cap_pairs_as_over_cap() {
+    let mut b = SourceBuckets {
+        fits: ClassTally::default(),
+        over_window: ClassTally::default(),
+        over_cap: ClassTally::default(),
+    };
+    b.of_mut(JUDGE_INPUT_MAX_CHARS - 1, 1_000).n += 1;
+    assert_eq!((b.fits.n, b.over_window.n, b.over_cap.n), (0, 0, 1));
+    b.of_mut(JUDGE_INPUT_MAX_CHARS - 1, 400_000).n += 1;
+    b.of_mut(JUDGE_INPUT_MAX_CHARS + 1, 400_000).n += 1;
+    b.of_mut(400_001, 400_000).n += 1;
+    assert_eq!((b.fits.n, b.over_window.n, b.over_cap.n), (1, 1, 2));
+}
+
+#[test]
 fn judge_claims_flags_read_the_planted_claim_and_a_missing_verdict_is_an_error() {
     use ClaimVerdict::*;
     let metrics = TraceMetrics {

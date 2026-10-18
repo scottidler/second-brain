@@ -100,22 +100,29 @@ pub struct Split {
 }
 
 /// Split `fixtures` into `n` train and `n` holdout traces that reach
-/// `pattern`'s single-call path, ordered by a stable hash of the trace id, so
-/// a rerun over the same staging picks the same traces. Fewer than `2n`
+/// `pattern`'s single-call path and that the claims judge can read (source
+/// at or under `claims_cap` chars), ordered by a stable hash of the trace id,
+/// so a rerun over the same staging picks the same traces. Fewer than `2n`
 /// eligible traces is an error.
-pub fn split(fixtures: &[Fixture], pattern: &str, n: usize) -> Result<Split> {
+///
+/// The cap is applied here, not only in [`score`], because the search's
+/// Python adapter (`eval/propose/adapter.py`) expects a score row for every
+/// trace it was handed: a trace that `score` drops as not judgeable would
+/// come back missing and abort the search.
+pub fn split(fixtures: &[Fixture], pattern: &str, n: usize, claims_cap: usize) -> Result<Split> {
     let kind = pattern_kind(pattern)?;
     if n == 0 {
         bail!("--candidate-split needs at least 1 trace per sample");
     }
     let mut eligible: Vec<&Fixture> = fixtures
         .iter()
-        .filter(|f| f.kind == kind && reaches_single_call(kind, &f.source))
+        .filter(|f| f.kind == kind && reaches_single_call(kind, &f.source) && f.source.chars().count() <= claims_cap)
         .collect();
     eligible.sort_by_key(|f| (stable_hash(&f.slug), f.slug.clone()));
     if eligible.len() < 2 * n {
         bail!(
-            "only {} staged {kind} traces reach {pattern}; two disjoint samples of {n} need {}",
+            "only {} staged {kind} traces reach {pattern} under the {claims_cap}-char claims cap; \
+             two disjoint samples of {n} need {}",
             eligible.len(),
             2 * n
         );
@@ -131,9 +138,9 @@ pub fn split(fixtures: &[Fixture], pattern: &str, n: usize) -> Result<Split> {
 }
 
 /// [`split`] over borg's staging root.
-pub fn load_split(staged_root: &Path, pattern: &str, n: usize) -> Result<Split> {
+pub fn load_split(staged_root: &Path, pattern: &str, n: usize, claims_cap: usize) -> Result<Split> {
     log::debug!(
-        "eval::candidate::load_split: root={} pattern={pattern} n={n}",
+        "eval::candidate::load_split: root={} pattern={pattern} n={n} claims_cap={claims_cap}",
         staged_root.display()
     );
     let kind = pattern_kind(pattern)?;
@@ -141,7 +148,7 @@ pub fn load_split(staged_root: &Path, pattern: &str, n: usize) -> Result<Split> 
         .into_iter()
         .filter(|f| f.kind == kind)
         .collect();
-    split(&fixtures, pattern, n)
+    split(&fixtures, pattern, n, claims_cap)
 }
 
 /// Load the named traces from staging, in order. A trace that no longer

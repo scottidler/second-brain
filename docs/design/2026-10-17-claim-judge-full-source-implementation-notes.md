@@ -82,3 +82,20 @@ The rendered-line assertion (`pairs fits | over-window | over-cap: 2 | 1 | 1` fo
 
 ### Open questions
 - None.
+
+## Implementation audit, round 1 (2026-10-18)
+
+Synthesis: `~/.cache/review-panel/runs/fq6ZL3LN/synthesis.md`. Architect seat: compliant, but 5 of its reads were denied by gemini's policy guard and it never opened `eval/propose/`. Staff seat: not signed off, two verified findings. Both folded here.
+
+### Must-fix, folded
+- `candidate::score` dropped over-cap traces (Phase 1) but `candidate::split` did not apply the cap, so the GEPA adapter (`eval/propose/adapter.py:51-54`) could be handed a trace that came back with no score row and raise `sb returned no score`. The staff seat reproduced it in-process. Fix: `split` and `load_split` take `claims_cap` and filter on it; `run_split` threads `opts.claims_source_max_chars`. Test `the_split_skips_traces_over_the_claims_cap`. Same commit: when every trace is dropped, the CLI said "every trace errored on an arm"; it now says how many were over the cap and names them.
+
+### Cheap wins, folded
+- `SourceBuckets::of_mut` checked the 24k budget before the cap, so a cap below 24k put over-cap pairs in `fits`. The cap is checked first now. Test `a_cap_below_the_judge_budget_still_buckets_over_cap_pairs_as_over_cap`.
+- Doc Overview named a "`--remediate` before-score" call that does not exist. Corrected in the doc; nothing bypassed the gate.
+
+### Deferred, with reason
+- A cell whose every pair is not judgeable writes a `judge_trust` row with `sample_size` 0. It fails closed (`n 0 < min-samples 30`), so it is correct as a gate; a clearer reason string is not worth a change the data has not asked for.
+
+### Open questions
+- How many staged repo traces exceed the 400k cap is unmeasured; the `--inject` run in Phase 3 prints the over-cap bucket and answers it.

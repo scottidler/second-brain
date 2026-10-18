@@ -122,7 +122,7 @@ fn the_split_is_disjoint_stable_and_only_takes_traces_that_reach_the_pattern() {
     let mut fixtures: Vec<Fixture> = (0..6).map(|i| fixture("video", &format!("v{i}"), SOURCE)).collect();
     fixtures.push(fixture("video", "v-long", &long));
     fixtures.push(fixture("article", "a0", SOURCE));
-    let s = split(&fixtures, "distill-video", 3).unwrap();
+    let s = split(&fixtures, "distill-video", 3, usize::MAX).unwrap();
     assert_eq!((s.kind.as_str(), s.eligible), ("video", 6));
     assert_eq!((s.train.len(), s.holdout.len()), (3, 3));
     assert!(s.train.iter().all(|t| !s.holdout.contains(t)), "{s:?}");
@@ -130,9 +130,31 @@ fn the_split_is_disjoint_stable_and_only_takes_traces_that_reach_the_pattern() {
         assert!(t.starts_with('v') && t != "v-long", "{s:?}");
     }
     fixtures.reverse();
-    assert_eq!(split(&fixtures, "distill-video", 3).unwrap(), s, "order-independent");
-    let err = split(&fixtures, "distill-video", 4).unwrap_err();
+    assert_eq!(
+        split(&fixtures, "distill-video", 3, usize::MAX).unwrap(),
+        s,
+        "order-independent"
+    );
+    let err = split(&fixtures, "distill-video", 4, usize::MAX).unwrap_err();
     assert!(format!("{err}").contains("only 6 staged video traces"), "{err}");
+}
+
+/// The search adapter wants a score for every trace of the split, and `score`
+/// drops a trace the claims judge cannot read, so the split never hands out
+/// one over the cap.
+#[test]
+fn the_split_skips_traces_over_the_claims_cap() {
+    let fixtures: Vec<Fixture> = (0..6).map(|i| fixture("video", &format!("v{i}"), SOURCE)).collect();
+    let source_chars = SOURCE.chars().count();
+    assert_eq!(split(&fixtures, "distill-video", 3, source_chars).unwrap().eligible, 6);
+    let err = split(&fixtures, "distill-video", 3, source_chars - 1).unwrap_err();
+    assert!(
+        format!("{err}").contains(&format!(
+            "only 0 staged video traces reach distill-video under the {}-char claims cap",
+            source_chars - 1
+        )),
+        "{err}"
+    );
 }
 
 #[test]

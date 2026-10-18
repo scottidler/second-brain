@@ -75,7 +75,7 @@ Fixture (kind, distilled, full source)
 ```
 
 - Judgeability depends on **source length only**, never on note or claims length. A baseline and its candidate re-distill of the same trace always land on the same side.
-- One gate, every caller: `--staged`, `--unscored`, `--inject`, and the `--remediate` before-score all reach `judge_claims` through the same gate. No path keeps the 24k trim for claims.
+- One gate, every caller: `--staged`, `--unscored`, `--inject`, and the candidate scorer all reach `judge_claims` through the same gate (`eval.rs`, `judge_claims_checked` behind the cap check). No path keeps the 24k trim for claims. (Corrected by the implementation audit, 2026-10-18: this line named a "`--remediate` before-score" call that does not exist; `--remediate` reads stored rows and re-ingests, it does not judge.)
 - `judge-distillation` keeps `judged_input` and `JUDGE_INPUT_MAX_CHARS` exactly as they are.
 
 ### Data Model

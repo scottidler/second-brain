@@ -65,7 +65,7 @@ pub(super) fn run_split(
 ) -> Result<()> {
     let trust_rows = borg::eval::trust::TrustStore::open(&vault::paths::borg_eval_cache_path())?.all()?;
     search_gate(&opts.judge_model, &trust_rows, &config.eval.trust)?;
-    let split = candidate::load_split(&config.staging.root, pattern_of(a)?, n)?;
+    let split = candidate::load_split(&config.staging.root, pattern_of(a)?, n, opts.claims_source_max_chars)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&split_json(&split, &config.llm.api_keys)?).context("serializing the split")?
@@ -137,6 +137,14 @@ pub(super) async fn run_score(
                 "{}",
                 serde_json::to_string(&train).context("serializing the candidate score")?
             ),
+        }
+        if train.traces.is_empty() {
+            eyre::bail!(
+                "no trace was scored: all {} were over the {}-char claims cap (not judgeable): {}",
+                train.dropped_over_cap.len(),
+                opts.claims_source_max_chars,
+                train.dropped_over_cap.join(", ")
+            );
         }
         if train.traces.iter().all(|t| t.score.is_none()) {
             eyre::bail!("every trace errored on an arm; see the per-trace errors");

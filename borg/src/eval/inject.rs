@@ -383,13 +383,15 @@ pub struct SourceBuckets {
 }
 
 impl SourceBuckets {
+    /// The cap is checked first: a legal cap below the 24k budget still puts
+    /// an over-cap pair in `over_cap`, never in `fits`.
     fn of_mut(&mut self, source_chars: usize, cap: usize) -> &mut ClassTally {
-        if source_chars <= JUDGE_INPUT_MAX_CHARS {
-            &mut self.fits
-        } else if source_chars <= cap {
-            &mut self.over_window
-        } else {
+        if source_chars > cap {
             &mut self.over_cap
+        } else if source_chars <= JUDGE_INPUT_MAX_CHARS {
+            &mut self.fits
+        } else {
+            &mut self.over_window
         }
     }
 }
