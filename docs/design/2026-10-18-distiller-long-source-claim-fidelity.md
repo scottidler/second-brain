@@ -2,8 +2,8 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-18
-**Status:** Draft
-**Review Passes Completed:** 2/5 on the reworked design (draft, correctness); panel rounds 1-3 folded (round 3 reviewed the rework; rounds 1-2 reviewed the earlier chunk-repair design it replaces)
+**Status:** Ready to build (Phase 0 waits on Scott's go)
+**Review Passes Completed:** 5/5 on the reworked design (draft, correctness, clarity, edge cases, excellence); panel rounds 1-3 folded (round 3 reviewed the rework; rounds 1-2 reviewed the earlier chunk-repair design it replaces)
 
 ## Summary
 
@@ -114,7 +114,7 @@ after:  source -> <= single-call-max-chars ? one call
 ### API Design
 
 - No CLI change.
-- Deleted: `chunk_transcript`, `build_reduce_input`, `build_thread_reduce_input`, `select_reduce_claims`, every `distill_long`, `CHUNK_TOKEN_TARGET`, `SINGLE_CALL_TOKEN_THRESHOLD`, and the patterns `distill-{article,video,thread,session,voicenote}-{chunk,reduce}.md`.
+- Deleted: the distillers' `chunk_transcript` (`distillers/src/video.rs`; `vault::embedding`'s function of the same name stays), `build_reduce_input`, `build_thread_reduce_input`, `select_reduce_claims`, every `distill_long`, `CHUNK_TOKEN_TARGET`, `SINGLE_CALL_TOKEN_THRESHOLD`, and the patterns `distill-{article,video,thread,session,voicenote}-{chunk,reduce}.md`.
 - `borg/src/eval/candidate.rs:77` `reaches_single_call` becomes "at or under the ceiling", so `--candidate-pattern` can score long traces.
 - `regenerate_dispatcher` (`borg/src/eval/regenerate.rs:199-209`) distills sessions with the production session model (`harvest.model`, then `llm.model`), not `fabric.model`, so eval and production agree.
 - Deleted with the chunk path: `distill.chunk-retries` (`borg/src/config.rs:311`, consumed only at `borg/src/pipeline/session.rs:479`, template line `:223`). `DistillConfig` is `deny_unknown_fields` (`config.rs:289`), so a host yml carrying the key would fail to load. ripr's `borg.yml` has no such key (grep, 2026-10-18).
@@ -134,7 +134,7 @@ after:  source -> <= single-call-max-chars ? one call
 - Distill each test source 5 times per arm, and each size probe once in the one-call arm. Judge every output with both judges. Retry an errored judge call once.
 - Record per call: the served model, the effective timeout, input tokens, wall time, and whether the call or the parse failed (`fallback_distilled`, zero claims).
 - **Success criteria:**
-  - Each size probe completes in one call on each model it runs on, with a non-fallback output of at least 10 claims, and claims anchored in all three thirds where the kind carries anchors. The ceiling default is the largest size that passed on every served model.
+  - Each size probe completes in one call on each model it runs on, with a non-fallback output of at least 10 claims, and claims anchored in all three thirds where the kind carries anchors. A failed probe records why: the window (an API context error) or the timeout. The ceiling default is the largest size that passed on every served model.
   - A table lands in this doc: per source, arm and run, both-judge flagged claims, claims per note, the share of anchored claims in each third of the source, fallbacks, and wall time.
   - Each of the 6 core errors is marked reproduced in the chunked arm (3+ of 5 runs) or baseline-unreproduced.
   - **Go rule** (one call ships only if all hold):
@@ -185,9 +185,9 @@ after:  source -> <= single-call-max-chars ? one call
 - Score each of the six with `sb borg eval --candidate-pattern`, now on long traces too.
 - **Success criteria:**
   - `rg -l "CLAIM-HONESTY" borg/patterns | wc -l` prints `6`, and the six blocks are byte-identical.
+    - Observed on main: `0`.
   - `rg -c "stated in the session" borg/patterns/distill-session.md` prints at least `1`, on the "Reusable patterns" bullet (`distill-session.md:52-53`, today "a technique, command, or structure that generalizes beyond this one task").
     - Observed on main: no match (exit 1).
-  - Observed on main for the first criterion: `0`.
   - Each candidate run, forced fresh, reports no coverage cut beyond `eval.candidate.max-coverage-cut`.
 
 #### Phase 4: Re-measure (operator, ripr)
@@ -199,14 +199,15 @@ after:  source -> <= single-call-max-chars ? one call
   - **omitted:** no claim on that fact in 3+ of 5 runs.
 - The fact each core error must keep, and whether omission counts:
 
-| trace | the fact that should survive | omitted counts as fixed |
-|---|---|---|
-| `hv-29b2f05e` | four security reviews ran | no |
-| `cl-2de2b08b` | the center pulls to the ID linebacker | no |
-| `cl-2db85dab` | community translations in 8 languages (9 repos) | no |
-| `cl-9e724b4b` | the six-node Proxmox/Vultr/OVH cluster, separate from the 3-Pi production cluster | no |
-| `cl-0222aa9e` | the interviewer asked, hedged, whether generalization is harder for decisions | yes |
-| `hv-16d375ce` | none: the lesson was invented | yes |
+  | trace | the fact that should survive | omitted counts as fixed |
+  |---|---|---|
+  | `hv-29b2f05e` | four security reviews ran | no |
+  | `cl-2de2b08b` | the center pulls to the ID linebacker | no |
+  | `cl-2db85dab` | community translations in 8 languages (9 repos) | no |
+  | `cl-9e724b4b` | the six-node Proxmox/Vultr/OVH cluster, separate from the 3-Pi production cluster | no |
+  | `cl-0222aa9e` | the interviewer asked, hedged, whether generalization is harder for decisions | yes |
+  | `hv-16d375ce` | none: the lesson was invented | yes |
+
 - A baseline-unreproduced error is reported, never counted as fixed.
 - Missing verdicts:
   - an error seen in any run is reproduced, even when other runs of that source miss verdicts;
@@ -228,7 +229,7 @@ after:  source -> <= single-call-max-chars ? one call
   - Observed on main: `277:  token-cap: 12000`.
 - [ ] A long source is one call: `cargo test -p distillers long_source_is_one_call` passes.
   - Cannot run yet: the test lands in Phase 1.
-- [ ] Phase 4's table meets its bar: every countable core error corrected or omitted, and the both-judge mean down by half.
+- [ ] Phase 4's table meets its bar: every countable core error corrected (or omitted where its row allows), zero fallbacks, and the both-judge mean down by half.
   - Cannot run yet: needs Phases 0-3.
 
 ## Resolved Decisions
