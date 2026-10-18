@@ -28,8 +28,9 @@ Long-source notes carry claims their own source does not back. Two independent j
   - Session windows the body head+tail to `token_cap` (default 12,000, `distillers/src/session.rs:129`, `borg/src/config/harvest.rs:50`) before routing. No host raises it: ripr's `~/.config/sb/borg.yml` has no `token-cap` line.
 - Other input caps on the single-call path:
   - `fabric.max-content-chars: 100000` on ripr (default 100,000, `borg/src/config.rs:1083`). `vault::fabric::run_command` head-truncates any input over it (`vault/src/fabric.rs:162-172`).
-  - Per-call `timeout_secs` defaults to 60 in each distiller config (for example `distillers/src/video.rs:80`).
-  - `max_claims` (`distillers/src/validate.rs:36-52`) allows 10 claims, plus 2 per extra chunk up to 24, so a single call on a long source gets only 10.
+  - Per-call distill timeout: production constructors pass borg `fabric.timeout-secs` (600 default, `borg/src/config.rs:1085`) or cortex's (120, `cortex/src/config.rs:419`); the 60 in each distiller struct is only a struct default.
+  - `max_claims` (`distillers/src/validate.rs:36-52`) allows 10 claims, plus 2 per extra chunk up to 24. All six single-call patterns also say "`claims`: maximum 10" (`distill-article.md:72`, `distill-video.md:85`, `distill-thread.md:42`, `distill-session.md:109`, `distill-voicenote.md:38`, `distill-repo.md:77`), so a single call on a long source gets 10.
+  - Models: production sessions use `harvest.model`, falling back to `llm.model` (`borg/src/pipeline/session.rs:464-469`), which is `claude-sonnet-5` on ripr. Other kinds use `fabric.model`, empty on ripr, so fabric's `DEFAULT_MODEL`.
 - Staged source sizes on ripr (2026-10-18, file sizes of `body.txt`, `transcript.md` and `distilled.yml`, approximate):
 
 | over | 48k | 100k | 400k | 1M | 2M |
@@ -94,25 +95,29 @@ after:  source -> <= single-call-max-chars ? one call
                                            : head+tail window to the ceiling, window: entry, degraded -> one call
 ```
 
-- One path per kind. The capture note, which the map-reduce path drops today (`docs/design/2026-10-14-note-sources-intent-tools-channels.md:74`), now reaches every distill.
+- One path per kind. The reduce input already carries the capture note (since 0117c8a, `parse.rs:720-746`); the chunk calls do not. With one call, the model reads the note and the whole source together.
 - The enumeration, anchor and command-honesty rules already live in the single-call patterns, so they keep working.
 
 ### Data Model
 
-- New config key `distill.single-call-max-chars` in `borg.yml`, and the same key in `cortex.yml`, because `sb cortex summarize --backfill` builds its own `Dispatcher` (`cortex/src/summarize.rs:70`). Its default comes from Phase 0. It replaces:
+- New config key `distill.single-call-max-chars` in `borg.yml`, and the same key in `cortex.yml`, because `sb cortex summarize --backfill` builds its own `Dispatcher` (`cortex/src/summarize.rs:70`). It counts SOURCE chars, before the capture note and the data frame are added. Its default comes from Phase 0. It replaces:
   - `SINGLE_CALL_TOKEN_THRESHOLD` routing in every distiller;
   - session `token_cap` and `harvest.token-cap`, deleted with their template line (`config/templates/borg.yml.example:277`);
-  - `fabric.max-content-chars` as the distill input cap. Distill calls pass the ceiling as `max_chars`; other fabric callers keep `max-content-chars`.
+  - `fabric.max-content-chars` as a cut on distill input. Distill calls pass `max_chars = 0` (no transport cut; `truncate_input` treats 0 as unlimited), because the source is already windowed to the ceiling. A transport cut would remove the tail of the request, which for sessions is the task restatement after `END DATA` (`parse.rs:959-967`). Other fabric callers keep `max-content-chars` (`run_command` takes `max_chars` per call, `vault/src/fabric.rs:162`).
+- Image keeps today's `max_chars` and timeout. `Dispatcher::new` derives image's values from the article config (`distillers/src/dispatcher.rs:98-102`), so Phase 1 gives image its own explicit values instead.
 - Above the ceiling, the existing `window_head_tail` moves to `distillers/src/parse.rs` and serves every kind. It pushes `window:<source_chars>><kept_chars>` into `meta.validation.bounds-truncations`.
 - `ValidationMeta::is_degraded()` (`vault/src/distilled.rs:444-446`) returns true on a `window:` entry, so the receipt is `degraded=true` and `sb doctor` warns.
-- `max_claims` (`distillers/src/validate.rs:48`) takes source tokens instead of a chunk count: 10, plus 2 per 8,000 tokens past the first 12,000, ceiling 24. That matches what the chunked path allowed (10, plus 2 per extra 8,000-token chunk, ceiling 24).
-- Per-call distill `timeout_secs` scales with input size: a base plus a per-100k-chars allowance, both config, values from Phase 0's measured latency. The pipeline hard timeout (1800s) stays the outer bound.
+- Claim budget: `max_claims` (`distillers/src/validate.rs:48`) takes source tokens. `equivalent_chunks = ceil(source_tokens / 8000)`, budget `= min(10 + 2 x (equivalent_chunks - 1), 24)`, with 10 at or under 12,000 tokens. That is the chunked path's own rounding: at 25,000 tokens both give 16.
+- The budget reaches the model. The six single-call patterns drop the fixed "maximum 10" and read a `Claim budget: N` line the distiller writes into the input, next to the capture note. Raising the Rust cap alone only moves the truncation point.
+- Timeouts: `distill.timeout-base-secs` and `distill.timeout-secs-per-100k-chars` (seconds, values from Phase 0's measured latency). Per call, `timeout = min(base + per_100k x ceil(source_chars / 100,000), pipeline hard timeout - elapsed - 60)`. `vault::fabric::run_command` enforces it as its wall-clock timeout and kills the subprocess, so it ends before the 1800s pipeline timeout, which bounds the whole ingest.
 
 ### API Design
 
 - No CLI change.
 - Deleted: `chunk_transcript`, `build_reduce_input`, `build_thread_reduce_input`, `select_reduce_claims`, every `distill_long`, `CHUNK_TOKEN_TARGET`, `SINGLE_CALL_TOKEN_THRESHOLD`, and the patterns `distill-{article,video,thread,session,voicenote}-{chunk,reduce}.md`.
 - `borg/src/eval/candidate.rs:77` `reaches_single_call` becomes "at or under the ceiling", so `--candidate-pattern` can score long traces.
+- `regenerate_dispatcher` (`borg/src/eval/regenerate.rs:199-209`) distills sessions with the production session model (`harvest.model`, then `llm.model`), not `fabric.model`, so eval and production agree.
+- Deleted with the chunk path: `distill.chunk-retries` (`borg/src/config.rs:311`, consumed only at `borg/src/pipeline/session.rs:479`, template line `:223`). `DistillConfig` is `deny_unknown_fields` (`config.rs:289`), so a host yml carrying the key would fail to load. ripr's `borg.yml` has no such key (grep, 2026-10-18).
 
 ### Implementation Plan
 
@@ -120,23 +125,24 @@ after:  source -> <= single-call-max-chars ? one call
 **Model:** opus
 - Operator-run on ripr with a throwaway build, the same isolation as the claim-judge Phase 0 (scratch `XDG_DATA_HOME`, scratch patterns dir, live DB row counts checked before and after).
 - Test set: the 15 flagged traces, `cl-56dd5199 cl-9e724b4b cl-ad229f9f cl-b14d7e33 cl-2db85dab hv-12ae5acc hv-16d375ce hv-29b2f05e hv-2fe2ec93 hv-5194d942 cl-0222aa9e cl-1ed09284 cl-2de2b08b cl-33faf56c cl-38cd120a`. `hv-12ae5acc` and `hv-16d375ce` share one body (same md5), so 14 distinct sources.
-- Size probes: `hv-a158c300` (2.49M bytes) and `cl-31951716` (1.42M bytes, the largest video).
+- Size probes: `hv-a158c300` (2.49M bytes) and `cl-31951716` (1.42M bytes, the largest video). `hv-a158c300` runs on both served models: the session model, and fabric's `DEFAULT_MODEL` through the article pattern, so each model is proven at the largest size.
 - Copy all 17 trace dirs into the Phase 0 scratch tree first, so a `sb borg retention sweep` before Phase 4 cannot remove them.
 - The throwaway build has two arms over the same traces:
   - **chunked:** current code, unchanged.
-  - **one call:** threshold, `token_cap` and `max_chars` lifted, timeout 900s, claims budget scaled by source size.
-- It re-distills named staged traces through the full `Dispatcher` (`borg/src/eval/regenerate.rs:199` is the precedent) and judges claims on the full source (the claim-judge Phase 0 patch).
+  - **one call:** threshold, `token_cap` and transport `max_chars` lifted, timeout 1,500s, and the claim budget scaled and written into the input with the patterns' fixed "maximum 10" replaced (Data Model), so both arms get the same claim allowance.
+- It re-distills named staged traces through the full `Dispatcher` (`borg/src/eval/regenerate.rs:199` is the precedent) and judges claims on the full source (the claim-judge Phase 0 patch). Sessions go through the production session model in both arms, not `fabric.model`.
 - Distill each test source 5 times per arm, and each size probe once in the one-call arm. Judge every output with both judges. Retry an errored judge call once.
-- Record per call: the served model, input tokens, wall time, and whether the call or the parse failed.
+- Record per call: the served model, the effective timeout, input tokens, wall time, and whether the call or the parse failed (`fallback_distilled`, zero claims).
 - **Success criteria:**
-  - Both size probes complete in one call with the served model logged. If either fails on window size, the ceiling sits below it and the doc records the measured limit.
-  - A table lands in this doc: per source, arm and run, both-judge flagged claims, claims per note, the fraction of anchored claims in the source's last third, and wall time.
+  - Each size probe completes in one call on each model it runs on, with a non-fallback output of at least 10 claims, and claims anchored in all three thirds where the kind carries anchors. The ceiling default is the largest size that passed on every served model.
+  - A table lands in this doc: per source, arm and run, both-judge flagged claims, claims per note, the share of anchored claims in each third of the source, fallbacks, and wall time.
   - Each of the 6 core errors is marked reproduced in the chunked arm (3+ of 5 runs) or baseline-unreproduced.
   - **Go rule** (one call ships only if all hold):
+    - zero fallback or parse failures in the one-call arm;
     - the one-call mean of both-judge flagged claims per run is at or below the chunked mean;
     - claims per note are within `eval.candidate.max-coverage-cut` of the chunked arm;
-    - on sources whose claims carry anchors (videos), the last-third fraction is at least 0.8 of the chunked arm's (no head bias);
-    - every test-source call finishes inside 1800s.
+    - on sources whose claims carry anchors (videos), each third's share of claims is at least 0.8 of the chunked arm's share for that third. This catches head bias and lost-in-the-middle;
+    - every test-source call finishes inside its timeout and inside 1800s.
   - Live `eval_scores` and `judge_trust` row counts are unchanged after the run.
 - If the go rule fails, this doc returns to Draft with Alternative 1.
 
@@ -144,20 +150,25 @@ after:  source -> <= single-call-max-chars ? one call
 **Model:** opus
 - Add `distill.single-call-max-chars` with the Phase 0 default, threaded through `Dispatcher` (`distillers/src/dispatcher.rs`) and `regenerate_dispatcher`.
 - Every distiller takes the single-call path at or under the ceiling. Above it, head+tail window to the ceiling, record `window:`, mark degraded.
-- Distill fabric calls pass the ceiling as `max_chars`. Scale `max_claims` and `timeout_secs` as in Data Model.
+- Distill fabric calls pass `max_chars = 0`. Image gets explicit values equal to today's. Scale the claim budget and timeout as in Data Model, and write the `Claim budget: N` line; the six single-call patterns read it in place of "maximum 10".
+- `regenerate_dispatcher` uses the production session model for sessions.
 - Delete `harvest.token-cap` and session `token_cap`, and the template line.
 - **Success criteria:**
-  - `cargo test -p distillers long_source_is_one_call` passes: a 200,000-char article, video, thread, session and voicenote each make exactly one distill call through `FakeFabric`, with the whole input after truncation.
+  - `cargo test -p distillers long_source_is_one_call` passes: a 200,000-char article, video, thread, session and voicenote each make exactly one distill call through `FakeFabric`. The request holds the whole source, the capture note, the `Claim budget: 16`-style line, and for sessions the closing task after `END DATA`.
+  - `cargo test -p borg single_call_ceiling_reaches_every_entry_point` passes: a non-default ceiling in `borg.yml` reaches the final `FabricRequest` through ordinary ingest, harvest/session, eval regenerate and candidate; the same in `cortex.yml` through `summarize --backfill`. Image's `max_chars` and timeout are unchanged.
   - `cargo test -p distillers over_ceiling_records_window` passes with an explicit 1,000-char ceiling: the entry is present and `is_degraded()` is true. It fails with the push removed.
   - `cargo test -p borg regenerate_dispatcher_uses_single_call_ceiling` passes: `regenerate_dispatcher` built from a borg config with a 300,000-char ceiling distills a 200,000-char article in one call. It fails if the eval dispatcher falls back to the default.
   - `rg -n "token-cap" config/templates/borg.yml.example` prints nothing.
 
 #### Phase 2: Delete the chunk/reduce path
 **Model:** sonnet
-- Delete the symbols and ten patterns listed in API Design, and their tests. `otto deploy` stops syncing the ten patterns.
+- Delete the symbols and ten patterns listed in API Design, and their tests.
+- Remove the ten entries from `PATTERNS` in `sb/src/cli/bootstrap.rs:79-140`, which embeds them with `include_str!`.
+- Delete `distill.chunk-retries`: the field, its wiring, its tests and its template line.
 - Update `reaches_single_call`, `distillers/AGENTS.md`, and the CLAUDE.md patterns count.
+- The ten deployed copies under `~/.config/sb/patterns/` stay on each host: bootstrap writes patterns but never prunes them (`sb/src/cli/bootstrap.rs:315`), and nothing reads them after this phase.
 - **Success criteria:**
-  - `rg -l "fn distill_long|select_reduce_claims|build_reduce_input|build_thread_reduce_input|SINGLE_CALL_TOKEN_THRESHOLD|CHUNK_TOKEN_TARGET" distillers borg --type rust | wc -l` prints `0` (13 on main). The search names distiller symbols only: `vault`'s embedding code has its own unrelated `chunk_transcript`, which stays.
+  - `rg -l "fn distill_long|select_reduce_claims|build_reduce_input|build_thread_reduce_input|SINGLE_CALL_TOKEN_THRESHOLD|CHUNK_TOKEN_TARGET|chunk_retries|chunk-retries|-chunk\.md|-reduce\.md" distillers borg sb cortex config | wc -l` prints `0` (19 on main). The search names distiller symbols only: `vault`'s embedding code has its own unrelated `chunk_transcript`, which stays.
   - `ls borg/patterns | rg -c "(chunk|reduce)\.md$"` prints nothing (no matches).
   - `otto ci` passes.
 
@@ -172,22 +183,38 @@ after:  source -> <= single-call-max-chars ? one call
   - pick claims from the whole source, early, middle and late.
 - Narrow `distill-session.md:52-53` so a "reusable pattern" must be stated in the session.
 - Score each of the six with `sb borg eval --candidate-pattern`, now on long traces too.
-- **Success criteria:** each candidate run reports no coverage cut beyond `eval.candidate.max-coverage-cut`.
+- **Success criteria:**
+  - `rg -l "CLAIM-HONESTY" borg/patterns | wc -l` prints `6`, and the six blocks are byte-identical.
+  - `rg -c "stated in the session" borg/patterns/distill-session.md` prints at least `1`, on the "Reusable patterns" bullet (`distill-session.md:52-53`, today "a technique, command, or structure that generalizes beyond this one task").
+    - Observed on main: no match (exit 1).
+  - Observed on main for the first criterion: `0`.
+  - Each candidate run, forced fresh, reports no coverage cut beyond `eval.candidate.max-coverage-cut`.
 
 #### Phase 4: Re-measure (operator, ripr)
 **Model:** opus
 - The Phase 0 one-call arm, rebased on the shipped code, 5 runs per test source.
 - Each core error that reproduced in Phase 0's chunked arm gets one outcome:
   - **reproduced:** the error appears in any run (this beats the other two);
-  - **corrected:** the claim is present in 3+ of 5 runs and both judges call it supported;
-  - **omitted:** the claim is absent in 3+ of 5 runs.
+  - **corrected:** a claim stating the source-backed fact is present in 3+ of 5 runs and both judges call it supported;
+  - **omitted:** no claim on that fact in 3+ of 5 runs.
+- The fact each core error must keep, and whether omission counts:
+
+| trace | the fact that should survive | omitted counts as fixed |
+|---|---|---|
+| `hv-29b2f05e` | four security reviews ran | no |
+| `cl-2de2b08b` | the center pulls to the ID linebacker | no |
+| `cl-2db85dab` | community translations in 8 languages (9 repos) | no |
+| `cl-9e724b4b` | the six-node Proxmox/Vultr/OVH cluster, separate from the 3-Pi production cluster | no |
+| `cl-0222aa9e` | the interviewer asked, hedged, whether generalization is harder for decisions | yes |
+| `hv-16d375ce` | none: the lesson was invented | yes |
 - A baseline-unreproduced error is reported, never counted as fixed.
 - Missing verdicts:
   - an error seen in any run is reproduced, even when other runs of that source miss verdicts;
   - otherwise, a source with more than one run missing a verdict after the retry is inconclusive and leaves both counts;
   - the both-judge mean is divided by the runs with complete verdicts, never by 5.
 - **Success criteria:**
-  - Every countable core error is corrected or omitted. At least 3 of the 6 must be countable, or the result is inconclusive.
+  - Every countable core error is corrected, or omitted where the table allows it. At least 3 of the 6 must be countable, or the result is inconclusive.
+  - Zero fallback or parse failures.
   - The mean both-judge flagged claims per run falls by at least half against Phase 0's chunked arm.
   - Claims per note stay within `eval.candidate.max-coverage-cut` of the chunked arm.
 
@@ -216,6 +243,21 @@ after:  source -> <= single-call-max-chars ? one call
   - the hedge-rule wording and the explicit pattern list;
   - the deployed-version probe after ship.
 - 2026-10-18 (panel round 2, on the pre-rework snapshot `1a5deb8`): the dispute closed for the author. Both seats confirmed all five reduce fallbacks set `reduce-selection-failed` (`session.rs:408`, `article.rs:493`, `video.rs:421`, `thread.rs:420`, `voicenote.rs:332`), which `is_degraded()` reads and every publish site ORs into the receipt. Moot after the rework, which deletes the reduce path. Two findings that carry over are folded: a borg-side test that the eval dispatcher uses the ceiling (Phase 1), and the missing-verdict precedence and denominator (Phase 4).
+- 2026-10-18 (panel round 3, first review of the one-call design): 7 must-fixes and 7 cheap wins folded in:
+  - the `bootstrap.rs` pattern embeds and the widened Phase 2 search;
+  - the claim budget written into the input, with the chunked rounding;
+  - `max_chars = 0` so the session task trailer survives;
+  - image's explicit values;
+  - the session model in eval and Phase 0;
+  - zero fallbacks, per-third coverage, and per-error survival facts in the go rule and Phase 4;
+  - `distill.chunk-retries` deletion (ripr's yml checked);
+  - the capture-note and timeout facts corrected;
+  - a ceiling proven per served model;
+  - an entry-point config test;
+  - Phase 3 criteria;
+  - the stale deployed patterns stated;
+  - the timeout keys and budget.
+- 2026-10-18 (panel round 3, deferred with reason): daemon-worker starvation from long calls is unquantified, and the HEAVY_PERMIT already serializes heavy ingests. Phase 0's wall times show whether it matters. The architect's generic rollback ask is covered by one Rollout line. The architect's "Phase 2 lacks `cargo test`" is wrong: `otto ci` runs the tests.
 - 2026-10-18: the token-cap question sent to Scott is withdrawn. One ceiling replaces it, set from Phase 0.
 
 ## Alternatives Considered
@@ -261,6 +303,7 @@ after:  source -> <= single-call-max-chars ? one call
   - each receipt is not degraded, and `bounds-truncations` is empty;
   - each distill made one call (daemon log).
 - New ingests take the new path. Old notes change only on `sb borg replay`.
+- Rollback: the previous tag + `otto deploy`. Its bootstrap rewrites the ten chunk/reduce patterns.
 
 ## Risks and Mitigations
 
