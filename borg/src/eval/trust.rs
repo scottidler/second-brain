@@ -3,7 +3,10 @@
 //!
 //! A judge check is trusted when, on every planted class the applicability
 //! matrix ([`super::inject::applies`]) marks visible to it:
-//! - its paired catch rate is at least `eval.trust.min-paired-catch-rate`,
+//! - its paired catch rate (the planted unit flagged on the mutant and passed
+//!   on the original; the unit is the mutated claim for `judge-claims`, the
+//!   note otherwise, see [`super::inject::flags`]) is at least
+//!   `eval.trust.min-paired-catch-rate`,
 //! - its applicable sample size is at least `eval.trust.min-samples`, and
 //! - the row is for the check's current rubric version.
 //!
@@ -44,11 +47,12 @@ pub struct TrustRow {
     pub check_name: String,
     pub planted_class: String,
     pub rubric_version: String,
-    /// Share of applicable traces where the check flags the mutant AND passes
-    /// the unmutated original. The trust metric.
+    /// Share of applicable traces where the check flags the planted unit on
+    /// the mutant AND passes it on the unmutated original. The trust metric.
     pub paired_catch_rate: f64,
     pub raw_catch_rate: f64,
-    /// Flag rate on the unmutated originals: a false-alarm proxy.
+    /// Share where the planted unit is flagged on the unmutated original: a
+    /// false-alarm proxy.
     pub flag_rate: f64,
     /// One-sided 95% Wilson lower bound on `paired_catch_rate`.
     pub wilson_lower: f64,

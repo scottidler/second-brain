@@ -162,7 +162,7 @@ sb-eval.timer (daily) ──> sb borg eval --unscored --format json
   - `judge-claims` stays on claim text: its job is per-claim support, and dropping a claim leaves the remaining claims supported. The cells marked no are reported as `n/a`, never as a miss.
   - Adding a column to the matrix means adding a check that can see that class.
 - The `--inject` report prints, per check and applicable class:
-  - **Paired catch rate:** the share of applicable traces where the check flags the mutant AND passes that trace's unmutated original. A check that flags everything scores 0 here, not 1.
+  - **Paired catch rate:** the share of applicable traces where the check flags the planted unit on the mutant AND passes that unit on the trace's unmutated original. The unit is the mutated claim for `judge-claims` and the whole note for the other checks (2026-10-18, Resolved Decisions). A check that flags everything scores 0 here, not 1.
   - **Raw catch rate** (true-positive rate on planted errors).
   - **Flag rate on unmutated notes.** This is a false-alarm proxy, not a true-negative rate, because production notes are not known-clean.
   - **Applicable sample size:** distinct traces where the mutation was actually generated and applies (a note with no number cannot take a number swap).
@@ -180,7 +180,7 @@ sb-eval.timer (daily) ──> sb borg eval --unscored --format json
 - **What an untrusted judge is barred from** (panel round 1 finding 1):
   - Every `--inject` run writes a `judge_trust` row per judge model, check and applicable class: paired catch rate, raw catch rate, flag rate, applicable sample size, rubric version, measured time.
   - A judge check is trusted when, on every class the matrix marks applicable to it:
-    - its paired catch rate is at least `eval.trust.min-paired-catch-rate` (default 0.80), and
+    - its paired catch rate is at least `eval.trust.min-paired-catch-rate` (default 0.80), where paired = the planted unit is flagged on the mutant AND passed on the original; the unit is the mutated claim for `judge-claims` (one verdict per claim, read at the planted index) and the whole note for `judge-distillation` and `quote-grounding` (2026-10-18, below), and
     - its applicable sample size is at least `eval.trust.min-samples` (default 30), and
     - the row is for the current rubric version.
   - Both defaults are policy floors, not proof. 24 of 30 caught has a one-sided Wilson lower bound near 0.66, so a trusted check is "caught at least this often on a small synthetic sample", nothing stronger. The report prints the lower bound next to each rate.
@@ -282,7 +282,7 @@ CREATE TABLE IF NOT EXISTS judge_trust (
     check_name          TEXT NOT NULL,  -- 'judge-distillation' | 'judge-claims' | 'quote-grounding' | ...
     planted_class       TEXT NOT NULL,  -- applicable classes only (the applicability matrix)
     rubric_version      TEXT NOT NULL,
-    paired_catch_rate   REAL NOT NULL,  -- flags the mutant AND passes its original; the trust metric
+    paired_catch_rate   REAL NOT NULL,  -- flags the planted unit on the mutant AND passes it on the original; the trust metric
     raw_catch_rate      REAL NOT NULL,
     flag_rate           REAL NOT NULL,  -- on unmutated notes; a false-alarm proxy
     wilson_lower        REAL NOT NULL,  -- one-sided lower bound on paired_catch_rate
@@ -465,6 +465,7 @@ All observed lines re-run 2026-10-17 on ripr at v0.17.7 (`e0b7135`).
 - **2026-10-17: The Phase 1 key criterion is a unit test, not a live call.** The live command already passes on main through fabric's own `.env`, so it proved nothing.
 - **2026-10-17: The pattern-dir spike is dropped.** `--patterns-dir` shipped in 69509ea.
 - **2026-10-17, panel round 2: trust is a paired catch rate with a sample floor, per applicable class.** 1 of 1 passed the old bar, and a judge that flags everything had catch rate 1.0 (round 2 items 1, 7). The trust metric is now "flags the mutant AND passes its original", at least 0.80 over at least 30 applicable traces. The defaults are policy floors; the report prints the Wilson lower bound. The jev "same bar" justification is dropped: that was precision against gold labels, not synthetic recall.
+- **2026-10-18: paired catch is scored on the planted unit, not the whole note** (Scott, option B of the three-step direction in `docs/handoff/claim-judge-full-source.md`). The 10-18 Phase 0 of `2026-10-17-claim-judge-full-source.md` measured Claude's `judge-claims` at 0.59 over-window under note-level pairing while it caught the planted swap on 25 of 27 claims: the misses were originals the judge flagged on some other claim. Checked against their sources, those other flags were 6 true distiller errors in the published notes (Scott, 10-18) and, on freshly distilled notes, 8 judge false positives against 7 true errors over 17 flags (this session). Either way they measure the distiller or the judge's noise on unrelated claims, not whether the judge sees the planted error. `inject::plant` now reports the mutated claim's index and `inject::flags` reads the verdict there for `judge-claims`; `judge-distillation` and `quote-grounding` have no per-claim output and stay note-level. Columns and the `judge_trust` schema are unchanged; `CLAIMS_RUBRIC_VERSION` moves to `v3` with the full-source change so no `v2` note-level row is read as current. Not done: a ceiling on the originals' flag rate. The 8 false positives are the judge's noise on long sessions, and once trusted `--remediate` will re-distill some clean notes on it; the flag rate stays printed so that cost is visible.
 - **2026-10-17, panel round 2: an applicability matrix replaces "every class is visible".** `judge-claims` sees claim text only (`borg/src/eval.rs:326-327`), so it is measured on number swaps alone. It stays that way because per-claim support is its job (item 5).
 - **2026-10-17, panel round 2: coverage needs an error-free current row for every required check** (item 4). Error rows and other judges' rows no longer suppress a retry. One definition of `--unscored`, in one place.
 - **2026-10-17, panel round 2: current-row rule, `run_id`, `check_name`, and the distill hash as `content_hash`** (items 3, 8). The JSONL contract carries `run_kind`, `run_id` and `rubric_version`, so `--ingest-verdicts` rebuilds the full key.

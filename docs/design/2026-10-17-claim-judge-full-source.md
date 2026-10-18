@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-17
-**Status:** Blocked (Phase 0 waits on the long-source distiller fix; see Phase 0 results)
+**Status:** Approved for build (2026-10-18, Scott: option B). Phase 0 is closed by its claim-level numbers; no re-run. Phases 1-3 as written.
 **Review Passes Completed:** 3/5 (draft, correctness, edge cases); panel round 1 folded (staff seat only)
 
 ## Summary
@@ -210,6 +210,8 @@ Claims-call latency in seconds, successful calls only:
   - **Both judges fail, so the written rule says no-go.** The claim-level data says the failure is not long-context reading. Alternative 2 (the evidence locator) does not change whether the original note is flagged, so the no-go branch as written would not move these numbers.
 - **Decision (Scott, 2026-10-18): fix the distiller first, then re-run Phase 0.** The six both-flagged claims were checked against their sources. Each one goes beyond its source: a miscount (9 repos read as 9 languages, `cl-2db85dab`), two clusters merged into one (`cl-9e724b4b`), a word swap (ID linebacker -> backside linebacker, `cl-2de2b08b`), a hedged question stated as a position (`cl-0222aa9e`), an invented count of three reviews (`hv-29b2f05e`), and a lesson the session never states (`hv-16d375ce`). Truncation is ruled out for the article, repo and videos only. `meta.input-tokens` counts what the model was sent, not the source. Session head+tail windowing (`distillers/src/session.rs:168-175`) dropped chars 28,436-30,801 of `hv-29b2f05e`, which held 1 of its 4 security-review prompts, so the model saw three. `distillers/src/validate.rs` checks structure only, so no step compares a claim to its source before publish. The distiller fix is tested on the notes already flagged: the 15 over-window originals that either judge flagged (`cl-56dd5199 cl-9e724b4b cl-ad229f9f cl-b14d7e33 cl-2db85dab hv-12ae5acc hv-16d375ce hv-29b2f05e hv-2fe2ec93 hv-5194d942 cl-0222aa9e cl-1ed09284 cl-2de2b08b cl-33faf56c cl-38cd120a`), with the six both-flagged ones as the core.
 
+- **Follow-up (2026-10-18, Scott: option B).** No re-run. The paired metric now reads the planted claim (see Resolved Decisions), and at that unit this run's over-window numbers are 25/27 and 26/27. Phases 1-3 proceed as written; Phase 3's `--inject` on ripr is the re-measure.
+
 #### Phase 1: Full-source claims judging + not judgeable
 **Model:** opus
 - Config keys `claims-source-max-chars` and `claims-timeout-secs` (Data Model), threaded through `eval_opts` -> `EvalOpts` -> `fabric_judges`, and added to the shipped `borg.yml` template with comments.
@@ -259,7 +261,8 @@ Claims-call latency in seconds, successful calls only:
 
 ## Resolved Decisions
 
-- 2026-10-18 (Phase 0): fix the distiller's long-source claim errors first, then re-run Phase 0. Reason: the judges catch the planted swap (25/27 and 26/27 over-window), and the paired metric fails on originals the distiller already got wrong. The fix's test set is the already-flagged originals.
+- 2026-10-18 (Scott, option B): build Phases 1-3 now; no Phase 0 re-run and no distiller fix first. Reason: the paired metric was the problem. Trust now scores the planted claim (`2026-10-14-automated-note-quality-loop.md`, Resolved Decisions, 2026-10-18), and on that unit Phase 0 already reads 25/27 (claude) and 26/27 (gemini) over-window against the 0.80 bar. The distiller design (`2026-10-18-distiller-long-source-claim-fidelity.md`) is closed as not pursued. Phase 3's bar is unchanged in words and now measures the planted claim.
+- 2026-10-18 (Phase 0), superseded the same day by the bullet above: fix the distiller's long-source claim errors first, then re-run Phase 0. Reason: the judges catch the planted swap (25/27 and 26/27 over-window), and the paired metric fails on originals the distiller already got wrong. The fix's test set is the already-flagged originals.
 - 2026-10-17: Full source over evidence windows (Alternative 2), gated by Phase 0. Reason: it is the direct fix for the measured cause and needs no retrieval layer. The locator stays parked with a revisit condition.
 - 2026-10-17: Judgeability is keyed on source length alone, so a baseline and its candidate never split across the line.
 - 2026-10-17: Fitting sources keep whole-source judging. Nothing changes for them except the rubric version and the deleted cut-off line, which they never triggered.

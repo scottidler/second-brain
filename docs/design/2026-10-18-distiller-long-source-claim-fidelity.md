@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-18
-**Status:** Draft. Phase 0 went no-go (2026-10-18), so per the go rule this doc returns to Alternative 1: keep chunking, repair the reduce step.
+**Status:** Not pursued (2026-10-18, Scott: option B in `docs/handoff/claim-judge-full-source.md`). Phase 0 went no-go, and its finding that matters is that the 15 flagged originals mostly re-distill clean on today's code (1 of 6 core errors reproduces). The claim-judge trust problem was the paired metric, now scored on the planted claim (`2026-10-14-automated-note-quality-loop.md`, Resolved Decisions, 2026-10-18), so neither the one-call rework nor Alternative 1 is built. The Phase 0 numbers below stay as the record; the start bias on long videos and the session windowing drop (`hv-29b2f05e`) are the open distiller items if this is ever reopened.
 **Review Passes Completed:** 5/5 on the reworked design (draft, correctness, clarity, edge cases, excellence); panel rounds 1-3 folded (round 3 reviewed the rework; rounds 1-2 reviewed the earlier chunk-repair design it replaces)
 
 ## Summary

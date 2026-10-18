@@ -71,8 +71,8 @@ fn quote_grounding_catches_every_fabricated_quote_with_zero_llm_calls() {
     let mutants: Vec<Fixture> = fixtures
         .iter()
         .filter_map(|fx| {
-            plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).map(|distilled| Fixture {
-                distilled,
+            plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).map(|planted| Fixture {
+                distilled: planted.distilled,
                 ..fx.clone()
             })
         })
@@ -112,7 +112,7 @@ fn quote_grounding_catches_every_fabricated_quote_with_zero_llm_calls() {
             mutant.id
         );
         assert_eq!(
-            flags(CHECK_QUOTE_GROUNDING, &record.metrics),
+            flags(CHECK_QUOTE_GROUNDING, &record.metrics, Some(0)),
             Some(true),
             "{} not caught",
             mutant.id
@@ -124,7 +124,9 @@ fn quote_grounding_catches_every_fabricated_quote_with_zero_llm_calls() {
 fn a_fabricated_quote_uses_only_words_absent_from_the_source_and_skips_present_ones() {
     let mut fx = fixture("t");
     fx.source.push_str(" marmalade trombone porcupine");
-    let mutant = plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).unwrap();
+    let planted = plant(PlantedClass::FabricatedQuote, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(planted.claim, Some(0));
+    let mutant = planted.distilled;
     let quote = mutant.claims[0].quote.clone().unwrap();
     assert_eq!(quote, "saxophone tapestry walrus cinnamon hammock pelican");
     assert_eq!(quote_grounding(&fx.source, &mutant), (1, 2));
@@ -135,9 +137,19 @@ fn a_fabricated_quote_uses_only_words_absent_from_the_source_and_skips_present_o
 fn a_number_swap_picks_a_number_the_source_never_states() {
     let mut fx = fixture("t");
     fx.source.push_str(" It needs 8 cores.");
-    let mutant = plant(PlantedClass::NumberSwap, &fx.distilled, &fx.source).unwrap();
+    let planted = plant(PlantedClass::NumberSwap, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(planted.claim, Some(0));
+    let mutant = planted.distilled;
     assert_eq!(mutant.claims[0].text, "The engine computes 9 results per cycle.");
     assert_eq!(mutant.claims[0].quote, fx.distilled.claims[0].quote);
+
+    // The swap lands on the first claim that carries a number, and reports it.
+    let mut later = fx.distilled.clone();
+    later.claims[0].text = "No figures here.".to_string();
+    later.claims[2].text = "It runs on 3 machines.".to_string();
+    let planted = plant(PlantedClass::NumberSwap, &later, &fx.source).unwrap();
+    assert_eq!(planted.claim, Some(2));
+    assert_eq!(planted.distilled.claims[2].text, "It runs on 4 machines.");
 
     let mut no_number = fx.distilled.clone();
     for c in &mut no_number.claims {
@@ -149,7 +161,9 @@ fn a_number_swap_picks_a_number_the_source_never_states() {
 #[test]
 fn a_dropped_top_claim_needs_two_claims() {
     let fx = fixture("t");
-    let mutant = plant(PlantedClass::DroppedTopClaim, &fx.distilled, &fx.source).unwrap();
+    let planted = plant(PlantedClass::DroppedTopClaim, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(planted.claim, None, "a dropped claim has no index to pair on");
+    let mutant = planted.distilled;
     assert_eq!(mutant.claims.len(), 2);
     assert_eq!(mutant.claims[0].text, fx.distilled.claims[1].text);
 
@@ -161,7 +175,9 @@ fn a_dropped_top_claim_needs_two_claims() {
 #[test]
 fn a_who_change_names_someone_the_source_never_mentions() {
     let fx = fixture("t");
-    let mutant = plant(PlantedClass::WhoChange, &fx.distilled, &fx.source).unwrap();
+    let planted = plant(PlantedClass::WhoChange, &fx.distilled, &fx.source).unwrap();
+    assert_eq!(planted.claim, Some(0));
+    let mutant = planted.distilled;
     assert_eq!(mutant.claims[0].who.as_deref(), Some("Dr. Imogen Thistlewood"));
     assert_eq!(mutant.claims[2].who, fx.distilled.claims[2].who);
 
@@ -205,6 +221,125 @@ fn an_unscored_side_is_an_error_never_a_pass() {
         }
     );
     assert_eq!(t.paired_catch_rate(), 0.0);
+}
+
+#[test]
+fn judge_claims_flags_read_the_planted_claim_and_a_missing_verdict_is_an_error() {
+    use ClaimVerdict::*;
+    let metrics = TraceMetrics {
+        judge_claims: Some(vec![Supported, Unsupported, Supported]),
+        ..Default::default()
+    };
+    assert_eq!(flags(CHECK_JUDGE_CLAIMS, &metrics, Some(0)), Some(false));
+    assert_eq!(flags(CHECK_JUDGE_CLAIMS, &metrics, Some(1)), Some(true));
+    assert_eq!(
+        flags(CHECK_JUDGE_CLAIMS, &metrics, None),
+        Some(true),
+        "note-level: any claim"
+    );
+    assert_eq!(flags(CHECK_JUDGE_CLAIMS, &metrics, Some(3)), None, "no verdict at 3");
+    let unjudged = TraceMetrics::default();
+    assert_eq!(flags(CHECK_JUDGE_CLAIMS, &unjudged, Some(0)), None);
+}
+
+/// Supports every claim except the one named: a judge that is right about the
+/// planted claim and wrong (or the distiller wrong) somewhere else on the note.
+struct OneClaimFlaggedJudge {
+    flagged: String,
+    /// Claims that are not in the originals: the planted ones.
+    originals: HashSet<String>,
+}
+
+impl ClaimJudge for OneClaimFlaggedJudge {
+    fn judge_claims(&self, _kind: &str, _source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        Ok(claims
+            .iter()
+            .map(|c| {
+                if *c == self.flagged || !self.originals.contains(c) {
+                    ClaimVerdict::Unsupported
+                } else {
+                    ClaimVerdict::Supported
+                }
+            })
+            .collect())
+    }
+}
+
+/// The 2026-10-18 measured shape: the judge catches every planted swap, and
+/// the original carries another claim it flags. Note-level pairing scored
+/// that 0; the metric reads the planted claim, so it scores 1.
+#[test]
+fn judge_claims_paired_catch_is_on_the_planted_claim_not_the_whole_note() {
+    let fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
+    let originals: HashSet<String> = fixtures
+        .iter()
+        .flat_map(|f| f.distilled.claims.iter().map(|c| c.text.trim().to_string()))
+        .collect();
+    let flagged = fixtures[0].distilled.claims[1].text.trim().to_string();
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 3,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            Box::new(OneClaimFlaggedJudge {
+                flagged: flagged.clone(),
+                originals: originals.clone(),
+            }),
+        ))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts::default();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    let t = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    // Every fixture's claim 1 ("The cache doubles throughput...") is flagged on
+    // original and mutant alike; the swap is on claim 0 and is caught cleanly.
+    assert_eq!(
+        (t.n, t.paired_caught, t.raw_caught, t.originals_flagged, t.errors),
+        (3, 3, 3, 0, 0)
+    );
+    assert_eq!(t.paired_catch_rate(), 1.0);
+    let claims_trust = report
+        .trust
+        .iter()
+        .find(|c| c.judge_model == MODEL && c.check == CHECK_JUDGE_CLAIMS)
+        .unwrap();
+    assert_eq!(claims_trust.state, TrustState::Trusted);
+
+    // The negative: a judge that flags the planted claim on the original too
+    // (here: every claim) is still paired 0 on it.
+    let all_flagged = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 3,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            Box::new(MockClaimJudge::new(ClaimVerdict::Unsupported)),
+        ))
+    };
+    let env = self::env();
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &all_flagged).unwrap();
+    let t = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!((t.n, t.paired_caught, t.originals_flagged), (3, 0, 3));
 }
 
 /// Scores a note perfectly only when it is one of the originals.

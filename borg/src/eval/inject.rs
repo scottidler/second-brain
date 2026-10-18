@@ -5,13 +5,23 @@
 //! planted class ([`PlantedClass`]). Every check scores the original and each
 //! mutant, and the run reports, per check and class the check can see (the
 //! applicability matrix, [`applies`]):
-//! - **paired catch rate:** flags the mutant AND passes its original (a check
-//!   that flags everything scores 0 here),
-//! - **raw catch rate:** flags the mutant,
-//! - **flag rate on the unmutated originals:** a false-alarm proxy, since
-//!   production notes are not known-clean,
+//! - **paired catch rate:** flags the planted unit on the mutant AND passes the
+//!   same unit on its original (a check that flags everything scores 0 here),
+//! - **raw catch rate:** flags the planted unit on the mutant,
+//! - **flag rate on the unmutated originals:** the planted unit flagged on the
+//!   original, a false-alarm proxy, since production notes are not known-clean,
 //! - the one-sided Wilson lower bound on the paired rate, and the applicable
 //!   sample size.
+//!
+//! The unit is the planted claim for a per-claim check (`judge-claims`
+//! returns one verdict per claim, so the metric reads the verdict at the
+//! mutated index) and the whole note for a per-note check
+//! (`judge-distillation` scores axes, `quote-grounding` counts quotes). A
+//! note-level pair for `judge-claims` measured the distiller as much as the
+//! judge: on 2026-10-18 it read 0.59 over-window while the judge caught the
+//! planted swap on 25 of 27, because the originals carried other claims the
+//! judge flagged (`docs/design/2026-10-17-claim-judge-full-source.md`,
+//! the 2026-10-18 ripr results section).
 //!
 //! One `judge_trust` row is written per judge model, check and applicable
 //! class ([`super::trust`]); the trust rule reads those rows.
@@ -137,11 +147,21 @@ const STAND_IN_ATTRIBUTIONS: [&str; 4] = [
     "Captain Ottoline Fairweather",
 ];
 
+/// One planted mutation: the mutated note and the claim it touched.
+#[derive(Debug, Clone)]
+pub struct Planted {
+    pub distilled: Distilled,
+    /// Index into `distilled.claims` of the one claim the mutation changed.
+    /// `None` for a dropped claim: the list changed, no claim did, so no
+    /// verdict on the mutant lines up with one on the original.
+    pub claim: Option<usize>,
+}
+
 /// Plant `class` into a clone of `distilled`, judged against `source`.
 /// `None` when the class does not apply to this note (no number to swap, no
 /// claim to quote or drop, no `who` to change) or no mutation the source
 /// cannot back exists.
-pub fn plant(class: PlantedClass, distilled: &Distilled, source: &str) -> Option<Distilled> {
+pub fn plant(class: PlantedClass, distilled: &Distilled, source: &str) -> Option<Planted> {
     match class {
         PlantedClass::NumberSwap => swap_number(distilled, source),
         PlantedClass::FabricatedQuote => fabricate_quote(distilled, source),
@@ -153,7 +173,7 @@ pub fn plant(class: PlantedClass, distilled: &Distilled, source: &str) -> Option
 /// The first standalone number in a claim's text becomes the smallest larger
 /// number the source never states, so the swap contradicts the source rather
 /// than landing on another figure it happens to cite.
-fn swap_number(distilled: &Distilled, source: &str) -> Option<Distilled> {
+fn swap_number(distilled: &Distilled, source: &str) -> Option<Planted> {
     let number = Regex::new(r"\b\d+\b").expect("static number regex compiles");
     let source_numbers: HashSet<&str> = number.find_iter(source).map(|m| m.as_str()).collect();
     for (i, claim) in distilled.claims.iter().enumerate() {
@@ -170,14 +190,17 @@ fn swap_number(distilled: &Distilled, source: &str) -> Option<Distilled> {
             };
             let mut out = distilled.clone();
             out.claims[i].text = format!("{}{swapped}{}", &claim.text[..m.start()], &claim.text[m.end()..]);
-            return Some(out);
+            return Some(Planted {
+                distilled: out,
+                claim: Some(i),
+            });
         }
     }
     None
 }
 
 /// The top claim's quote becomes a run of words the source never uses.
-fn fabricate_quote(distilled: &Distilled, source: &str) -> Option<Distilled> {
+fn fabricate_quote(distilled: &Distilled, source: &str) -> Option<Planted> {
     if distilled.claims.is_empty() {
         return None;
     }
@@ -193,23 +216,29 @@ fn fabricate_quote(distilled: &Distilled, source: &str) -> Option<Distilled> {
     }
     let mut out = distilled.clone();
     out.claims[0].quote = Some(words.join(" "));
-    Some(out)
+    Some(Planted {
+        distilled: out,
+        claim: Some(0),
+    })
 }
 
 /// The first claim is removed. Needs at least two claims, so the mutant still
 /// has a claim list to judge: an empty list is a different defect.
-fn drop_top_claim(distilled: &Distilled) -> Option<Distilled> {
+fn drop_top_claim(distilled: &Distilled) -> Option<Planted> {
     if distilled.claims.len() < 2 {
         return None;
     }
     let mut out = distilled.clone();
     out.claims.remove(0);
-    Some(out)
+    Some(Planted {
+        distilled: out,
+        claim: None,
+    })
 }
 
 /// The first attributed claim's `who` becomes a stand-in the source never
 /// mentions.
-fn change_who(distilled: &Distilled, source: &str) -> Option<Distilled> {
+fn change_who(distilled: &Distilled, source: &str) -> Option<Planted> {
     let i = distilled
         .claims
         .iter()
@@ -226,26 +255,34 @@ fn change_who(distilled: &Distilled, source: &str) -> Option<Distilled> {
         .find(|a| a.to_lowercase() != current && grounding_words(a).iter().all(|w| !source_words.contains(w)))?;
     let mut out = distilled.clone();
     out.claims[i].who = Some((*stand_in).to_string());
-    Some(out)
+    Some(Planted {
+        distilled: out,
+        claim: Some(i),
+    })
 }
 
-/// Does `check` flag the note these metrics describe? `None` when the check
-/// produced nothing (a failed judge call), so the pair is counted as an error,
-/// never as a pass.
+/// Does `check` flag the planted unit these metrics describe? `None` when the
+/// check produced nothing (a failed judge call, or no verdict at `claim`), so
+/// the pair is counted as an error, never as a pass.
 /// - `judge-distillation` flags any axis below the maximum: a perfect note
 ///   scores 3 on every axis, so anything less is the judge reporting a defect.
-/// - `judge-claims` flags any claim that is not `supported`.
+/// - `judge-claims` with `claim = Some(i)` flags a verdict at `i` that is not
+///   `supported`; with `None` it flags any claim that is not `supported` (the
+///   production meaning, which `--remediate` acts on).
 /// - `quote-grounding` flags any quote the source does not back; a note with
 ///   no quote passes.
-pub fn flags(check: &str, metrics: &TraceMetrics) -> Option<bool> {
+pub fn flags(check: &str, metrics: &TraceMetrics, claim: Option<usize>) -> Option<bool> {
     match check {
         CHECK_JUDGE_DISTILLATION => metrics.judge_distillation.map(|a| {
             a.claim_coverage < MAX_SCORE || a.anchor_validity < MAX_SCORE || a.summary_faithfulness < MAX_SCORE
         }),
-        CHECK_JUDGE_CLAIMS => metrics
-            .judge_claims
-            .as_ref()
-            .map(|v| v.iter().any(|x| *x != super::ClaimVerdict::Supported)),
+        CHECK_JUDGE_CLAIMS => {
+            let verdicts = metrics.judge_claims.as_ref()?;
+            match claim {
+                Some(i) => verdicts.get(i).map(|x| *x != super::ClaimVerdict::Supported),
+                None => Some(verdicts.iter().any(|x| *x != super::ClaimVerdict::Supported)),
+            }
+        }
         CHECK_QUOTE_GROUNDING => Some(metrics.quote_grounding.is_some_and(|g| g.grounded < g.quoted)),
         _ => None,
     }
@@ -256,18 +293,19 @@ pub fn flags(check: &str, metrics: &TraceMetrics) -> Option<bool> {
 pub struct ClassTally {
     /// Traces where the mutation applied and both sides were scored.
     pub n: usize,
-    /// Mutant flagged AND original passed.
+    /// The planted unit flagged on the mutant AND passed on the original.
     pub paired_caught: usize,
-    /// Mutant flagged.
+    /// The planted unit flagged on the mutant.
     pub raw_caught: usize,
-    /// Original flagged.
+    /// The planted unit flagged on the original.
     pub originals_flagged: usize,
     /// Traces where the mutation applied but a side was not scored.
     pub errors: usize,
 }
 
 impl ClassTally {
-    /// Add one trace: whether the check flagged its original and its mutant.
+    /// Add one trace: whether the check flagged the planted unit on its
+    /// original and on its mutant.
     pub fn add(&mut self, original: Option<bool>, mutant: Option<bool>) {
         let (Some(original), Some(mutant)) = (original, mutant) else {
             self.errors += 1;
@@ -445,7 +483,10 @@ What this misses:
   - the base rate of errors in production
 Kappa is agreement, not correctness. The flag rate is measured on unmutated
 production notes, which are not known-clean: a false-alarm proxy, not a
-true-negative rate. paired = flags the mutant AND passes its original.
+true-negative rate. paired = flags the planted unit on the mutant AND passes
+it on the original. The unit is the mutated claim for judge-claims (one
+verdict per claim) and the whole note for judge-distillation and
+quote-grounding.
 ";
 
 fn judge_label(model: &str) -> &str {
@@ -494,6 +535,9 @@ struct TraceGroup {
     fixtures: Vec<Fixture>,
     /// `None` for the original, aligned with `fixtures`.
     classes: Vec<Option<PlantedClass>>,
+    /// The mutated claim's index ([`Planted::claim`]), aligned with
+    /// `fixtures`; `None` for the original and for a dropped claim.
+    claims: Vec<Option<usize>>,
 }
 
 /// Plant every class into every fixture, judge originals and mutants with
@@ -531,14 +575,16 @@ pub fn run_inject(
             let mut group = TraceGroup {
                 fixtures: vec![fx.clone()],
                 classes: vec![None],
+                claims: vec![None],
             };
             for class in PlantedClass::ALL {
-                if let Some(distilled) = plant(class, &fx.distilled, &fx.source) {
+                if let Some(planted) = plant(class, &fx.distilled, &fx.source) {
                     group.fixtures.push(Fixture {
-                        distilled,
+                        distilled: planted.distilled,
                         ..fx.clone()
                     });
                     group.classes.push(Some(class));
+                    group.claims.push(planted.claim);
                 }
             }
             group
@@ -658,16 +704,19 @@ pub fn run_inject(
     })
 }
 
-/// Tally `check` on `class` over every group that carries that mutant.
+/// Tally `check` on `class` over every group that carries that mutant. Both
+/// sides are read at the mutant's planted claim, so a per-claim check is
+/// scored on the claim the mutation changed and nothing else.
 fn tally(groups: &[TraceGroup], records: &[Vec<TraceRecord>], check: &str, class: PlantedClass) -> ClassTally {
     let mut t = ClassTally::default();
     for (group, group_records) in groups.iter().zip(records) {
         let Some(at) = group.classes.iter().position(|c| *c == Some(class)) else {
             continue;
         };
+        let claim = group.claims[at];
         t.add(
-            flags(check, &group_records[0].metrics),
-            flags(check, &group_records[at].metrics),
+            flags(check, &group_records[0].metrics, claim),
+            flags(check, &group_records[at].metrics, claim),
         );
     }
     t
