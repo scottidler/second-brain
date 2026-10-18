@@ -50,3 +50,35 @@ Each guard removed, its test run (`cargo test -p borg -p sb <name>`), file resto
 
 ### Open questions
 - The deployed `~/.config/sb/patterns/judge-claims.md` still carries the cut-off rule until `otto deploy` syncs patterns (Phase 3). `otto deploy` installs the binary and syncs patterns together, so this bites only if the new `sb` is installed without a deploy: its rows would be stamped `v3` but judged by the old text. Confirm Phase 3 ships through `otto deploy`, not a bare `cargo install`.
+
+## Phase 2: Per-class sampling + bucketed inject report
+
+### Design decisions
+- `sample_fixtures(staged_root, sample, claims_cap) -> InjectSample { fixtures, short }` (`borg/src/eval/inject.rs`). It takes the first `sample` of the kind-stratified order (so the result is always a superset of the old sample and its judgment cache still hits), then keeps adding the next trace that helps at least one short (check, class) pair, and stops when every pair holds `sample` or the pool ends. A trace that helps no short pair is skipped, so the sample does not bloat with traces the shortfall does not need.
+- The pairs are `INJECT_CHECKS` x `applicable_classes`, so `judge-distillation` (all four classes), `judge-claims` number-swap and `quote-grounding` fabricated-quote each get a floor. "Judgeable" is per check: only `judge-claims` has a cap (`judgeable(check, chars, cap)`); the others read over-cap traces.
+- `fixtures::stratified_order` is the round-robin order extracted from `stratified_sample`, which is now its prefix plus the id sort. One definition of the order, no behavior change for `--staged`.
+- `ShortPair { check, class, have, want }` implements `Display` (`judge-claims number-swap has 2 of 5`); `sb` prints one `warning:` line per short pair to stderr. A short pool is a warning, not an error: trust already fails closed on `sample_size < min-samples`.
+- `SourceBuckets { fits, over_window, over_cap }` of `ClassTally`, on `InjectCell.buckets` (`Some` exactly when `tally` is). The bucket is chosen by the original's source chars: `fits` is `<= JUDGE_INPUT_MAX_CHARS` (the constant `FabricJudge` uses, no new literal), `over_window` is over that and `<= EvalOpts.claims_source_max_chars`, `over_cap` is over the cap. `InjectReport.claims_source_max_chars` carries the cap for the header. `judge_trust` rows still read the whole-sample `tally`; the buckets are report lines only.
+- The printed pair count is `ClassTally::pairs()` = `n + errors + not_judgeable`, so the over-cap count for `judge-claims` is exactly the Phase 1 `not_judgeable` count; paired catch prints `n/a` for an empty bucket and `0.83 (n=6)` otherwise.
+- Help text: `--sample` now describes the per-class floor (`sb/src/cli/borg/args.rs`). `borg/AGENTS.md` updated for both.
+
+### Deviations
+- **The bucket line is printed for every cell with a tally**, not only `judge-claims`. The doc says "per (model, check, class)"; for `judge-distillation` the over-cap bucket carries ordinary scored pairs (it has no cap), which the report shows honestly.
+- **`sample_fixtures` returns a struct, not `Vec<Fixture>`**, so the caller can name the short class (the doc requires "says which class fell short"). Same effect, correct seam.
+- **Which traces count toward the floor also depends on the check** (see above), where the doc says "plantable, judgeable traces" without saying judgeable is only a `judge-claims` notion.
+
+### Tradeoffs
+- Skip traces that help no short pair vs append the next N in order: keeps `--sample 30` close to 30 plus only what the sparse class needs, at the cost of the sample no longer being a pure prefix of the stratified order.
+- Short pool as a stderr warning vs a hard error: the run is still useful for the classes that filled, and trust gating already refuses an undersized row.
+
+### Break-and-restore evidence
+Each guard removed in `borg/src/eval/inject.rs`, run `cargo test --workspace inject::tests`, file restored from a copy and `touch`ed (cargo's mtime trap). Observed:
+1. Growth removed (`helps_short_pair` forced false) -> `inject::tests::the_sample_grows_until_a_sparse_class_reaches_the_floor`: panicked at `borg/src/eval/inject/tests.rs:773` (the `number-swap pairs >= 30` assert).
+2. Short report removed (`.filter(|_| false)` on `short`) -> `a_pool_too_small_reports_the_short_class_by_name` panicked at `tests.rs:809` (`expect("judge-claims number-swap fell short")`) and `an_over_cap_trace_does_not_count_toward_the_claims_floor`: `left: None  right: Some(1)`.
+3. Cap ignored in the floor (`(judgeable(..) || true)`) -> `an_over_cap_trace_does_not_count_toward_the_claims_floor`: `left: None  right: Some(1)`.
+4. Bucketing collapsed (`if true { &mut self.fits`) -> `the_report_buckets_pairs_by_source_length`: `left: (4, 0, 0)  right: (2, 1, 1)`.
+5. Not-judgeable exclusion disabled (`if false && ...` in `tally`) -> `a_not_judgeable_judge_claims_pair_is_in_neither_n_nor_errors`: `assertion left == right failed: only t2 is over the cap  left: 0  right: 1`, and `the_report_buckets_pairs_by_source_length` fails on `judge-claims makes no call over the cap`.
+The rendered-line assertion (`pairs fits | over-window | over-cap: 2 | 1 | 1` for judge-claims number-swap) lives in test 4's body after the bucket asserts, so it runs only when bucketing is right; it was not broken separately.
+
+### Open questions
+- None.

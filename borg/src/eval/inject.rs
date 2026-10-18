@@ -37,13 +37,14 @@ use vault::distilled::Distilled;
 
 use super::agreement::{AgreementReport, agreement};
 use super::calc::{grounding_words, wilson_lower_bound};
-use super::judge::MAX_SCORE;
+use super::fixtures::stratified_order;
+use super::judge::{JUDGE_INPUT_MAX_CHARS, MAX_SCORE};
 use super::report::{ClaimsOutcome, TraceMetrics, TraceRecord};
 use super::scores::{CHECK_QUOTE_GROUNDING, NO_MODEL, ScoreStore, rows_from_record, rubric_version_of};
 use super::trust::{TrustRow, TrustState, TrustStore, judge_check_trust};
 use super::{
     CHECK_JUDGE_CLAIMS, CHECK_JUDGE_DISTILLATION, ClaimJudge, DistillationJudge, EvalOpts, EvalOutcome, Fixture,
-    RUN_KIND_INJECT, cache, evaluate, load_staged, stratified_sample,
+    RUN_KIND_INJECT, cache, evaluate, load_staged,
 };
 use crate::config::{EvalConfig, TrustConfig};
 
@@ -359,6 +360,38 @@ impl ClassTally {
     pub fn wilson_lower(&self) -> f64 {
         wilson_lower_bound(self.paired_caught, self.n)
     }
+
+    /// Every pair the mutation applied to: scored, errored and excluded.
+    pub fn pairs(&self) -> usize {
+        self.n + self.errors + self.not_judgeable
+    }
+}
+
+/// One cell's pairs split by the original's source length, so a long-source
+/// result is visible on its own line instead of averaged into the whole.
+/// - `fits`: at most [`JUDGE_INPUT_MAX_CHARS`], the old 24k judge budget.
+/// - `over_window`: over that budget, at most `eval.claims-source-max-chars`.
+/// - `over_cap`: over the cap; `judge-claims` makes no call there, so its
+///   pairs land in `not_judgeable`.
+///
+/// A report line only: `judge_trust` rows carry the whole-sample tally.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceBuckets {
+    pub fits: ClassTally,
+    pub over_window: ClassTally,
+    pub over_cap: ClassTally,
+}
+
+impl SourceBuckets {
+    fn of_mut(&mut self, source_chars: usize, cap: usize) -> &mut ClassTally {
+        if source_chars <= JUDGE_INPUT_MAX_CHARS {
+            &mut self.fits
+        } else if source_chars <= cap {
+            &mut self.over_window
+        } else {
+            &mut self.over_cap
+        }
+    }
 }
 
 /// One report cell: a judge model (`""` for a deterministic check), a check
@@ -370,6 +403,8 @@ pub struct InjectCell {
     pub check: &'static str,
     pub class: PlantedClass,
     pub tally: Option<ClassTally>,
+    /// The same pairs by source length; `Some` exactly when `tally` is.
+    pub buckets: Option<SourceBuckets>,
 }
 
 /// One check's trust state for one judge model (`""` = deterministic).
@@ -387,6 +422,8 @@ pub struct InjectReport {
     pub traces: usize,
     pub judge_models: Vec<String>,
     pub cells: Vec<InjectCell>,
+    /// `eval.claims-source-max-chars` this run used: the over-cap boundary.
+    pub claims_source_max_chars: usize,
     pub trust: Vec<CheckTrust>,
     pub policy: TrustConfig,
     /// Pairwise kappa between every rater with a current baseline row on the
@@ -455,6 +492,27 @@ impl InjectReport {
                 )),
             }
         }
+        out.push_str(&format!(
+            "\npairs by source length: fits (<= {JUDGE_INPUT_MAX_CHARS} chars) | over-window (<= {} chars) | over-cap\n",
+            self.claims_source_max_chars
+        ));
+        out.push_str("paired catch is over the scored pairs; judge-claims makes no call over-cap\n");
+        for cell in &self.cells {
+            let Some(b) = cell.buckets else {
+                continue;
+            };
+            out.push_str(&format!(
+                "  {:<20} {:<18} {:<18} pairs fits | over-window | over-cap: {} | {} | {}   paired catch fits | over-window: {} | {}\n",
+                cell.check,
+                judge_label(&cell.judge_model),
+                cell.class.as_str(),
+                b.fits.pairs(),
+                b.over_window.pairs(),
+                b.over_cap.pairs(),
+                bucket_rate(&b.fits),
+                bucket_rate(&b.over_window),
+            ));
+        }
         out.push('\n');
         out.push_str(&self.agreement.render());
         out.push_str(&format!(
@@ -506,13 +564,57 @@ verdict per claim) and the whole note for judge-distillation and
 quote-grounding.
 ";
 
+fn bucket_rate(t: &ClassTally) -> String {
+    if t.n == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{:.2} (n={})", t.paired_catch_rate(), t.n)
+    }
+}
+
 fn judge_label(model: &str) -> &str {
     if model.is_empty() { "(deterministic)" } else { model }
 }
 
-/// The `--inject` sample: every staged trace that can take at least one
-/// planted class, then a deterministic stratified sample of `sample` of them.
-pub fn sample_fixtures(staged_root: &Path, sample: usize) -> Result<Vec<Fixture>> {
+/// One (check, class) pair the sample could not fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortPair {
+    pub check: &'static str,
+    pub class: PlantedClass,
+    /// Plantable, judgeable traces the sample holds for this pair.
+    pub have: usize,
+    /// `--sample`: the floor every pair was grown toward.
+    pub want: usize,
+}
+
+impl fmt::Display for ShortPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {} has {} of {}", self.check, self.class, self.have, self.want)
+    }
+}
+
+/// The `--inject` sample and the pairs it could not fill.
+#[derive(Debug, Clone)]
+pub struct InjectSample {
+    pub fixtures: Vec<Fixture>,
+    /// Empty when every applicable pair reached `--sample`; otherwise the
+    /// eligible pool ran out first and these are the classes that fell short.
+    pub short: Vec<ShortPair>,
+}
+
+/// Can `check` read this source at all? Only `judge-claims` has a cap.
+fn judgeable(check: &str, source_chars: usize, claims_cap: usize) -> bool {
+    check != CHECK_JUDGE_CLAIMS || source_chars <= claims_cap
+}
+
+/// The `--inject` sample. Start from every staged trace that can take at
+/// least one planted class, in the deterministic kind-stratified order. Take
+/// the first `sample`, then keep adding the next trace that helps a short
+/// pair until every (check, class) pair that [`applies`] holds `sample`
+/// plantable, judgeable traces (judgeable: source chars at most
+/// `claims_cap`, for `judge-claims`), or the pool runs out. The result is
+/// sorted by id and never smaller than the plain stratified sample.
+pub fn sample_fixtures(staged_root: &Path, sample: usize, claims_cap: usize) -> Result<InjectSample> {
     let all = load_staged(staged_root, None)?;
     let eligible: Vec<Fixture> = all
         .into_iter()
@@ -522,11 +624,59 @@ pub fn sample_fixtures(staged_root: &Path, sample: usize) -> Result<Vec<Fixture>
                 .any(|c| plant(*c, &f.distilled, &f.source).is_some())
         })
         .collect();
+    let pool = eligible.len();
+    let order = stratified_order(eligible);
+
+    let pairs: Vec<(&'static str, PlantedClass)> = INJECT_CHECKS
+        .into_iter()
+        .flat_map(|check| applicable_classes(check).into_iter().map(move |class| (check, class)))
+        .collect();
+    let contributes = |f: &Fixture| -> Vec<bool> {
+        let chars = f.source.chars().count();
+        pairs
+            .iter()
+            .map(|(check, class)| {
+                judgeable(check, chars, claims_cap) && plant(*class, &f.distilled, &f.source).is_some()
+            })
+            .collect()
+    };
+    let mut have = vec![0usize; pairs.len()];
+    let mut picked: Vec<Fixture> = Vec::new();
+    for (i, f) in order.into_iter().enumerate() {
+        let c = contributes(&f);
+        let helps_short_pair = c.iter().zip(&have).any(|(yes, h)| *yes && *h < sample);
+        if i >= sample && !helps_short_pair {
+            continue;
+        }
+        for (h, yes) in have.iter_mut().zip(&c) {
+            *h += usize::from(*yes);
+        }
+        picked.push(f);
+        if i + 1 >= sample && have.iter().all(|h| *h >= sample) {
+            break;
+        }
+    }
+    let short: Vec<ShortPair> = pairs
+        .iter()
+        .zip(&have)
+        .filter(|(_, h)| **h < sample)
+        .map(|((check, class), h)| ShortPair {
+            check,
+            class: *class,
+            have: *h,
+            want: sample,
+        })
+        .collect();
+    picked.sort_by(|a, b| a.id.cmp(&b.id));
     log::debug!(
-        "eval::inject::sample_fixtures: eligible={} sample={sample}",
-        eligible.len()
+        "eval::inject::sample_fixtures: eligible={pool} sample={sample} picked={} short={}",
+        picked.len(),
+        short.len()
     );
-    Ok(stratified_sample(eligible, Some(sample)))
+    Ok(InjectSample {
+        fixtures: picked,
+        short,
+    })
 }
 
 /// Builds the two judges for one model's `opts`, callable from any worker.
@@ -637,27 +787,32 @@ pub fn run_inject(
         }
     }
 
+    let cap = run.opts.claims_source_max_chars;
     let mut cells = Vec::new();
     for (model, records) in judge_models.iter().zip(&records_by_model) {
         for check in JUDGE_CHECKS {
             for class in PlantedClass::ALL {
+                let measured = applies(check, class).then(|| tally(&groups, records, check, class, cap));
                 cells.push(InjectCell {
                     judge_model: model.clone(),
                     check,
                     class,
-                    tally: applies(check, class).then(|| tally(&groups, records, check, class)),
+                    tally: measured.map(|m| m.0),
+                    buckets: measured.map(|m| m.1),
                 });
             }
         }
     }
     // Deterministic metrics do not depend on the judge: read the first model's.
     for class in PlantedClass::ALL {
+        let measured = applies(CHECK_QUOTE_GROUNDING, class)
+            .then(|| tally(&groups, &records_by_model[0], CHECK_QUOTE_GROUNDING, class, cap));
         cells.push(InjectCell {
             judge_model: NO_MODEL.to_string(),
             check: CHECK_QUOTE_GROUNDING,
             class,
-            tally: applies(CHECK_QUOTE_GROUNDING, class)
-                .then(|| tally(&groups, &records_by_model[0], CHECK_QUOTE_GROUNDING, class)),
+            tally: measured.map(|m| m.0),
+            buckets: measured.map(|m| m.1),
         });
     }
 
@@ -713,6 +868,7 @@ pub fn run_inject(
         traces: groups.len(),
         judge_models: judge_models.clone(),
         cells,
+        claims_source_max_chars: cap,
         trust: trust_states,
         policy: run.eval.trust.clone(),
         agreement,
@@ -721,24 +877,36 @@ pub fn run_inject(
     })
 }
 
-/// Tally `check` on `class` over every group that carries that mutant. Both
-/// sides are read at the mutant's planted claim, so a per-claim check is
-/// scored on the claim the mutation changed and nothing else.
-fn tally(groups: &[TraceGroup], records: &[Vec<TraceRecord>], check: &str, class: PlantedClass) -> ClassTally {
-    let mut t = ClassTally::default();
+/// Tally `check` on `class` over every group that carries that mutant, whole
+/// and split by the original's source length. Both sides are read at the
+/// mutant's planted claim, so a per-claim check is scored on the claim the
+/// mutation changed and nothing else.
+fn tally(
+    groups: &[TraceGroup],
+    records: &[Vec<TraceRecord>],
+    check: &str,
+    class: PlantedClass,
+    claims_cap: usize,
+) -> (ClassTally, SourceBuckets) {
+    let mut whole = ClassTally::default();
+    let mut buckets = SourceBuckets::default();
     for (group, group_records) in groups.iter().zip(records) {
         let Some(at) = group.classes.iter().position(|c| *c == Some(class)) else {
             continue;
         };
         let claim = group.claims[at];
         let (original, mutant) = (&group_records[0].metrics, &group_records[at].metrics);
+        let in_bucket = buckets.of_mut(group.fixtures[0].source.chars().count(), claims_cap);
         if not_judgeable(check, original) || not_judgeable(check, mutant) {
-            t.exclude();
+            whole.exclude();
+            in_bucket.exclude();
             continue;
         }
-        t.add(flags(check, original, claim), flags(check, mutant, claim));
+        let (original, mutant) = (flags(check, original, claim), flags(check, mutant, claim));
+        whole.add(original, mutant);
+        in_bucket.add(original, mutant);
     }
-    t
+    (whole, buckets)
 }
 
 /// Judge every group with one model on `eval.inject-workers` threads. The

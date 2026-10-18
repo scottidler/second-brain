@@ -279,9 +279,11 @@ pub struct EvalArgs {
     /// `staging.root`
     #[arg(long, value_name = "DIR", requires = "staged")]
     pub staging_root: Option<PathBuf>,
-    /// With --staged, score at most N traces; with --inject, plant errors
-    /// into N traces (default `eval.trust.min-samples`). Deterministic,
-    /// stratified by kind
+    /// With --staged, score at most N traces; with --inject, grow the sample
+    /// until every check and planted class it applies to has N plantable
+    /// traces the check can judge (default `eval.trust.min-samples`), so it
+    /// can hold more than N traces. Stops when the staged pool runs out and
+    /// names the class that fell short. Deterministic, stratified by kind
     #[arg(long, value_name = "N", requires = "sampled")]
     pub sample: Option<usize>,
     /// Skip both LLM judges; report only the deterministic metrics

@@ -713,23 +713,198 @@ fn the_report_prints_pairwise_kappa_between_both_judges_and_never_a_dropped_tool
     );
 }
 
-#[test]
-fn the_sample_keeps_only_traces_some_class_applies_to() {
-    let tmp = tempfile::tempdir().unwrap();
-    for (trace, claims) in [("t-two", 2), ("t-none", 0)] {
-        let dir = tmp.path().join(trace);
+/// Write staged traces (`envelope.yml`, `distilled.yml`, `transcript.md`) for
+/// `sample_fixtures` to load.
+fn stage(root: &Path, fixtures: &[Fixture]) {
+    for fx in fixtures {
+        let dir = root.join(&fx.slug);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("envelope.yml"), "kind: article-url\n").unwrap();
-        let mut fx = fixture(trace);
-        fx.distilled.claims.truncate(claims);
         std::fs::write(dir.join("distilled.yml"), serde_yaml::to_string(&fx.distilled).unwrap()).unwrap();
         std::fs::write(dir.join("transcript.md"), &fx.source).unwrap();
     }
-    let picked = sample_fixtures(tmp.path(), 30).unwrap();
+}
+
+/// `fixture` with its one number spelled out, so a number swap has nothing to
+/// swap.
+fn numberless(trace: &str) -> Fixture {
+    let mut fx = fixture(trace);
+    fx.source = fx.source.replace('7', "seven");
+    fx.distilled.claims[0].text = fx.distilled.claims[0].text.replace('7', "seven");
+    fx.distilled.claims[0].quote = fx.distilled.claims[0].quote.as_ref().map(|q| q.replace('7', "seven"));
+    fx
+}
+
+fn plantable(fixtures: &[Fixture], class: PlantedClass) -> usize {
+    fixtures
+        .iter()
+        .filter(|f| plant(class, &f.distilled, &f.source).is_some())
+        .count()
+}
+
+const NO_CAP: usize = usize::MAX;
+
+#[test]
+fn the_sample_keeps_only_traces_some_class_applies_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut none = fixture("t-none");
+    none.distilled.claims.clear();
+    stage(tmp.path(), &[fixture("t-two"), none]);
+    let picked = sample_fixtures(tmp.path(), 30, NO_CAP).unwrap().fixtures;
     assert_eq!(
         picked.iter().map(|f| f.slug.as_str()).collect::<Vec<_>>(),
         vec!["t-two"]
     );
+}
+
+/// Only 1 in 3 staged traces carries a number, so the plain first-30 sample
+/// would hold about 10 number-swap pairs. The sample grows until it has 30.
+#[test]
+fn the_sample_grows_until_a_sparse_class_reaches_the_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool: Vec<Fixture> = (0..99)
+        .map(|i| {
+            let trace = format!("t{i:02}");
+            if i % 3 == 0 { fixture(&trace) } else { numberless(&trace) }
+        })
+        .collect();
+    stage(tmp.path(), &pool);
+    let sampled = sample_fixtures(tmp.path(), 30, NO_CAP).unwrap();
+    assert!(sampled.short.is_empty(), "{:?}", sampled.short);
+    assert!(
+        plantable(&sampled.fixtures, PlantedClass::NumberSwap) >= 30,
+        "number-swap pairs: {}",
+        plantable(&sampled.fixtures, PlantedClass::NumberSwap)
+    );
+    assert!(sampled.fixtures.len() > 30 && sampled.fixtures.len() < pool.len());
+    let again = sample_fixtures(tmp.path(), 30, NO_CAP).unwrap();
+    assert_eq!(
+        sampled.fixtures.iter().map(|f| &f.id).collect::<Vec<_>>(),
+        again.fixtures.iter().map(|f| &f.id).collect::<Vec<_>>(),
+        "deterministic"
+    );
+}
+
+/// A pool that runs out stops without panicking, keeps everything it has and
+/// names the class that fell short.
+#[test]
+fn a_pool_too_small_reports_the_short_class_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool: Vec<Fixture> = (0..6)
+        .map(|i| {
+            let trace = format!("t{i}");
+            if i < 2 { fixture(&trace) } else { numberless(&trace) }
+        })
+        .collect();
+    stage(tmp.path(), &pool);
+    let sampled = sample_fixtures(tmp.path(), 5, NO_CAP).unwrap();
+    // The sixth trace helps no short pair (only number-swap is short and it
+    // carries no number), so it is left out; both numbered traces are in.
+    assert_eq!(sampled.fixtures.len(), 5);
+    assert!(sampled.fixtures.iter().filter(|f| f.source.contains('7')).count() == 2);
+    let swap = sampled
+        .short
+        .iter()
+        .find(|s| s.check == CHECK_JUDGE_CLAIMS && s.class == PlantedClass::NumberSwap)
+        .expect("judge-claims number-swap fell short");
+    assert_eq!((swap.have, swap.want), (2, 5));
+    assert!(swap.to_string().contains("number-swap"), "{swap}");
+    assert!(
+        !sampled.short.iter().any(|s| s.class == PlantedClass::FabricatedQuote),
+        "six traces carry a quote: {:?}",
+        sampled.short
+    );
+}
+
+/// Over-cap traces cannot be read by `judge-claims`, so they do not count
+/// toward its floor, but `judge-distillation` still reads them.
+#[test]
+fn an_over_cap_trace_does_not_count_toward_the_claims_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let small = fixture("t-small");
+    let cap = small.source.chars().count();
+    let mut big_a = fixture("t-big-a");
+    let mut big_b = fixture("t-big-b");
+    big_a.source.push_str(&" filler".repeat(50));
+    big_b.source.push_str(&" filler".repeat(50));
+    stage(tmp.path(), &[small, big_a, big_b]);
+    let sampled = sample_fixtures(tmp.path(), 3, cap).unwrap();
+    assert_eq!(sampled.fixtures.len(), 3);
+    let short_of = |check: &str| {
+        sampled
+            .short
+            .iter()
+            .find(|s| s.check == check && s.class == PlantedClass::NumberSwap)
+            .map(|s| s.have)
+    };
+    assert_eq!(short_of(CHECK_JUDGE_CLAIMS), Some(1));
+    assert_eq!(short_of(CHECK_JUDGE_DISTILLATION), None);
+}
+
+/// The report splits each cell's pairs by source length and prints the
+/// `fits | over-window | over-cap` line; the whole-sample tally (what
+/// `judge_trust` stores) still covers every judged pair.
+#[test]
+fn the_report_buckets_pairs_by_source_length() {
+    let mut fixtures: Vec<Fixture> = (0..4).map(|i| fixture(&format!("t{i}"))).collect();
+    fixtures[2]
+        .source
+        .push_str(&" filler".repeat(JUDGE_INPUT_MAX_CHARS / 7 + 1));
+    fixtures[3]
+        .source
+        .push_str(&" filler".repeat(JUDGE_INPUT_MAX_CHARS / 7 + 1));
+    let cap = fixtures[2].source.chars().count();
+    fixtures[3].source.push_str(" more");
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 3,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            Box::new(MockClaimJudge::new(ClaimVerdict::Supported)),
+        ))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts {
+        claims_source_max_chars: cap,
+        ..EvalOpts::default()
+    };
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    let claims = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap);
+    let b = claims.buckets.unwrap();
+    assert_eq!((b.fits.pairs(), b.over_window.pairs(), b.over_cap.pairs()), (2, 1, 1));
+    assert_eq!(b.over_cap.not_judgeable, 1, "judge-claims makes no call over the cap");
+    assert_eq!(claims.tally.unwrap().n, 3, "the whole-sample tally is unbucketed");
+    let distillation = cell(&report, MODEL, CHECK_JUDGE_DISTILLATION, PlantedClass::NumberSwap);
+    assert_eq!(
+        distillation.buckets.unwrap().over_cap.n,
+        1,
+        "judge-distillation reads over-cap"
+    );
+    assert!(
+        cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::WhoChange)
+            .buckets
+            .is_none()
+    );
+
+    let text = report.render();
+    let line = text
+        .lines()
+        .find(|l| l.contains(CHECK_JUDGE_CLAIMS) && l.contains("number-swap") && l.contains("over-cap:"))
+        .unwrap_or_else(|| panic!("no bucket line in:\n{text}"));
+    assert!(
+        line.contains("pairs fits | over-window | over-cap: 2 | 1 | 1"),
+        "{line}"
+    );
+    assert!(line.contains("paired catch fits | over-window: "), "{line}");
 }
 
 /// A pair whose source is over the claims cap is excluded from the

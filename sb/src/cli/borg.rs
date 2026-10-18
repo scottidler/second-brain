@@ -603,7 +603,11 @@ fn run_eval_inject(config: &borg::config::Config, opts: &borg::eval::EvalOpts, a
     }
     borg::eval::backlog::preflight_keys(&opts.api_keys)?;
     let sample = a.sample.unwrap_or(config.eval.trust.min_samples);
-    let fixtures = borg::eval::inject::sample_fixtures(&config.staging.root, sample)?;
+    let sampled = borg::eval::inject::sample_fixtures(&config.staging.root, sample, opts.claims_source_max_chars)?;
+    for short in &sampled.short {
+        eprintln!("warning: --sample {sample} could not be filled, the eligible pool ran out: {short}");
+    }
+    let fixtures = sampled.fixtures;
     let cache_path = vault::paths::borg_eval_cache_path();
     let scores = borg::eval::scores::ScoreStore::open(&cache_path)?;
     let trust = borg::eval::trust::TrustStore::open(&cache_path)?;

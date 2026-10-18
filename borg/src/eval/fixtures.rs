@@ -316,10 +316,10 @@ pub fn load_staged(root: &Path, sample: Option<usize>) -> Result<Vec<Fixture>> {
     Ok(picked)
 }
 
-/// A deterministic stratified sample of `fixtures`: round-robin across kinds,
-/// each kind ordered by a stable hash of its trace id, so reruns pick the same
-/// traces and every kind is represented. `None` keeps them all. Sorted by id.
-pub fn stratified_sample(fixtures: Vec<Fixture>, sample: Option<usize>) -> Vec<Fixture> {
+/// Every fixture in the deterministic stratified order: round-robin across
+/// kinds, each kind ordered by a stable hash of its trace id. Any prefix of it
+/// is a stratified sample, and a longer prefix extends a shorter one.
+pub fn stratified_order(fixtures: Vec<Fixture>) -> Vec<Fixture> {
     let mut by_kind: BTreeMap<String, Vec<Fixture>> = BTreeMap::new();
     for fixture in fixtures {
         by_kind.entry(fixture.kind.clone()).or_default().push(fixture);
@@ -328,19 +328,24 @@ pub fn stratified_sample(fixtures: Vec<Fixture>, sample: Option<usize>) -> Vec<F
         fixtures.sort_by_key(|f| crate::eval::cache::stable_hash(&f.slug));
     }
     let total: usize = by_kind.values().map(Vec::len).sum();
-    let take = sample.unwrap_or(total).min(total);
     let mut queues: Vec<std::vec::IntoIter<Fixture>> = by_kind.into_values().map(Vec::into_iter).collect();
-    let mut picked = Vec::with_capacity(take);
-    while picked.len() < take {
+    let mut order = Vec::with_capacity(total);
+    while order.len() < total {
         for q in queues.iter_mut() {
-            if picked.len() == take {
-                break;
-            }
             if let Some(f) = q.next() {
-                picked.push(f);
+                order.push(f);
             }
         }
     }
+    order
+}
+
+/// A deterministic stratified sample of `fixtures`: the first `sample` of
+/// [`stratified_order`], so reruns pick the same traces and every kind is
+/// represented. `None` keeps them all. Sorted by id.
+pub fn stratified_sample(fixtures: Vec<Fixture>, sample: Option<usize>) -> Vec<Fixture> {
+    let mut picked = stratified_order(fixtures);
+    picked.truncate(sample.unwrap_or(picked.len()));
     picked.sort_by(|a, b| a.id.cmp(&b.id));
     picked
 }
