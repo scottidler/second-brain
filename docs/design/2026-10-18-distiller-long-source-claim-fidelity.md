@@ -3,7 +3,7 @@
 **Author:** Scott Idler
 **Date:** 2026-10-18
 **Status:** Draft
-**Review Passes Completed:** 5/5 on the reworked design (draft, correctness, clarity, edge cases, excellence); panel round 1 folded into the earlier chunk-repair design, which this rework replaces
+**Review Passes Completed:** 2/5 on the reworked design (draft, correctness); panel rounds 1-3 folded (round 3 reviewed the rework; rounds 1-2 reviewed the earlier chunk-repair design it replaces)
 
 ## Summary
 
