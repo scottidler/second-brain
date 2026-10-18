@@ -168,6 +168,47 @@ pub enum ClaimsOutcome {
   - `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select count(*) from judge_trust where measured_at > '<phase-0 start>'"` returns 0.
   - `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select count(*) from eval_scores where scored_at > '<phase-0 start>'"` returns 0. `run_inject` writes `eval_scores` rows too (`inject.rs:566-570`), not only trust rows, and an unclassed record keeps its baseline `run_kind`, so the check counts every kind. Run it with the nightly `sb-eval` timer paused, or it counts that run's rows.
 
+##### Phase 0 results (2026-10-18, ripr)
+
+- **Run:** the throwaway build with full source, no input cap and a 600s claims timeout. The claims cache key was salted, so every claims verdict was a fresh call. `--inject --sample 60` plus 30 over-window and 6 large extras, 8 workers, the pattern with the cut-off rule deleted.
+- **Pairs:** 332 planted, of which 82 number-swap. Claims calls: 540, across two logs (a first launch at 4 workers was stopped after 12 calls and relaunched; its cached verdicts are merged).
+- **Isolation held:** after the run, the live `eval-cache.db` reads `eval_scores` 4133 and `judge_trust` 11, the same as before. 0 rows of either have a timestamp after the 2026-10-18T01:00:39Z start. The scratch copy holds the run's 3843 score rows. `sb-eval.timer` was paused for the run and restarted after.
+
+Number-swap pairs, paired catch as the go rule defines it (the mutant is flagged and the original is not):
+
+| model | bucket | attempted | errors | paired catch | errors as miss | mutated claim contradicted/unsupported, of caught |
+|---|---|---|---|---|---|---|
+| claude-sonnet-5 | fits (source <= 24k) | 35 | 0 | 0.86 (30/35) | 0.86 | 1.00 |
+| claude-sonnet-5 | over-window | 30 | 1 | 0.59 (17/29) | 0.57 | 1.00 |
+| claude-sonnet-5 | long, number in head | 17 | 1 | 0.50 (8/16) | 0.47 | 1.00 |
+| claude-sonnet-5 | 250-400k | 7 | 1 | 0.33 (2/6) | 0.29 | 1.00 |
+| gemini-2.5-pro | fits | 35 | 0 | 0.69 (24/35) | 0.69 | 1.00 |
+| gemini-2.5-pro | over-window | 30 | 0 | 0.57 (17/30) | 0.57 | 1.00 |
+| gemini-2.5-pro | long, number in head | 17 | 0 | 0.53 (9/17) | 0.53 | 1.00 |
+| gemini-2.5-pro | 250-400k | 7 | 0 | 0.57 (4/7) | 0.57 | 1.00 |
+
+Claims-call latency in seconds, successful calls only:
+
+| model | n | p50 | p99 | max | p50 on >250k sources | max on >250k sources |
+|---|---|---|---|---|---|---|
+| claude-sonnet-5 | 263 | 5.9 | 34.6 | 39.5 | 4.4 | 34.6 |
+| gemini-2.5-pro | 269 | 16.8 | 41.9 | 55.3 | 29.0 | 55.3 |
+
+- **Errors:** claude-sonnet-5 had 8 errored claims calls, all `fabric ... failed: empty response`, on sources of 22,581, 80,541 (4 calls) and 313,743 chars (3 calls). gemini-2.5-pro had none. No call hit the timeout.
+- **Why pairs miss.** At the claim level, the judges almost never miss the swap. On over-window pairs, the swapped claim is supported on the original and not supported on the mutant for 25/27 (claude-sonnet-5) and 26/27 (gemini-2.5-pro). The paired misses come from the original note already being flagged by some other claim:
+
+| bucket | originals flagged, claude-sonnet-5 | originals flagged, gemini-2.5-pro | both judges flag the same original claim |
+|---|---|---|---|
+| fits | 5/35 | 11/35 | 1/35 |
+| over-window | 11/29 | 12/29 | 6/29 |
+| long, number in head | 6/16 | 8/17 | 3/16 |
+
+  The two judges independently flag the same original claim on 6 of 29 over-window notes, against 1 of 35 fitting notes. Long-source notes carry more claims that their own source does not back. Those look like defects in the distillation, not judge noise. The paired metric counts each one as a miss.
+- **Go rule, as written:**
+  - claude-sonnet-5: over-window 0.59 < 0.80, FAIL. Mutated-claim rate 1.00, pass. Errors 3/82 pairs, pass. Fitting 0.86 >= 0.85, pass. 250-400k set: 1 error, FAIL (the rule asks for zero).
+  - gemini-2.5-pro: over-window 0.57 < 0.80, FAIL. Fitting 0.69 < 0.85, FAIL. Mutated-claim rate 1.00, pass. Errors 0, pass. 250-400k set: 0 errors, paired catch 0.57.
+  - **Both judges fail, so the written rule says no-go.** The claim-level data says the failure is not long-context reading. Alternative 2 (the evidence locator) does not change whether the original note is flagged, so the no-go branch as written would not move these numbers. Decision pending with Scott.
+
 #### Phase 1: Full-source claims judging + not judgeable
 **Model:** opus
 - Config keys `claims-source-max-chars` and `claims-timeout-secs` (Data Model), threaded through `eval_opts` -> `EvalOpts` -> `fabric_judges`, and added to the shipped `borg.yml` template with comments.
