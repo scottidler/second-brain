@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-17
-**Status:** Implemented, Phases 1-2 (2026-10-18, commits 4dca6a6 and 1eb86e3 on main). Phase 3 (ship via `otto deploy`, re-measure with `--inject` on ripr) is pending Scott's release go.
+**Status:** Implemented (2026-10-18). Shipped in: v0.18.1. Phase 3 measured on ripr: `judge-claims` trusted for claude-sonnet-5 (0.94, n 34) and gemini-2.5-pro (0.97, n 34); one acceptance bar missed on count (over-window n 6 < 10), recorded in the implementation notes.
 **Review Passes Completed:** 3/5 (draft, correctness, edge cases); panel round 1 folded (staff seat only)
 
 ## Summary
@@ -248,16 +248,21 @@ Claims-call latency in seconds, successful calls only:
 
 ## Acceptance Criteria
 
-- [ ] `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select judge_model, sample_size, round(paired_catch_rate,2) from judge_trust where check_name='judge-claims' and planted_class='number-swap' and rubric_version='v3'"` returns a `claude-sonnet-5` row with `sample_size >= 30` and `paired_catch_rate >= 0.80`.
+- [x] `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db "select judge_model, sample_size, round(paired_catch_rate,2) from judge_trust where check_name='judge-claims' and planted_class='number-swap' and rubric_version='v3'"` returns a `claude-sonnet-5` row with `sample_size >= 30` and `paired_catch_rate >= 0.80`.
   - Observed on main (2026-10-17): no `v3` rows. The `v2` rows are `gemini-2.5-pro|26|0.58` and `claude-sonnet-5|26|0.69`.
-- [ ] `rg -n 'appears cut off' borg/patterns/judge-claims.md` returns nothing.
+  - Observed on ripr, v0.18.1 (2026-10-18): `claude-sonnet-5|34|0.94` and `gemini-2.5-pro|34|0.97`.
+- [x] `rg -n 'appears cut off' borg/patterns/judge-claims.md` returns nothing.
   - Observed on main: `21:If the SOURCE appears cut off and a claim plausibly comes from the missing part,`
-- [ ] `rg -c 'claims-source-max-chars' borg/src/config/eval.rs` returns >= 1.
+  - Observed after Phase 1: no match (exit 1); the deployed copy on ripr also 0 after `otto deploy`.
+- [x] `rg -c 'claims-source-max-chars' borg/src/config/eval.rs` returns >= 1.
   - Observed on main: no match (exit 1).
-- [ ] The `--inject` report prints a `fits | over-window | over-cap` pair count for `judge-claims` number-swap, with over-window n >= 1.
+  - Observed after Phase 1: 2.
+- [x] The `--inject` report prints a `fits | over-window | over-cap` pair count for `judge-claims` number-swap, with over-window n >= 1.
   - Observed on main: no bucketed output. `--sample` help reads "plant errors into N traces" (`sb borg eval --help`, line 25).
-- [ ] Unit test `judge_claims_over_cap_is_not_judgeable` passes, and fails when the gate is removed.
+  - Observed on ripr, v0.18.1: `pairs fits | over-window | over-cap: 28 | 6 | 1   paired catch fits | over-window: 0.96 (n=28) | 0.83 (n=6)`.
+- [x] Unit test `judge_claims_over_cap_is_not_judgeable` passes, and fails when the gate is removed.
   - Cannot run on main: written in Phase 1.
+  - Observed after Phase 1: passes; with the gate removed, `an over-cap source never reaches the claims judge  left: 1  right: 0` (implementation notes, Phase 1, break 1).
 
 ## Resolved Decisions
 

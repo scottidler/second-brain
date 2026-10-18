@@ -4,12 +4,11 @@ Branch: main
 
 ## Next action
 
-Phase 3 of `docs/design/2026-10-17-claim-judge-full-source.md`: ship and re-measure. It waits on Scott's release go (the checkpoint was put to him 2026-10-18 evening). When he gives it:
+Done: the claims judge is trusted. v0.18.1 is live on ripr and `judge_trust` reads `claude-sonnet-5|34|0.94` and `gemini-2.5-pro|34|0.97` on rubric `v3` (2026-10-18T22:17:45Z). The doc is Implemented. What is left is Scott's to decide, not to build:
 
-1. `bump release` on main (ungated repo, `bump --gates` says none). Patch unless he says otherwise.
-2. `otto deploy` on ripr. Not a bare `cargo install`: the deploy syncs `~/.config/sb/patterns/`, and the deployed `judge-claims.md` still carries the deleted cut-off rule until it does. A `v3` row judged by the old pattern text would be a lie.
-3. On ripr, `~/.cargo/bin/sb borg eval --inject --sample 30`, paste the report into the implementation notes, and check the three Phase 3 bars: a `v3` `judge-claims` number-swap row for `claude-sonnet-5` with `sample_size >= 30` and `paired_catch_rate >= 0.80`; the over-window line n >= 10 and >= 0.80; `--remediate` prints no judge-claims trust failure. If any fails, record it verbatim and stop; do not re-run hoping.
-4. Flip the doc Status to Implemented (all phases) and commit the notes.
+1. `sb borg eval --remediate` now shows `would-post 14`: 14 sources fail a trusted `judge-claims` verdict and `--apply` would re-distill them through the daemon. Nobody has run `--apply`. Ask Scott before doing so; it rewrites notes and spends LLM calls.
+2. The over-window acceptance bar missed on count (n 6 < 10, rate 0.83). If he wants the count, the next `--inject` needs `--sample` above 30 or more long sources in staging. Not a code change.
+3. Any hand run of `sb borg eval` over ssh on ripr needs `export PATH=/home/saidler/.local/bin:$PATH` first (fabric lives there; the systemd unit sets it, a plain ssh shell does not). The first Phase 3 run was void for exactly this (implementation notes, Phase 3).
 
 Do not start another design doc, Phase 0, or panel round. The panel has run 3 design rounds and 1 implementation audit on this doc.
 
@@ -26,7 +25,7 @@ The quality loop lets a judge act only when trusted: paired catch >= 0.80 over >
 - `482b616` docs(design): status and the `is_covered` NULL correction.
 - `6f24bdc` fix(eval): split applies the claims cap (GEPA adapter regression), over-cap bucketed before fits.
 
-`otto ci` green on every one. Deployed on ripr: still `sb v0.18.0`.
+`otto ci` green on every one. Then `b4880fe` Bump version to v0.18.1 (released, tagged, pushed), and the Phase 3 docs commit after it. Deployed on ripr: `sb v0.18.1` (`otto deploy` 2026-10-18 15:15 PDT).
 
 ## What was verified by hand this session
 
@@ -40,7 +39,7 @@ So the judge is noisy on long sessions. The claim-level metric does not hide tha
 
 ## Open items
 
-- Claude's claims judge returns `empty response` on some long sources (`hv-5194d942` 4/5 runs, `cl-38cd120a`, 8 calls in the claim-judge Phase 0). `borg/patterns/judge-claims.md` has no data frame around session sources. Phase 3's error ceiling (3/82 passed last time) will show whether it matters.
+- Claude's claims judge returned `empty response` on some long sources in the 10-18 Phase 0 (`hv-5194d942` 4/5 runs, `cl-38cd120a`, 8 calls). The Phase 3 run on v0.18.1 had 0 errors on 35 number-swap traces (6 over-window), so it did not recur on that sample. Still unexplained; watch the nightly `--unscored` error rows.
 - `cl-31951716` was published from raw PDF bytes (extraction bug, unrelated).
 - Session windowing drops the middle (`distillers/src/session.rs:168-175`); the only core error that reproduces on today's code. The distiller doc is closed; reopen only if `--inject` says the distiller, not the judge, is the floor.
 - How many staged repo traces exceed 400k is unmeasured; the `--inject` over-cap bucket answers it.

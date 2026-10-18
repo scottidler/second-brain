@@ -99,3 +99,81 @@ Synthesis: `~/.cache/review-panel/runs/fq6ZL3LN/synthesis.md`. Architect seat: c
 
 ### Open questions
 - How many staged repo traces exceed the 400k cap is unmeasured; the `--inject` run in Phase 3 prints the over-cap bucket and answers it.
+
+## Phase 3: Ship and re-measure (2026-10-18)
+
+- Released `v0.18.1` (`bump release`, ungated main, commit b4880fe, CI green). `otto deploy` on ripr: `sb v0.18.1`, `~/.config/sb/patterns/judge-claims.md` synced (`grep -c 'appears cut off'` = 0), daemons `borg.service` and `cortex.service` active. Local `otto install`: `sb v0.18.1`.
+- **First `--inject` run on ripr was void:** run over a plain `ssh ripr.lan '...'` shell, whose PATH lacks `~/.local/bin`, where `fabric` lives. Every new judge call failed `fabric -p judge-claims: failed to spawn: No such file or directory (os error 2)`. `judge-distillation` still scored 26-30 pairs per class from the judgment cache; `judge-claims` under rubric `v3` had no cache, so n=0 with 34 errors per judge. The run wrote 2716 error `eval_scores` rows (re-scored by the nightly `--unscored`, which requires error-free rows) and `v3` trust rows with `sample_size` 0 (replaced on the same key by the next run). The `sb-eval.service` unit sets `Environment=PATH=...:/home/saidler/.local/bin:...`, which is why the nightly never hit this. Lesson for any hand run on ripr: `export PATH=/home/saidler/.local/bin:$PATH` first. Log: `~/inject-v0.18.1.txt` on ripr.
+- Second run: `export PATH=...; ~/.cargo/bin/sb borg eval --inject --sample 30`, log `~/inject-v0.18.1-run2.txt` on ripr. Report below.
+
+### Second run report (ripr, 2026-10-18 15:17 PDT start, `sb v0.18.1`)
+
+```
+check                judge              class                 n  paired wilson-lb    raw   flag errors
+judge-distillation   gemini-2.5-pro     number-swap          35    0.29      0.18   0.57   0.34      0
+judge-distillation   gemini-2.5-pro     fabricated-quote     44    0.48      0.36   0.77   0.32      0
+judge-distillation   gemini-2.5-pro     dropped-top-claim    41    0.12      0.06   0.32   0.34      0
+judge-distillation   gemini-2.5-pro     who-change           30    0.50      0.36   0.77   0.33      0
+judge-claims         gemini-2.5-pro     number-swap          34    0.97      0.88   1.00   0.03      0
+judge-claims         gemini-2.5-pro     fabricated-quote    n/a     n/a       n/a    n/a    n/a    n/a
+judge-claims         gemini-2.5-pro     dropped-top-claim   n/a     n/a       n/a    n/a    n/a    n/a
+judge-claims         gemini-2.5-pro     who-change          n/a     n/a       n/a    n/a    n/a    n/a
+judge-distillation   claude-sonnet-5    number-swap          35    0.37      0.25   0.66   0.43      0
+judge-distillation   claude-sonnet-5    fabricated-quote     44    0.57      0.44   1.00   0.43      0
+judge-distillation   claude-sonnet-5    dropped-top-claim    41    0.07      0.03   0.44   0.46      0
+judge-distillation   claude-sonnet-5    who-change           30    0.50      0.36   0.87   0.40      0
+judge-claims         claude-sonnet-5    number-swap          34    0.94      0.84   0.94   0.00      0
+judge-claims         claude-sonnet-5    fabricated-quote    n/a     n/a       n/a    n/a    n/a    n/a
+judge-claims         claude-sonnet-5    dropped-top-claim   n/a     n/a       n/a    n/a    n/a    n/a
+judge-claims         claude-sonnet-5    who-change          n/a     n/a       n/a    n/a    n/a    n/a
+quote-grounding      (deterministic)    number-swap         n/a     n/a       n/a    n/a    n/a    n/a
+quote-grounding      (deterministic)    fabricated-quote     44    0.98      0.90   1.00   0.02      0
+quote-grounding      (deterministic)    dropped-top-claim   n/a     n/a       n/a    n/a    n/a    n/a
+quote-grounding      (deterministic)    who-change          n/a     n/a       n/a    n/a    n/a    n/a
+pairs by source length: fits (<= 24000 chars) | over-window (<= 400000 chars) | over-cap
+paired catch is over the scored pairs; judge-claims makes no call over-cap
+  judge-distillation   gemini-2.5-pro     number-swap        pairs fits | over-window | over-cap: 28 | 6 | 1   paired catch fits | over-window: 0.29 (n=28) | 0.33 (n=6)
+  judge-distillation   gemini-2.5-pro     fabricated-quote   pairs fits | over-window | over-cap: 36 | 7 | 1   paired catch fits | over-window: 0.53 (n=36) | 0.29 (n=7)
+  judge-distillation   gemini-2.5-pro     dropped-top-claim  pairs fits | over-window | over-cap: 33 | 7 | 1   paired catch fits | over-window: 0.15 (n=33) | 0.00 (n=7)
+  judge-distillation   gemini-2.5-pro     who-change         pairs fits | over-window | over-cap: 25 | 5 | 0   paired catch fits | over-window: 0.60 (n=25) | 0.00 (n=5)
+  judge-claims         gemini-2.5-pro     number-swap        pairs fits | over-window | over-cap: 28 | 6 | 1   paired catch fits | over-window: 0.96 (n=28) | 1.00 (n=6)
+  judge-distillation   claude-sonnet-5    number-swap        pairs fits | over-window | over-cap: 28 | 6 | 1   paired catch fits | over-window: 0.43 (n=28) | 0.17 (n=6)
+  judge-distillation   claude-sonnet-5    fabricated-quote   pairs fits | over-window | over-cap: 36 | 7 | 1   paired catch fits | over-window: 0.64 (n=36) | 0.14 (n=7)
+  judge-distillation   claude-sonnet-5    dropped-top-claim  pairs fits | over-window | over-cap: 33 | 7 | 1   paired catch fits | over-window: 0.09 (n=33) | 0.00 (n=7)
+  judge-distillation   claude-sonnet-5    who-change         pairs fits | over-window | over-cap: 25 | 5 | 0   paired catch fits | over-window: 0.60 (n=25) | 0.00 (n=5)
+  judge-claims         claude-sonnet-5    number-swap        pairs fits | over-window | over-cap: 28 | 6 | 1   paired catch fits | over-window: 0.96 (n=28) | 0.83 (n=6)
+  quote-grounding      (deterministic)    fabricated-quote   pairs fits | over-window | over-cap: 36 | 7 | 1   paired catch fits | over-window: 1.00 (n=36) | 0.86 (n=7)
+pairwise judge agreement on the 44 unmutated originals (Cohen's kappa over current baseline rows; kappa undefined (n/a) when both raters gave every item one label)
+raters (notes labelled):
+  judge-claims (claude-sonnet-5)               43
+  judge-claims (gemini-2.5-pro)                43
+  judge-distillation (claude-sonnet-5)         44
+  judge-distillation (gemini-2.5-pro)          44
+trace level (+ = flags the note):
+rater a                                      rater b                                          n   ++   +-   -+   -- a-flag b-flag  agree  kappa
+judge-claims (claude-sonnet-5)               judge-claims (gemini-2.5-pro)                   43    5    3    6   29   0.19   0.26   0.79   0.40
+judge-claims (claude-sonnet-5)               judge-distillation (claude-sonnet-5)            43    3    5   16   19   0.19   0.44   0.51  -0.05
+judge-claims (claude-sonnet-5)               judge-distillation (gemini-2.5-pro)             43    5    3    8   27   0.19   0.30   0.74   0.32
+judge-claims (gemini-2.5-pro)                judge-distillation (claude-sonnet-5)            43    5    6   14   18   0.26   0.44   0.53   0.01
+judge-claims (gemini-2.5-pro)                judge-distillation (gemini-2.5-pro)             43    6    5    7   25   0.26   0.30   0.72   0.31
+judge-distillation (claude-sonnet-5)         judge-distillation (gemini-2.5-pro)             44    8   11    6   19   0.43   0.32   0.61   0.19
+claim level (+ = claim supported):
+rater a                                      rater b                                          n   ++   +-   -+   -- a-supp b-supp  agree  kappa
+judge-claims (claude-sonnet-5)               judge-claims (gemini-2.5-pro)                  346  325    9    7    5   0.97   0.96   0.95   0.36
+trust (paired catch >= 0.80 over >= 30 applicable traces, on every class the check can see, current rubric):
+  judge-distillation   gemini-2.5-pro     untrusted: number-swap paired catch 0.29 < 0.80; fabricated-quote paired catch 0.48 < 0.80; dropped-top-claim paired catch 0.12 < 0.80; who-change paired catch 0.50 < 0.80
+  judge-claims         gemini-2.5-pro     trusted
+  judge-distillation   claude-sonnet-5    untrusted: number-swap paired catch 0.37 < 0.80; fabricated-quote paired catch 0.57 < 0.80; dropped-top-claim paired catch 0.07 < 0.80; who-change paired catch 0.50 < 0.80
+  judge-claims         claude-sonnet-5    trusted
+  quote-grounding      (deterministic)    ungated (no model call)
+2716 eval_scores rows and 11 judge_trust rows written
+```
+
+### Phase 3 bars, as measured
+
+- `judge_trust` `v3` `judge-claims` number-swap, probed `sqlite3 -readonly ~/.local/share/sb/borg/eval-cache.db`: `claude-sonnet-5|34|0.94|0.84|2026-10-18T22:17:45Z` and `gemini-2.5-pro|34|0.97|0.88|2026-10-18T22:17:45Z` (judge, sample_size, paired, wilson_lower). PASS: n 34 >= 30, 0.94 >= 0.80.
+- Over-window line for claude-sonnet-5: `0.83 (n=6)`. Rate PASS, count MISS: the bar asked n >= 10 and the sample grew to 30 plantable number-swap traces with only 6 of them over 24k (plus 1 over-cap). The doc called this an acceptance bar, not a code gate; the trust row is unaffected. To hit n >= 10 the run needs `--sample` above 30 or more long sources in staging.
+- `--remediate` (dry run): zero `judge-claims` trust-gate lines (`grep -c 'check judge-claims'` = 0); every gate line names `judge-distillation`. PASS. 19 `FAIL judge-claims` lines are trusted verdicts, which is what the gate opening means. Summary line: `posted 0  would-post 14  blocked (untrusted judge only) 119  already attempted 0  not remediable 17`. The 14 would-post sources are now actionable on a trusted `judge-claims` verdict; `--apply` was not run (Scott's call).
+- Errors: 0 on every cell. The `empty response` failures seen in the 10-18 Phase 0 on long sources did not recur on this sample under the 90s timeout and full source.
+- Over-cap: 1 of 35 number-swap traces exceeded 400k chars (the open question from the audit).
+- Unchanged: `judge-distillation` is untrusted on every class for both judges (0.07 to 0.57). Out of scope here (Resolved Decisions, 2026-10-17).
