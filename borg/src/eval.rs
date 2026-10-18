@@ -47,8 +47,9 @@ pub use judge::{MockClaimJudge, MockJudge};
 pub use patterns::{PatternDirFabric, pattern_in, resolve_patterns_dir};
 pub use regenerate::{RegenerateReport, regenerate_dispatcher, run_regenerate};
 pub use report::{
-    ArtifactMetric, CalibrationPanel, ClaimRecord, ClaimSupport, EvalReport, FlaggedClaim, GroundingMetric, KindReport,
-    ListicleMetric, NoteSizeMetric, ToolsGroundingMetric, TraceError, TraceMetrics, TraceRecord,
+    ArtifactMetric, CalibrationPanel, ClaimRecord, ClaimSupport, ClaimsOutcome, EvalReport, FlaggedClaim,
+    GroundingMetric, KindReport, ListicleMetric, NoteSizeMetric, REASON_SOURCE_OVER_CAP, ToolsGroundingMetric,
+    TraceError, TraceMetrics, TraceRecord,
 };
 
 /// `run_kind` of a score over the staged note as published (vs a
@@ -99,6 +100,11 @@ pub struct EvalOpts {
     pub sample: Option<usize>,
     /// Skip both LLM judges; report only the deterministic metrics.
     pub no_judge: bool,
+    /// `eval.claims-source-max-chars`: a source longer than this is not
+    /// judgeable by `judge-claims`; a shorter one goes to it whole.
+    pub claims_source_max_chars: usize,
+    /// `eval.claims-timeout-secs`: the claims judge's per-call timeout.
+    pub claims_timeout_secs: u64,
 }
 
 impl Default for EvalOpts {
@@ -114,6 +120,8 @@ impl Default for EvalOpts {
             staged_root: None,
             sample: None,
             no_judge: false,
+            claims_source_max_chars: crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+            claims_timeout_secs: crate::config::DEFAULT_CLAIMS_TIMEOUT_SECS,
         }
     }
 }
@@ -206,7 +214,8 @@ pub fn run_fixtures(opts: &EvalOpts, fixtures: &[Fixture]) -> Result<EvalOutcome
 }
 
 /// The production judges for `opts`: its model and credential vars, with each
-/// pattern resolved from `opts.patterns_dir` when set.
+/// pattern resolved from `opts.patterns_dir` when set, and the claims judge
+/// carrying `opts`' claims cap and timeout.
 ///
 /// A judged run (`!opts.no_judge`) with a blank model is refused here, the
 /// one place every LLM judge is built: no `-m` runs fabric's default model,
@@ -222,6 +231,8 @@ pub fn fabric_judges(opts: &EvalOpts) -> Result<(FabricJudge, FabricClaimJudge)>
     judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &judge.pattern)?;
     let mut claim_judge = FabricClaimJudge::new(opts.judge_model.clone(), opts.api_keys.clone());
     claim_judge.pattern = pattern_in(opts.patterns_dir.as_deref(), &claim_judge.pattern)?;
+    claim_judge.source_max_chars = opts.claims_source_max_chars;
+    claim_judge.timeout_secs = opts.claims_timeout_secs;
     Ok((judge, claim_judge))
 }
 
@@ -265,6 +276,7 @@ pub fn evaluate(
     let mut all: Vec<AxisScores> = Vec::new();
     let mut new_judgments = 0usize;
     let mut new_claim_judgments = 0usize;
+    let mut not_judgeable_claims = 0usize;
     let mut truncated_judgments = 0usize;
     let mut fallback_fixtures = 0usize;
     let mut calib_pairs: Vec<(u8, u8)> = Vec::new();
@@ -408,43 +420,36 @@ pub fn evaluate(
         }
 
         let claims: Vec<String> = fx.distilled.claims.iter().map(|c| c.text.trim().to_string()).collect();
-        let claims_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, record.source, claims.join("\n")));
-        let claims_key = cache::CacheKey {
-            fixture_id: &fx.id,
-            content_hash: &claims_hash,
-            judge_model: &opts.judge_model,
-        };
-        let cached_verdicts = if opts.rebuild_cache { None } else { cache.get_claims(&claims_key)? };
-        let verdicts = match cached_verdicts {
-            Some(v) if v.len() == claims.len() => Some(v),
-            _ => match judge_claims_checked(claim_judge, &fx.kind, &record.source, &claims) {
-                Ok(v) => {
-                    cache.put_claims(&claims_key, &v)?;
-                    new_claim_judgments += 1;
-                    Some(v)
+        match judge_claims_gated(
+            claim_judge,
+            cache,
+            fx,
+            &claims,
+            opts,
+            &mut record,
+            &mut new_claim_judgments,
+        )? {
+            ClaimsOutcome::Judged(verdicts) => {
+                let support = claim_support
+                    .entry(fx.kind.clone())
+                    .or_insert_with(|| ClaimSupport::empty(&fx.kind));
+                for (claim, verdict) in claims.iter().zip(&verdicts) {
+                    support.add(*verdict);
+                    if *verdict != ClaimVerdict::Supported {
+                        flagged_claims.push(FlaggedClaim {
+                            fixture: fx.id.clone(),
+                            verdict: *verdict,
+                            text: claim.clone(),
+                        });
+                    }
                 }
-                Err(e) => {
-                    log::warn!("eval::evaluate: {CHECK_JUDGE_CLAIMS} failed on {}: {e:#}", fx.id);
-                    record.errors.push(TraceError::new(CHECK_JUDGE_CLAIMS, &e));
-                    None
-                }
-            },
-        };
-        if let Some(verdicts) = &verdicts {
-            let support = claim_support
-                .entry(fx.kind.clone())
-                .or_insert_with(|| ClaimSupport::empty(&fx.kind));
-            for (claim, verdict) in claims.iter().zip(verdicts) {
-                support.add(*verdict);
-                if *verdict != ClaimVerdict::Supported {
-                    flagged_claims.push(FlaggedClaim {
-                        fixture: fx.id.clone(),
-                        verdict: *verdict,
-                        text: claim.clone(),
-                    });
-                }
+                record.metrics.judge_claims = ClaimsOutcome::Judged(verdicts);
             }
-            record.metrics.judge_claims = Some(verdicts.clone());
+            outcome @ ClaimsOutcome::NotJudgeable { .. } => {
+                not_judgeable_claims += 1;
+                record.metrics.judge_claims = outcome;
+            }
+            ClaimsOutcome::NotRun => {}
         }
 
         if let Some(cj) = axis {
@@ -511,6 +516,7 @@ pub fn evaluate(
         note_size,
         judged: !opts.no_judge,
         new_claim_judgments,
+        not_judgeable_claims,
         grounding,
         tools_grounding,
         artifacts,
@@ -527,6 +533,62 @@ pub fn evaluate(
         report.listicle_aggregate,
     );
     Ok(EvalOutcome::Report(Box::new(report)))
+}
+
+/// `judge-claims` for one fixture, behind the judgeability gate.
+///
+/// - A source over `opts.claims_source_max_chars` is
+///   [`ClaimsOutcome::NotJudgeable`]: no cache read, no judge call.
+/// - Otherwise the judge gets the WHOLE source (`fx.source`, never the
+///   distillation judge's budgeted one), cache first. The cache key hashes
+///   kind, the full source and the claims.
+/// - A failed call is recorded on `record.errors` and is
+///   [`ClaimsOutcome::NotRun`].
+///
+/// Judgeability depends on source length alone, so a baseline and any
+/// re-distill of the same trace land on the same side.
+fn judge_claims_gated(
+    claim_judge: &dyn ClaimJudge,
+    cache: &cache::JudgmentCache,
+    fx: &Fixture,
+    claims: &[String],
+    opts: &EvalOpts,
+    record: &mut TraceRecord,
+    new_claim_judgments: &mut usize,
+) -> Result<ClaimsOutcome> {
+    let source_chars = fx.source.chars().count();
+    let cap = opts.claims_source_max_chars;
+    if source_chars > cap {
+        log::debug!(
+            "eval::judge_claims_gated: {} not judgeable: source {source_chars} chars > cap {cap}",
+            fx.id
+        );
+        return Ok(ClaimsOutcome::NotJudgeable { source_chars, cap });
+    }
+    let claims_hash = cache::stable_hash(&format!("{}\n{}\n{}", fx.kind, fx.source, claims.join("\n")));
+    let claims_key = cache::CacheKey {
+        fixture_id: &fx.id,
+        content_hash: &claims_hash,
+        judge_model: &opts.judge_model,
+    };
+    let cached = if opts.rebuild_cache { None } else { cache.get_claims(&claims_key)? };
+    if let Some(v) = cached
+        && v.len() == claims.len()
+    {
+        return Ok(ClaimsOutcome::Judged(v));
+    }
+    match judge_claims_checked(claim_judge, &fx.kind, &fx.source, claims) {
+        Ok(v) => {
+            cache.put_claims(&claims_key, &v)?;
+            *new_claim_judgments += 1;
+            Ok(ClaimsOutcome::Judged(v))
+        }
+        Err(e) => {
+            log::warn!("eval::evaluate: {CHECK_JUDGE_CLAIMS} failed on {}: {e:#}", fx.id);
+            record.errors.push(TraceError::new(CHECK_JUDGE_CLAIMS, &e));
+            Ok(ClaimsOutcome::NotRun)
+        }
+    }
 }
 
 /// Run the claim judge and hold it to its contract: exactly one verdict per

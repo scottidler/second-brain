@@ -496,3 +496,81 @@ async fn a_candidate_identical_to_the_baseline_is_distilled_once() {
         .collect();
     assert_eq!(hashes.len(), 1, "one note, one distill hash");
 }
+
+/// A trace whose source is over the claims cap is dropped before any distill,
+/// on both arms, and the sample stays complete; the report names it.
+#[tokio::test]
+async fn an_over_cap_trace_is_dropped_before_distill_and_the_sample_stays_complete() {
+    let mut env = env();
+    env.opts.claims_source_max_chars = SOURCE.chars().count();
+    let baseline = env.arm("base.md", "the current pattern");
+    let candidate = env.arm("cand.md", "a proposal GROUNDED-QUOTES");
+    let long = format!("{SOURCE} and then some more words");
+    let fixtures = vec![
+        fixture("article", "a1", SOURCE),
+        fixture("article", "huge", &long),
+        fixture("article", "a2", SOURCE),
+    ];
+    let distiller = FakeDistiller::default();
+    let s = score(
+        &request(&baseline, &candidate, &fixtures, false),
+        &distiller,
+        &env.grading(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(distiller.calls.load(Ordering::SeqCst), 4, "2 judgeable traces x 2 arms");
+    assert_eq!(s.dropped_over_cap, vec!["huge".to_string()]);
+    let traces: Vec<&str> = s.traces.iter().map(|t| t.trace.as_str()).collect();
+    assert_eq!(traces, vec!["a1", "a2"]);
+    assert!(s.complete, "a dropped trace is not a hole: {}", s.render());
+    assert!(s.baseline.is_some() && s.candidate.is_some());
+    assert!(
+        s.render()
+            .contains("dropped 1 traces over the claims cap (not judgeable): huge"),
+        "{}",
+        s.render()
+    );
+    let seen = env.claim_judge.source_chars();
+    assert!(
+        !seen.is_empty() && seen.iter().all(|n| *n == SOURCE.chars().count()),
+        "the claims judge saw only judgeable sources: {seen:?}"
+    );
+    assert!(env.scores.rows_for("huge").unwrap().is_empty());
+}
+
+#[test]
+fn a_not_judgeable_note_gets_no_claim_feedback_and_says_so() {
+    let record = TraceRecord {
+        trace: "huge".to_string(),
+        fixture: "article/huge".to_string(),
+        run_kind: RUN_KIND_CANDIDATE.to_string(),
+        run_id: String::new(),
+        rubric_version: String::new(),
+        judge_model: String::new(),
+        kind: "article".to_string(),
+        content_hash: String::new(),
+        source: String::new(),
+        source_truncated: false,
+        note_text: String::new(),
+        claims: Vec::new(),
+        metrics: crate::eval::TraceMetrics {
+            judge_claims: ClaimsOutcome::NotJudgeable {
+                source_chars: 500_000,
+                cap: 400_000,
+            },
+            ..Default::default()
+        },
+        errors: Vec::new(),
+    };
+    let feedback = feedback_for(&record, &Distilled::default());
+    assert_eq!(
+        feedback,
+        vec![
+            "claims not judgeable: the source is 500000 chars, over the 400000-char claims cap, \
+             so this note carries no claim feedback"
+                .to_string()
+        ]
+    );
+    assert_eq!(NoteCounts::of(&record, &Distilled::default()), None);
+}

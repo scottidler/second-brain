@@ -25,7 +25,7 @@ fn claims(trace: &str, model: &str, verdicts: &[&str]) -> ScoreRow {
         trace,
         model,
         CHECK_JUDGE_CLAIMS,
-        "v2",
+        crate::eval::cache::CLAIMS_RUBRIC_VERSION,
         serde_json::json!({ "verdicts": verdicts }),
     )
 }
@@ -242,4 +242,31 @@ fn render_prints_the_two_by_two_and_na_for_an_undefined_kappa() {
         .find(|l| l.starts_with("judge-claims (claude-sonnet-5)") && l.contains("judge-claims (gemini-2.5-pro)"))
         .expect("a trace pair line");
     assert!(line.trim_end().ends_with("n/a"), "all-pass on both sides: {line}");
+}
+
+/// A not-judgeable `judge-claims` row (source over the claims cap) carries no
+/// verdicts: it is current and error-free, yet never a rater at either level,
+/// so it cannot pull a pair's kappa.
+#[test]
+fn a_not_judgeable_claims_row_is_not_a_rater() {
+    let over_cap = row(
+        "t",
+        GEMINI,
+        CHECK_JUDGE_CLAIMS,
+        crate::eval::cache::CLAIMS_RUBRIC_VERSION,
+        serde_json::json!({ "applicable": false, "reason": "source-over-cap", "source_chars": 500000, "cap": 400000 }),
+    );
+    assert_eq!(trace_flag(&over_cap), None);
+    assert_eq!(claim_support(&over_cap), None);
+    let report = agreement(&[over_cap, claims("t", CLAUDE, &["supported"])]);
+    assert_eq!(
+        report.raters.len(),
+        1,
+        "only the judged row is a rater: {:?}",
+        report.raters
+    );
+    assert!(
+        report.trace_pairs.is_empty() && report.claim_pairs.is_empty(),
+        "a lone judged rater has no pair"
+    );
 }

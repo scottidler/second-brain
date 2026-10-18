@@ -22,7 +22,10 @@ mod telegram;
 pub use desktop::DesktopConfig;
 pub use discord::DiscordConfig;
 pub use engine::*;
-pub use eval::{CandidateConfig, DEFAULT_JUDGE_MODEL, EvalConfig, ReportConfig, SECOND_JUDGE_MODEL, TrustConfig};
+pub use eval::{
+    CandidateConfig, DEFAULT_CLAIMS_SOURCE_MAX_CHARS, DEFAULT_CLAIMS_TIMEOUT_SECS, DEFAULT_JUDGE_MODEL, EvalConfig,
+    ReportConfig, SECOND_JUDGE_MODEL, TrustConfig,
+};
 pub use harvest::{HarvestConfig, HarvestMode};
 pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;

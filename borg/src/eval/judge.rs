@@ -217,7 +217,7 @@ fn extract_axis(reply: &str, axis: &str) -> Result<u8> {
 /// Per-claim verdict from the claim judge: is this one claim backed by the
 /// source? Finer-grained than the 0-3 `summary-faithfulness` axis, which never
 /// looks at claim truth at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ClaimVerdict {
     /// The source states or directly implies the claim.
@@ -257,12 +257,14 @@ pub trait ClaimJudge {
 
 #[cfg(test)]
 /// Deterministic claim judge for tests: every claim gets `verdict`, except
-/// claims containing an `overrides` key, which get that key's verdict.
+/// claims containing an `overrides` key, which get that key's verdict. It
+/// records the char length of every source it is handed.
 #[derive(Debug)]
 pub struct MockClaimJudge {
     verdict: ClaimVerdict,
     overrides: Vec<(String, ClaimVerdict)>,
     calls: AtomicUsize,
+    source_chars: std::sync::Mutex<Vec<usize>>,
 }
 
 #[cfg(test)]
@@ -272,7 +274,13 @@ impl MockClaimJudge {
             verdict,
             overrides: Vec::new(),
             calls: AtomicUsize::new(0),
+            source_chars: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The char length of each source handed to `judge_claims`, in call order.
+    pub fn source_chars(&self) -> Vec<usize> {
+        self.source_chars.lock().expect("mock source lengths").clone()
     }
 
     /// Claims whose text contains `needle` get `verdict` (builder style).
@@ -288,8 +296,12 @@ impl MockClaimJudge {
 
 #[cfg(test)]
 impl ClaimJudge for MockClaimJudge {
-    fn judge_claims(&self, _kind: &str, _source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+    fn judge_claims(&self, _kind: &str, source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.source_chars
+            .lock()
+            .expect("mock source lengths")
+            .push(source.chars().count());
         Ok(claims
             .iter()
             .map(|c| {
@@ -303,8 +315,20 @@ impl ClaimJudge for MockClaimJudge {
     }
 }
 
+/// The `judge-claims` input: kind, the numbered claims, then the source.
+/// The source is the whole staged source; nothing trims it on the way to
+/// the judge.
+pub fn claims_input(kind: &str, claims: &[String], source: &str) -> String {
+    let numbered: String = claims
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {}\n", i + 1, c.trim()))
+        .collect();
+    format!("# KIND\n{kind}\n\n# CLAIMS\n{numbered}\n# SOURCE\n{source}\n")
+}
+
 /// Production claim judge: runs the `judge-claims` Fabric pattern over the
-/// source and a numbered claim list, and parses one verdict per claim.
+/// whole source and a numbered claim list, and parses one verdict per claim.
 #[derive(Debug, Clone)]
 pub struct FabricClaimJudge {
     pub binary: String,
@@ -313,7 +337,11 @@ pub struct FabricClaimJudge {
     /// names on the child; empty leaves fabric on its own `.env`.
     pub api_keys: ApiKeys,
     pub pattern: String,
-    pub max_chars: usize,
+    /// The longest source (chars) this judge accepts
+    /// (`eval.claims-source-max-chars`). The caller gates judgeability
+    /// first; a longer source handed here anyway is an error, never trimmed.
+    pub source_max_chars: usize,
+    /// Per-call fabric timeout (`eval.claims-timeout-secs`).
     pub timeout_secs: u64,
 }
 
@@ -324,8 +352,8 @@ impl FabricClaimJudge {
             model: model.into(),
             api_keys,
             pattern: "judge-claims".to_string(),
-            max_chars: JUDGE_INPUT_MAX_CHARS,
-            timeout_secs: DEFAULT_JUDGE_TIMEOUT_SECS,
+            source_max_chars: crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+            timeout_secs: crate::config::DEFAULT_CLAIMS_TIMEOUT_SECS,
         }
     }
 
@@ -337,27 +365,29 @@ impl FabricClaimJudge {
 
 impl ClaimJudge for FabricClaimJudge {
     fn judge_claims(&self, kind: &str, source: &str, claims: &[String]) -> Result<Vec<ClaimVerdict>> {
+        let source_chars = source.chars().count();
         log::debug!(
-            "FabricClaimJudge::judge_claims: kind={} pattern={} model={} source_len={} claims={}",
+            "FabricClaimJudge::judge_claims: kind={} pattern={} model={} source_chars={} cap={} claims={}",
             kind,
             self.pattern,
             self.model,
-            source.len(),
+            source_chars,
+            self.source_max_chars,
             claims.len()
         );
+        if source_chars > self.source_max_chars {
+            bail!(
+                "judge-claims refuses a {source_chars}-char source over the {}-char cap: \
+                 the caller marks it not judgeable instead of trimming it",
+                self.source_max_chars
+            );
+        }
         if claims.is_empty() {
             return Ok(Vec::new());
         }
-        let numbered: String = claims
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{}. {}\n", i + 1, c.trim()))
-            .collect();
-        // fabric keeps the head of the input at max_chars, so the source goes
-        // last: truncation clips the source tail, never the claim list.
-        let input = format!("# KIND\n{kind}\n\n# CLAIMS\n{numbered}\n# SOURCE\n{source}\n");
-        let reply =
-            vault::fabric::run_command(self.command(), &self.pattern, &input, self.max_chars, self.timeout_secs)?;
+        let input = claims_input(kind, claims, source);
+        // max_chars 0: fabric passes the input through untrimmed.
+        let reply = vault::fabric::run_command(self.command(), &self.pattern, &input, 0, self.timeout_secs)?;
         parse_claim_verdicts(&reply, claims.len())
     }
 }

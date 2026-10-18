@@ -36,7 +36,7 @@ use vault::distilled::Distilled;
 use super::cache::{JudgmentCache, stable_hash};
 use super::judge::{ClaimJudge, ClaimVerdict, DistillationJudge};
 use super::regenerate::distill_kind_for_fixture;
-use super::report::TraceRecord;
+use super::report::{ClaimsOutcome, TraceRecord};
 use super::scores::{ScoreStore, rows_from_record};
 use super::{EvalOpts, EvalOutcome, Fixture, RUN_KIND_CANDIDATE, evaluate, fixtures, patterns::PatternDirFabric};
 
@@ -206,7 +206,7 @@ impl NoteCounts {
     /// Counts for one graded note. `None` when the claim judge produced no
     /// verdicts for it (an error row): an unjudged note has no claim support.
     pub fn of(record: &TraceRecord, distilled: &Distilled) -> Option<Self> {
-        let verdicts = record.metrics.judge_claims.as_ref()?;
+        let verdicts = record.metrics.judge_claims.verdicts()?;
         let (grounded, quoted) = record
             .metrics
             .quote_grounding
@@ -564,6 +564,10 @@ pub struct SampleScore {
     pub baseline_run_id: String,
     pub candidate_run_id: String,
     pub traces: Vec<TraceScore>,
+    /// Traces dropped before scoring because their source is over
+    /// `eval.claims-source-max-chars`: claim support cannot be measured on
+    /// them, on either arm. Not a hole: `complete` ignores them.
+    pub dropped_over_cap: Vec<String>,
     /// Every trace scored on both arms. The sample objectives exist only
     /// then: a sample with a hole is not the sample.
     pub complete: bool,
@@ -593,6 +597,13 @@ impl SampleScore {
             "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}\n",
             "trace", "base", "cand", "claims", "c-claims", "items", "c-items"
         ));
+        if !self.dropped_over_cap.is_empty() {
+            o.push_str(&format!(
+                "dropped {} traces over the claims cap (not judgeable): {}\n",
+                self.dropped_over_cap.len(),
+                self.dropped_over_cap.join(", ")
+            ));
+        }
         for t in &self.traces {
             let cell = |v: Option<f64>| v.map_or_else(|| "-".to_string(), |v| format!("{v:.3}"));
             let base_score = t.baseline.and_then(|b| objective_of_one(&b, &b));
@@ -668,6 +679,27 @@ pub async fn score(req: &ScoreRequest<'_>, distiller: &dyn PatternDistiller, g: 
     if g.opts.no_judge {
         bail!("a candidate is scored with the claim judge; drop --no-judge");
     }
+    // Claim support is a factor of the metric, so a trace the claims judge
+    // cannot read is dropped before any distill. Judgeability is source
+    // length alone, so both arms drop it together and the sample stays
+    // complete.
+    let (judgeable, over_cap): (Vec<&Fixture>, Vec<&Fixture>) = req
+        .fixtures
+        .iter()
+        .partition(|fx| fx.source.chars().count() <= g.opts.claims_source_max_chars);
+    let fixtures: Vec<Fixture> = judgeable.into_iter().cloned().collect();
+    let dropped_over_cap: Vec<String> = over_cap.iter().map(|fx| fx.slug.clone()).collect();
+    if !dropped_over_cap.is_empty() {
+        log::debug!(
+            "eval::candidate::score: dropped {} traces over the {}-char claims cap: {dropped_over_cap:?}",
+            dropped_over_cap.len(),
+            g.opts.claims_source_max_chars
+        );
+    }
+    let req = &ScoreRequest {
+        fixtures: &fixtures,
+        ..*req
+    };
     let arms = [req.baseline, req.candidate];
     // A candidate identical to the baseline (the search's seed) is one
     // pattern: distill it once and grade the same note on both arms.
@@ -841,6 +873,7 @@ pub async fn score(req: &ScoreRequest<'_>, distiller: &dyn PatternDistiller, g: 
         baseline_run_id: req.baseline.run_id.clone(),
         candidate_run_id: req.candidate.run_id.clone(),
         traces,
+        dropped_over_cap,
         complete,
         baseline,
         candidate,
@@ -853,17 +886,24 @@ fn feedback_for(record: &TraceRecord, distilled: &Distilled) -> Vec<String> {
     if let Some(reason) = &distilled.meta.validation.fallback_reason {
         out.push(format!("the output did not parse and fell back: {reason}"));
     }
-    if let Some(verdicts) = &record.metrics.judge_claims {
-        for (claim, verdict) in record.claims.iter().zip(verdicts) {
-            if *verdict != ClaimVerdict::Supported {
-                out.push(format!(
-                    "claim {} judged {}: {}",
-                    claim.id,
-                    verdict_label(*verdict),
-                    claim.text
-                ));
+    match &record.metrics.judge_claims {
+        ClaimsOutcome::Judged(verdicts) => {
+            for (claim, verdict) in record.claims.iter().zip(verdicts) {
+                if *verdict != ClaimVerdict::Supported {
+                    out.push(format!(
+                        "claim {} judged {}: {}",
+                        claim.id,
+                        verdict_label(*verdict),
+                        claim.text
+                    ));
+                }
             }
         }
+        ClaimsOutcome::NotJudgeable { source_chars, cap } => out.push(format!(
+            "claims not judgeable: the source is {source_chars} chars, over the {cap}-char claims cap, \
+             so this note carries no claim feedback"
+        )),
+        ClaimsOutcome::NotRun => {}
     }
     if let Some(g) = record.metrics.quote_grounding
         && g.grounded < g.quoted

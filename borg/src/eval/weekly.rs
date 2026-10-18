@@ -108,7 +108,13 @@ pub fn gather(inputs: &Inputs<'_>) -> Result<Gathered> {
             state: judge_check_trust(&c.judge_model, &c.check_name, inputs.trust_rows, &inputs.eval.trust),
         })
         .collect();
-    let remediated = remediated::collect(inputs.receipts, inputs.store, inputs.staged_root, &required)?;
+    let remediated = remediated::collect(
+        inputs.receipts,
+        inputs.store,
+        inputs.staged_root,
+        &required,
+        inputs.eval.claims_source_max_chars,
+    )?;
     let candidates = read_candidates(&inputs.reports_dir.join("candidates"))?;
     Ok(Gathered {
         plan,

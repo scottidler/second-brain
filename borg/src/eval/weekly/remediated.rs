@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::eval::fixtures::StagedTrace;
 use crate::eval::remediate::row_failure;
 use crate::eval::scores::{RequiredCheck, ScoreRow, ScoreStore};
-use crate::eval::{RUN_KIND_BASELINE, judged_input, probe_staged_trace};
+use crate::eval::{REASON_SOURCE_OVER_CAP, RUN_KIND_BASELINE, judged_input, probe_staged_trace};
 use crate::types::ReplayOrigin;
 
 /// Where a remediation stands.
@@ -36,6 +36,9 @@ pub enum Outcome {
     EvalErrored,
     /// The remediation receipt ended `failed` or `rejected`, or the POST never landed.
     AttemptFailed,
+    /// Scored, nothing fails, but a required `judge-claims` row is not
+    /// judgeable (source over the claims cap): never reported as passed.
+    NotJudgeable,
 }
 
 impl Outcome {
@@ -47,6 +50,7 @@ impl Outcome {
             Self::Unscored => "unscored",
             Self::EvalErrored => "eval-errored",
             Self::AttemptFailed => "attempt-failed",
+            Self::NotJudgeable => "not-judgeable",
         }
     }
 }
@@ -77,14 +81,19 @@ struct Claim {
 }
 
 /// Every remediation claim, oldest first, classified. `required` is the
-/// required-check set (`scores::required_checks(eval.judge-models)`).
+/// required-check set (`scores::required_checks(eval.judge-models)`);
+/// `claims_cap` is `eval.claims-source-max-chars`.
 pub fn collect(
     receipts: &Connection,
     store: &ScoreStore,
     staged_root: &Path,
     required: &[RequiredCheck],
+    claims_cap: usize,
 ) -> Result<Vec<Remediation>> {
-    log::debug!("eval::weekly::remediated::collect: required={}", required.len());
+    log::debug!(
+        "eval::weekly::remediated::collect: required={} claims_cap={claims_cap}",
+        required.len()
+    );
     let mut stmt = receipts
         .prepare(
             "SELECT source_url, original_trace, remediation_trace, trigger_judge_model, trigger_check,
@@ -111,7 +120,7 @@ pub fn collect(
         .context("reading a remediation claim")?;
     claims
         .iter()
-        .map(|claim| classify(receipts, store, staged_root, required, claim))
+        .map(|claim| classify(receipts, store, staged_root, required, claims_cap, claim))
         .collect()
 }
 
@@ -120,6 +129,7 @@ fn classify(
     store: &ScoreStore,
     staged_root: &Path,
     required: &[RequiredCheck],
+    claims_cap: usize,
     claim: &Claim,
 ) -> Result<Remediation> {
     let before = before_text(claim)?;
@@ -168,7 +178,7 @@ fn classify(
             ))
         }
         "succeeded" => {
-            let (outcome, after) = scored(store, staged_root, required, trace)?;
+            let (outcome, after) = scored(store, staged_root, required, claims_cap, trace)?;
             Ok(done(outcome, after))
         }
         other => eyre::bail!("remediation trace {trace} has an unknown receipt status '{other}'"),
@@ -179,6 +189,7 @@ fn scored(
     store: &ScoreStore,
     staged_root: &Path,
     required: &[RequiredCheck],
+    claims_cap: usize,
     trace: &str,
 ) -> Result<(Outcome, String)> {
     let fixture = match probe_staged_trace(staged_root, trace) {
@@ -198,7 +209,7 @@ fn scored(
     };
     let hash = judged_input(&fixture).content_hash;
     let rows = store.baseline_rows_at(trace, &hash)?;
-    if !store.is_covered(trace, &hash, required)? {
+    if !store.is_covered(trace, &hash, required, claims_cap)? {
         let needed: BTreeSet<&RequiredCheck> = required.iter().collect();
         let has_ok = |check: &RequiredCheck| rows.iter().any(|r| r.error.is_none() && same_check(r, check));
         let errored = rows
@@ -217,19 +228,39 @@ fn scored(
         });
     }
     let mut failing = Vec::new();
+    let mut not_judgeable = Vec::new();
     for row in rows
         .iter()
         .filter(|r| r.error.is_none() && required.iter().any(|c| same_check(r, c)))
     {
         if let Some(reason) = row_failure(row)? {
             failing.push(format!("{}: {reason}", check_label(row)));
+        } else if let Some(why) = not_judgeable_text(row) {
+            not_judgeable.push(why);
         }
     }
-    Ok(if failing.is_empty() {
-        (Outcome::Passed, format!("all {} required checks pass", required.len()))
-    } else {
+    Ok(if !failing.is_empty() {
         (Outcome::StillFailing, failing.join("; "))
+    } else if !not_judgeable.is_empty() {
+        (Outcome::NotJudgeable, not_judgeable.join("; "))
+    } else {
+        (Outcome::Passed, format!("all {} required checks pass", required.len()))
     })
+}
+
+/// `judge-claims (<model>) not judgeable: source N chars > cap C` for a
+/// `source-over-cap` row, `None` for any other row.
+fn not_judgeable_text(row: &ScoreRow) -> Option<String> {
+    let metrics: serde_json::Value = serde_json::from_str(&row.metrics_json).ok()?;
+    if metrics.get("reason").and_then(serde_json::Value::as_str) != Some(REASON_SOURCE_OVER_CAP) {
+        return None;
+    }
+    Some(format!(
+        "{} not judgeable: source {} chars > cap {}",
+        check_label(row),
+        metrics["source_chars"],
+        metrics["cap"]
+    ))
 }
 
 fn same_check(row: &ScoreRow, check: &RequiredCheck) -> bool {

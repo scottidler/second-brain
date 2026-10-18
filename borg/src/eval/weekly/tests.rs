@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+use crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,6 +72,9 @@ enum Scores {
     QuoteGroundingFails,
     JudgeClaimsFails,
     EveryRowErrored,
+    /// Every check passes, but `judge-claims` is not judgeable (source over
+    /// the claims cap).
+    ClaimsNotJudgeable,
 }
 
 fn score(store: &ScoreStore, root: &Path, trace: &str, scores: Scores) {
@@ -108,13 +112,18 @@ fn score(store: &ScoreStore, root: &Path, trace: &str, scores: Scores) {
         serde_json::json!({ "claim_coverage": 3, "anchor_validity": 3, "summary_faithfulness": 3 }),
     ));
     let verdict = if scores == Scores::JudgeClaimsFails { "unsupported" } else { "supported" };
+    let claims = if scores == Scores::ClaimsNotJudgeable {
+        serde_json::json!({ "applicable": false, "reason": "source-over-cap", "source_chars": 500000, "cap": 400000 })
+    } else {
+        serde_json::json!({ "verdicts": [verdict] })
+    };
     put(row(
         trace,
         &h,
         MODEL,
         CHECK_JUDGE_CLAIMS,
         cache::CLAIMS_RUBRIC_VERSION,
-        serde_json::json!({ "verdicts": [verdict] }),
+        claims,
     ));
 }
 
@@ -497,7 +506,14 @@ fn a_measured_but_weak_check_says_why_it_is_untrusted() {
 
 fn remediated(env: &Env) -> Vec<Remediation> {
     let required = required_checks(&env.eval.judge_models);
-    remediated::collect(&env.receipts, &env.store, &env.root, &required).unwrap()
+    remediated::collect(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -790,4 +806,25 @@ fn an_empty_judge_model_list_is_a_loud_error() {
     env.eval.judge_models.clear();
     let err = gather(&env.inputs(&[])).unwrap_err().to_string();
     assert!(err.contains("eval.judge-models is empty"), "{err}");
+}
+
+/// A remediated trace whose only non-failing evidence for judge-claims is a
+/// not-judgeable row is never reported as passed.
+#[test]
+fn outcome_not_judgeable_when_judge_claims_could_not_read_the_source() {
+    let env = remediated_env(Some(Scores::ClaimsNotJudgeable));
+    let r = &remediated(&env)[0];
+    assert_eq!(r.outcome, Outcome::NotJudgeable);
+    assert_eq!(r.outcome.as_str(), "not-judgeable");
+    assert!(
+        r.after.contains(&format!(
+            "judge-claims ({MODEL}) not judgeable: source 500000 chars > cap 400000"
+        )),
+        "{}",
+        r.after
+    );
+    // Raise the cap past the source and the row stops covering: unscored.
+    let required = required_checks(&env.eval.judge_models);
+    let raised = remediated::collect(&env.receipts, &env.store, &env.root, &required, 600_000).unwrap();
+    assert_eq!(raised[0].outcome, Outcome::Unscored);
 }

@@ -13,6 +13,15 @@ pub const DEFAULT_MIN_SAMPLES: usize = 30;
 /// a borg.yml without the line drains the backlog instead of scoring it all
 /// in one run.
 pub const DEFAULT_LIMIT: usize = 100;
+/// Default `eval.claims-source-max-chars`: the longest source (chars) the
+/// claims judge reads whole. It covers the p90 (298k) of the sources over the
+/// old 24k budget; a longer source is `not judgeable`, never trimmed
+/// (`docs/design/2026-10-17-claim-judge-full-source.md`).
+pub const DEFAULT_CLAIMS_SOURCE_MAX_CHARS: usize = 400_000;
+/// Default `eval.claims-timeout-secs`: max(90, 2 x p99) rounded up to 30s and
+/// never below the max, from the 2026-10-18 full-source run (p99 34.6s
+/// claude-sonnet-5 / 41.9s gemini-2.5-pro, max 39.5s / 55.3s).
+pub const DEFAULT_CLAIMS_TIMEOUT_SECS: u64 = 90;
 /// Default `eval.inject-workers`: judge calls in flight during `--inject`.
 const DEFAULT_INJECT_WORKERS: usize = 4;
 /// Default `eval.candidate.max-coverage-cut`: a candidate pattern that cuts
@@ -80,6 +89,14 @@ pub struct EvalConfig {
     pub candidate: CandidateConfig,
     /// The weekly failure-cluster report (`sb borg eval --weekly`).
     pub report: ReportConfig,
+    /// The longest source, in chars, `judge-claims` is given whole. A longer
+    /// source gets no claims call and a `source-over-cap` row: not
+    /// judgeable, never failing. Raising it re-queues exactly the traces
+    /// that now fit.
+    pub claims_source_max_chars: usize,
+    /// Per-call fabric timeout for `judge-claims`, which reads the whole
+    /// source and so runs longer than `judge-distillation`.
+    pub claims_timeout_secs: u64,
 }
 
 /// The `eval.report:` block: the weekly failure-cluster report that
@@ -162,8 +179,8 @@ impl EvalConfig {
     }
 
     /// Structural checks, run at config load: a blank judge model, a rate
-    /// outside 0..=1, a zero sample floor, or zero inject workers is a load
-    /// error, never a silent clamp.
+    /// outside 0..=1, a zero sample floor, zero inject workers, or a zero
+    /// claims cap or timeout is a load error, never a silent clamp.
     pub fn validate(&self) -> eyre::Result<()> {
         if let Some(i) = self.judge_models.iter().position(|m| m.trim().is_empty()) {
             eyre::bail!(
@@ -194,6 +211,12 @@ impl EvalConfig {
         if self.report.stale_after_days < 1 {
             eyre::bail!("eval.report.stale-after-days must be at least 1");
         }
+        if self.claims_source_max_chars == 0 {
+            eyre::bail!("eval.claims-source-max-chars must be at least 1: 0 would make every source not judgeable");
+        }
+        if self.claims_timeout_secs == 0 {
+            eyre::bail!("eval.claims-timeout-secs must be at least 1");
+        }
         Ok(())
     }
 }
@@ -209,6 +232,8 @@ impl Default for EvalConfig {
             inject_workers: DEFAULT_INJECT_WORKERS,
             candidate: CandidateConfig::default(),
             report: ReportConfig::default(),
+            claims_source_max_chars: DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+            claims_timeout_secs: DEFAULT_CLAIMS_TIMEOUT_SECS,
         }
     }
 }

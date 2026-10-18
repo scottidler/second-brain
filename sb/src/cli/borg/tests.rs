@@ -443,3 +443,25 @@ fn candidate_split_json_carries_the_api_key_references_under_fabric_names() {
     let empty = candidate::split_json(&split, &vault::fabric::ApiKeys::default()).unwrap();
     assert_eq!(empty["fabric-env"], serde_json::json!({}));
 }
+
+/// borg.yml's `eval.claims-source-max-chars` and `eval.claims-timeout-secs`
+/// reach the claims judge: config -> `eval_opts` -> `EvalOpts` ->
+/// `fabric_judges` -> `FabricClaimJudge`.
+#[test]
+fn eval_claims_cap_and_timeout_flow_from_borg_yml_to_the_claims_judge() {
+    let config: borg::config::Config =
+        serde_yaml::from_str("eval:\n  claims-source-max-chars: 1000\n  claims-timeout-secs: 45\n").unwrap();
+    let h = EvalHarness::try_parse_from(["sb", "--staged"]).unwrap();
+    let opts = eval_opts(&config, &h.eval).unwrap();
+    assert_eq!((opts.claims_source_max_chars, opts.claims_timeout_secs), (1000, 45));
+    let (_, claim_judge) = borg::eval::fabric_judges(&opts).unwrap();
+    assert_eq!((claim_judge.source_max_chars, claim_judge.timeout_secs), (1000, 45));
+
+    let defaults = borg::config::Config::default();
+    let opts = eval_opts(&defaults, &h.eval).unwrap();
+    assert_eq!(
+        (opts.claims_source_max_chars, opts.claims_timeout_secs),
+        (400_000, 90),
+        "an absent key is the config default"
+    );
+}

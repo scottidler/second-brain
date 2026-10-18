@@ -19,8 +19,10 @@ use crate::eval::judge::{AxisScores, ClaimVerdict};
 /// budgeted to what the note leaves.
 pub const RUBRIC_VERSION: &str = "v2";
 /// Rubric version for per-claim verdicts. Bump when `judge-claims.md` or the
-/// verdict semantics change. v2: the source is the v2 budgeted source.
-pub const CLAIMS_RUBRIC_VERSION: &str = "v2";
+/// verdict semantics change. v2: the source is the v2 budgeted source. v3:
+/// the judge reads the whole source (up to `eval.claims-source-max-chars`)
+/// and the "source appears cut off" rule is gone.
+pub const CLAIMS_RUBRIC_VERSION: &str = "v3";
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;

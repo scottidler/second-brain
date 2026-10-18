@@ -199,3 +199,68 @@ fn fabric_judges_refuses_a_blank_model_for_a_judged_run() {
     };
     crate::eval::fabric_judges(&named).expect("a named model builds");
 }
+
+/// A stand-in fabric that writes the char count of its stdin to `count` and
+/// answers one `supported` verdict.
+fn counting_fabric(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let count = dir.join("count");
+    let script = dir.join("fabric");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nwc -c > '{}'\necho '1: supported'\n", count.display()),
+    )
+    .expect("write stub");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    (script, count)
+}
+
+/// `FabricClaimJudge` hands fabric the whole input (`max_chars` 0): a 300k
+/// source arrives intact.
+#[test]
+fn fabric_claim_judge_sends_the_whole_source_to_fabric() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (script, count) = counting_fabric(dir.path());
+    let mut judge = FabricClaimJudge::new("gemini-2.5-pro", ApiKeys::default());
+    judge.binary = script.to_string_lossy().into_owned();
+    let source = "s".repeat(300_000);
+    let claims = vec!["a claim".to_string()];
+    let verdicts = judge.judge_claims("article", &source, &claims).expect("judged");
+    assert_eq!(verdicts, vec![ClaimVerdict::Supported]);
+    let sent: usize = std::fs::read_to_string(&count)
+        .expect("count")
+        .trim()
+        .parse()
+        .expect("a number");
+    assert_eq!(sent, claims_input("article", &claims, &source).len());
+    assert!(sent > 300_000, "the source was trimmed: {sent} bytes sent");
+}
+
+/// Fail closed: a source over the judge's cap is refused, never trimmed and
+/// never sent.
+#[test]
+fn fabric_claim_judge_refuses_a_source_over_its_cap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (script, count) = counting_fabric(dir.path());
+    let mut judge = FabricClaimJudge::new("gemini-2.5-pro", ApiKeys::default());
+    judge.binary = script.to_string_lossy().into_owned();
+    judge.source_max_chars = 1_000;
+    let err = judge
+        .judge_claims("article", &"s".repeat(1_001), &["c".to_string()])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("1001-char source over the 1000-char cap"), "{err}");
+    assert!(!count.exists(), "fabric must not run on an over-cap source");
+    judge
+        .judge_claims("article", &"s".repeat(1_000), &["c".to_string()])
+        .expect("a source at the cap is judged");
+}
+
+#[test]
+fn claims_input_numbers_the_claims_before_the_source() {
+    let input = claims_input("video", &["  first ".to_string(), "second".to_string()], "THE SOURCE");
+    assert_eq!(
+        input,
+        "# KIND\nvideo\n\n# CLAIMS\n1. first\n2. second\n\n# SOURCE\nTHE SOURCE\n"
+    );
+}

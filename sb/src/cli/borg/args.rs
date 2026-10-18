@@ -461,6 +461,10 @@ impl From<&EvalArgs> for borg::eval::EvalOpts {
             staged_root: None,
             sample: a.sample,
             no_judge: a.no_judge,
+            // borg.yml's `eval.claims-*`, set by the caller; the defaults
+            // here are the config defaults, never a second opinion.
+            claims_source_max_chars: borg::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+            claims_timeout_secs: borg::config::DEFAULT_CLAIMS_TIMEOUT_SECS,
         }
     }
 }

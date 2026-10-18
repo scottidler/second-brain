@@ -628,7 +628,7 @@ fn a_judge_error_is_recorded_on_its_trace_and_the_run_continues() {
     assert!(bad.errors[0].error.contains("vendor 503"));
     assert_eq!(bad.metrics.judge_distillation, None);
     // Its claims still got judged.
-    assert!(bad.metrics.judge_claims.is_some());
+    assert!(bad.metrics.judge_claims.verdicts().is_some());
     let good = report.traces.iter().find(|t| t.trace == "good").expect("good trace");
     assert!(good.errors.is_empty());
     assert_eq!(good.metrics.judge_distillation, Some(scores(2, 2, 2)));
@@ -716,7 +716,7 @@ fn a_short_claim_verdict_list_is_an_error_row_not_an_abort() {
         "{}",
         t.errors[0].error
     );
-    assert_eq!(t.metrics.judge_claims, None);
+    assert_eq!(t.metrics.judge_claims, ClaimsOutcome::NotRun);
     assert!(t.metrics.judge_distillation.is_some());
 }
 
@@ -792,4 +792,118 @@ fn a_no_judge_run_still_emits_one_record_per_fixture() {
     assert_eq!(report.traces.len(), fixtures.len());
     assert!(report.traces.iter().all(|t| t.metrics.judge_distillation.is_none()));
     assert!(report.traces.iter().all(|t| !t.content_hash.is_empty()));
+}
+
+/// The judgeability gate: a source over `eval.claims-source-max-chars` makes
+/// no claims call and is written as a not-judgeable row, which covers the
+/// trace until the cap is raised past its length.
+#[test]
+fn judge_claims_over_cap_is_not_judgeable() {
+    const MODEL: &str = "gemini-2.5-pro";
+    let source = "x".repeat(500_000);
+    let fixtures = vec![fixture(
+        "article",
+        "huge",
+        &source,
+        distilled("s", &[("c1", None)], None),
+    )];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let claim_judge = MockClaimJudge::new(ClaimVerdict::Supported);
+    let opts = EvalOpts {
+        judge_model: MODEL.to_string(),
+        ..EvalOpts::default()
+    };
+    assert_eq!(
+        opts.claims_source_max_chars,
+        crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS
+    );
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 3, 3)),
+            &claim_judge,
+            &opts,
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(
+        claim_judge.calls(),
+        0,
+        "an over-cap source never reaches the claims judge"
+    );
+    let t = &report.traces[0];
+    assert_eq!(
+        t.metrics.judge_claims,
+        ClaimsOutcome::NotJudgeable {
+            source_chars: 500_000,
+            cap: 400_000
+        }
+    );
+    assert!(t.errors.is_empty(), "not judgeable is not an error: {:?}", t.errors);
+    assert_eq!(report.not_judgeable_claims, 1);
+    assert!(report.render().contains("claims not judgeable: 1 traces"));
+
+    let store = scores::ScoreStore::open_memory().expect("store");
+    let rows = scores::rows_from_record(t, true, "2026-10-18T00:00:00Z");
+    let claims_row = rows
+        .iter()
+        .find(|r| r.check_name == CHECK_JUDGE_CLAIMS)
+        .expect("a judge-claims row");
+    assert_eq!(claims_row.error, None);
+    let metrics: serde_json::Value = serde_json::from_str(&claims_row.metrics_json).expect("json");
+    assert_eq!(
+        metrics,
+        serde_json::json!({ "applicable": false, "reason": "source-over-cap", "source_chars": 500000, "cap": 400000 })
+    );
+    for row in &rows {
+        store.put(row).expect("put");
+    }
+    let required = scores::required_checks(&[MODEL.to_string()]);
+    assert!(
+        store
+            .is_covered(&t.trace, &t.content_hash, &required, 400_000)
+            .expect("covered"),
+        "a not-judgeable row covers its check under the cap that made it"
+    );
+    assert!(
+        !store
+            .is_covered(&t.trace, &t.content_hash, &required, 600_000)
+            .expect("covered"),
+        "raising the cap past the source re-opens the trace"
+    );
+}
+
+/// Under the cap, the claims judge reads the whole source: never the
+/// distillation judge's budgeted one, never trimmed.
+#[test]
+fn judge_claims_reads_the_whole_source_under_the_cap() {
+    let source = "y".repeat(300_000);
+    let fixtures = vec![fixture(
+        "article",
+        "long",
+        &source,
+        distilled("s", &[("c1", None)], None),
+    )];
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let claim_judge = MockClaimJudge::new(ClaimVerdict::Supported);
+    let report = unwrap_report(
+        evaluate(
+            &fixtures,
+            &BTreeMap::new(),
+            &cache,
+            &MockJudge::new(scores(3, 3, 3)),
+            &claim_judge,
+            &EvalOpts::default(),
+        )
+        .expect("evaluate"),
+    );
+    assert_eq!(claim_judge.source_chars(), vec![300_000]);
+    assert_eq!(
+        report.traces[0].metrics.judge_claims,
+        ClaimsOutcome::Judged(vec![ClaimVerdict::Supported])
+    );
+    // The distillation judge still sees its 24k budget.
+    assert!(report.traces[0].source_truncated);
 }

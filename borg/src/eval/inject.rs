@@ -38,7 +38,7 @@ use vault::distilled::Distilled;
 use super::agreement::{AgreementReport, agreement};
 use super::calc::{grounding_words, wilson_lower_bound};
 use super::judge::MAX_SCORE;
-use super::report::{TraceMetrics, TraceRecord};
+use super::report::{ClaimsOutcome, TraceMetrics, TraceRecord};
 use super::scores::{CHECK_QUOTE_GROUNDING, NO_MODEL, ScoreStore, rows_from_record, rubric_version_of};
 use super::trust::{TrustRow, TrustState, TrustStore, judge_check_trust};
 use super::{
@@ -263,7 +263,9 @@ fn change_who(distilled: &Distilled, source: &str) -> Option<Planted> {
 
 /// Does `check` flag the planted unit these metrics describe? `None` when the
 /// check produced nothing (a failed judge call, or no verdict at `claim`), so
-/// the pair is counted as an error, never as a pass.
+/// the pair is counted as an error, never as a pass. A not-judgeable
+/// `judge-claims` side is also `None` here; [`tally`] excludes that pair
+/// first ([`not_judgeable`]), so it never reaches the error count.
 /// - `judge-distillation` flags any axis below the maximum: a perfect note
 ///   scores 3 on every axis, so anything less is the judge reporting a defect.
 /// - `judge-claims` with `claim = Some(i)` flags a verdict at `i` that is not
@@ -277,7 +279,7 @@ pub fn flags(check: &str, metrics: &TraceMetrics, claim: Option<usize>) -> Optio
             a.claim_coverage < MAX_SCORE || a.anchor_validity < MAX_SCORE || a.summary_faithfulness < MAX_SCORE
         }),
         CHECK_JUDGE_CLAIMS => {
-            let verdicts = metrics.judge_claims.as_ref()?;
+            let verdicts = metrics.judge_claims.verdicts()?;
             match claim {
                 Some(i) => verdicts.get(i).map(|x| *x != super::ClaimVerdict::Supported),
                 None => Some(verdicts.iter().any(|x| *x != super::ClaimVerdict::Supported)),
@@ -286,6 +288,13 @@ pub fn flags(check: &str, metrics: &TraceMetrics, claim: Option<usize>) -> Optio
         CHECK_QUOTE_GROUNDING => Some(metrics.quote_grounding.is_some_and(|g| g.grounded < g.quoted)),
         _ => None,
     }
+}
+
+/// Is `check` not judgeable on these metrics? Only `judge-claims` can be: its
+/// source was over `eval.claims-source-max-chars`, so it made no call. Such a
+/// pair is out of trust math, counted in neither `n` nor `errors`.
+pub fn not_judgeable(check: &str, metrics: &TraceMetrics) -> bool {
+    check == CHECK_JUDGE_CLAIMS && matches!(metrics.judge_claims, ClaimsOutcome::NotJudgeable { .. })
 }
 
 /// Counts for one check and class over the applicable traces.
@@ -301,6 +310,9 @@ pub struct ClassTally {
     pub originals_flagged: usize,
     /// Traces where the mutation applied but a side was not scored.
     pub errors: usize,
+    /// Traces where the mutation applied but the check could not judge the
+    /// source (over the claims cap): in neither `n` nor `errors`.
+    pub not_judgeable: usize,
 }
 
 impl ClassTally {
@@ -321,6 +333,11 @@ impl ClassTally {
         if mutant && !original {
             self.paired_caught += 1;
         }
+    }
+
+    /// Add one trace the check could not judge: excluded from the rates.
+    pub fn exclude(&mut self) {
+        self.not_judgeable += 1;
     }
 
     fn rate(count: usize, n: usize) -> f64 {
@@ -714,10 +731,12 @@ fn tally(groups: &[TraceGroup], records: &[Vec<TraceRecord>], check: &str, class
             continue;
         };
         let claim = group.claims[at];
-        t.add(
-            flags(check, &group_records[0].metrics, claim),
-            flags(check, &group_records[at].metrics, claim),
-        );
+        let (original, mutant) = (&group_records[0].metrics, &group_records[at].metrics);
+        if not_judgeable(check, original) || not_judgeable(check, mutant) {
+            t.exclude();
+            continue;
+        }
+        t.add(flags(check, original, claim), flags(check, mutant, claim));
     }
     t
 }

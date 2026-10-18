@@ -2,7 +2,7 @@
 //! summary (total / new / truncated / fallback), and the judge calibration
 //! panel — plus a plain-text renderer for `sb` to print.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::MAX_NOTE_BYTES;
 use crate::eval::calc;
@@ -201,6 +201,89 @@ pub struct QuoteGrounding {
     pub quoted: usize,
 }
 
+/// `reason` of a `judge-claims` row whose source is over
+/// `eval.claims-source-max-chars`.
+pub const REASON_SOURCE_OVER_CAP: &str = "source-over-cap";
+
+/// What `judge-claims` produced for one trace. The name says why a trace has
+/// no verdicts.
+///
+/// JSONL and `eval_scores` shape: `Judged` is the array of verdict strings,
+/// `NotJudgeable` is `{"applicable":false,"reason":"source-over-cap",
+/// "source_chars":N,"cap":C}`, `NotRun` is `null`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ClaimsWire", into = "ClaimsWire")]
+pub enum ClaimsOutcome {
+    /// One verdict per claim, in `claims` order.
+    Judged(Vec<ClaimVerdict>),
+    /// The source is over the claims cap: no call was made. Never failing,
+    /// covered, and out of trust math. `cap` is the cap that applied.
+    NotJudgeable { source_chars: usize, cap: usize },
+    /// Not judged: `--no-judge`, or the judge call errored (see
+    /// [`TraceRecord::errors`]).
+    #[default]
+    NotRun,
+}
+
+impl ClaimsOutcome {
+    /// The verdicts, only when the claims were judged.
+    pub fn verdicts(&self) -> Option<&[ClaimVerdict]> {
+        match self {
+            Self::Judged(v) => Some(v),
+            Self::NotJudgeable { .. } | Self::NotRun => None,
+        }
+    }
+}
+
+/// The serialized form of [`ClaimsOutcome`].
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ClaimsWire {
+    NotRun,
+    Judged(Vec<ClaimVerdict>),
+    NotJudgeable {
+        applicable: bool,
+        reason: String,
+        source_chars: usize,
+        cap: usize,
+    },
+}
+
+impl From<ClaimsOutcome> for ClaimsWire {
+    fn from(o: ClaimsOutcome) -> Self {
+        match o {
+            ClaimsOutcome::Judged(v) => Self::Judged(v),
+            ClaimsOutcome::NotJudgeable { source_chars, cap } => Self::NotJudgeable {
+                applicable: false,
+                reason: REASON_SOURCE_OVER_CAP.to_string(),
+                source_chars,
+                cap,
+            },
+            ClaimsOutcome::NotRun => Self::NotRun,
+        }
+    }
+}
+
+impl TryFrom<ClaimsWire> for ClaimsOutcome {
+    type Error = String;
+
+    fn try_from(w: ClaimsWire) -> Result<Self, Self::Error> {
+        match w {
+            ClaimsWire::Judged(v) => Ok(Self::Judged(v)),
+            ClaimsWire::NotRun => Ok(Self::NotRun),
+            ClaimsWire::NotJudgeable {
+                applicable: false,
+                reason,
+                source_chars,
+                cap,
+            } if reason == REASON_SOURCE_OVER_CAP => Ok(Self::NotJudgeable { source_chars, cap }),
+            ClaimsWire::NotJudgeable { applicable, reason, .. } => Err(format!(
+                "judge_claims object is not a not-judgeable row: applicable={applicable} reason={reason:?}"
+            )),
+        }
+    }
+}
+
 /// Every metric computed for one trace. `None` means not applicable (no
 /// declared listicle, no quote, no tool) or not judged (`--no-judge`, or the
 /// judge call errored: see [`TraceRecord::errors`]).
@@ -213,8 +296,7 @@ pub struct TraceMetrics {
     pub tools_grounding: Option<calc::ToolsGrounding>,
     pub placeholder_artifacts: Vec<String>,
     pub judge_distillation: Option<AxisScores>,
-    /// One verdict per claim, in `claims` order.
-    pub judge_claims: Option<Vec<ClaimVerdict>>,
+    pub judge_claims: ClaimsOutcome,
 }
 
 /// One claim as the JSONL contract carries it. `id` is the 1-based number
@@ -328,6 +410,9 @@ pub struct EvalReport {
     pub judged: bool,
     /// Claim-judge cache misses this run.
     pub new_claim_judgments: usize,
+    /// Traces whose source is over the claims cap: no claims call, no
+    /// verdicts, never failing ([`ClaimsOutcome::NotJudgeable`]).
+    pub not_judgeable_claims: usize,
     /// Quote grounding, one row per fixture that has quotes.
     pub grounding: Vec<GroundingMetric>,
     /// Tools grounding, one row per fixture whose note renders a tool.
@@ -416,6 +501,12 @@ impl EvalReport {
             self.fallback_fixtures,
         ));
 
+        if self.not_judgeable_claims > 0 {
+            o.push_str(&format!(
+                "claims not judgeable: {} traces have a source over the claims cap (no claims call, never failing)\n",
+                self.not_judgeable_claims
+            ));
+        }
         let errored = self.errored_traces();
         o.push_str(&format!(
             "judge errors: {errored} of {} traces (recorded per trace; the run continued)\n",

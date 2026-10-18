@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS;
 use crate::eval::judge::{AxisScores, ClaimVerdict, MockClaimJudge, MockJudge};
 use crate::eval::scores::{CHECK_NOTE_SIZE, DETERMINISTIC_CHECKS, ScoreRow, required_checks};
 use crate::eval::{CHECK_JUDGE_CLAIMS, CHECK_JUDGE_DISTILLATION, RUN_KIND_BASELINE};
@@ -113,7 +114,15 @@ fn backlog_lists_uncovered_traces_oldest_terminal_first() {
         succeed(&env.receipts, trace, at);
     }
     let required = required_checks(&models());
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required, None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-old", "tr-new"]);
 }
 
@@ -128,7 +137,15 @@ fn a_trace_whose_only_current_row_for_a_required_check_is_an_error_is_listed() {
         let err = (check.check_name == CHECK_JUDGE_CLAIMS).then_some("429 rate limited");
         put_row(&env, "tr-1", &hash, check, err);
     }
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required, None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-1"], "an error row does not cover the trace");
 
     put_row(
@@ -138,7 +155,15 @@ fn a_trace_whose_only_current_row_for_a_required_check_is_an_error_is_listed() {
         required.iter().find(|c| c.check_name == CHECK_JUDGE_CLAIMS).unwrap(),
         None,
     );
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required, None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert!(backlog.traces.is_empty(), "the retry that succeeds covers it");
 }
 
@@ -148,7 +173,15 @@ fn a_trace_scored_by_a_judge_outside_the_required_set_is_listed() {
     stage(&env.root, "tr-1", "a claim");
     succeed(&env.receipts, "tr-1", "2026-10-17T10:00:00Z");
     cover_fully(&env, "tr-1", &required_checks(&["some-other-judge".to_string()]));
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required_checks(&models()), None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required_checks(&models()),
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-1"]);
 }
 
@@ -161,7 +194,15 @@ fn a_trace_with_an_older_content_hash_row_but_none_for_its_current_hash_is_liste
     for check in &required {
         put_row(&env, "tr-1", "hash-of-an-earlier-note", check, None);
     }
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required, None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-1"]);
 }
 
@@ -173,17 +214,31 @@ fn a_fully_covered_trace_is_not_in_the_backlog_and_re_distilling_it_puts_it_back
     let required = required_checks(&models());
     cover_fully(&env, "tr-1", &required);
     assert!(
-        find_backlog(&env.receipts, &env.store, &env.root, &required, None)
-            .unwrap()
-            .traces
-            .is_empty()
+        find_backlog(
+            &env.receipts,
+            &env.store,
+            &env.root,
+            &required,
+            None,
+            DEFAULT_CLAIMS_SOURCE_MAX_CHARS
+        )
+        .unwrap()
+        .traces
+        .is_empty()
     );
     // The staged note changes: its distill hash changes, the old rows go stale.
     stage(&env.root, "tr-1", "a different claim");
     assert_eq!(
-        find_backlog(&env.receipts, &env.store, &env.root, &required, None)
-            .unwrap()
-            .traces,
+        find_backlog(
+            &env.receipts,
+            &env.store,
+            &env.root,
+            &required,
+            None,
+            DEFAULT_CLAIMS_SOURCE_MAX_CHARS
+        )
+        .unwrap()
+        .traces,
         vec!["tr-1"]
     );
 }
@@ -197,7 +252,15 @@ fn only_succeeded_receipts_with_a_staged_source_are_owed_and_the_rest_are_counte
     stage(&env.root, "tr-failed", "a claim");
     receipts::record_received(&env.receipts, "tr-failed", Method::Cli, ReceiptKind::Url, "u").unwrap();
     succeed(&env.receipts, "../escape", "2026-10-17T10:00:00Z");
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required_checks(&models()), None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required_checks(&models()),
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-ok"]);
     assert_eq!(backlog.not_staged, 2, "swept trace and the non-bare trace id");
 }
@@ -210,7 +273,15 @@ fn an_unparseable_staged_trace_is_reported_not_dropped_or_fatal() {
     stage(&env.root, "tr-ok", "a claim");
     succeed(&env.receipts, "tr-bad", "2026-10-10T10:00:00Z");
     succeed(&env.receipts, "tr-ok", "2026-10-17T10:00:00Z");
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required_checks(&models()), None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required_checks(&models()),
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-ok"]);
     assert_eq!(backlog.unreadable.len(), 1);
     assert_eq!(backlog.unreadable[0].0, "tr-bad");
@@ -249,15 +320,30 @@ fn limit_takes_the_oldest_and_leaves_the_rest_for_the_next_run() {
     let first = run(Some(2));
     assert_eq!(first.selected, 2);
     let required = required_checks(&models());
-    let left = find_backlog(&env.receipts, &env.store, &env.root, &required, None).unwrap();
+    let left = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required,
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(left.traces, vec!["tr-c"], "the newest carried over");
     let second = run(Some(2));
     assert_eq!(second.selected, 1);
     assert!(
-        find_backlog(&env.receipts, &env.store, &env.root, &required, None)
-            .unwrap()
-            .traces
-            .is_empty()
+        find_backlog(
+            &env.receipts,
+            &env.store,
+            &env.root,
+            &required,
+            None,
+            DEFAULT_CLAIMS_SOURCE_MAX_CHARS
+        )
+        .unwrap()
+        .traces
+        .is_empty()
     );
     assert_eq!(run(None).selected, 0, "a drained backlog selects nothing");
 }
@@ -308,7 +394,12 @@ fn a_run_writes_a_current_row_for_every_required_check_of_every_model() {
     assert!(rows.iter().any(|r| r.check_name == CHECK_NOTE_SIZE));
     let covered = env
         .store
-        .is_covered("tr-1", &current_hash(&env, "tr-1"), &required_checks(&two))
+        .is_covered(
+            "tr-1",
+            &current_hash(&env, "tr-1"),
+            &required_checks(&two),
+            DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+        )
         .unwrap();
     assert!(covered);
 }
@@ -346,7 +437,15 @@ fn a_failing_judge_writes_error_rows_and_leaves_the_trace_owed() {
     let rows = env.store.rows_for("tr-1").unwrap();
     let err = rows.iter().find(|r| r.check_name == CHECK_JUDGE_DISTILLATION).unwrap();
     assert_eq!(err.error.as_deref(), Some("vendor 503"));
-    let backlog = find_backlog(&env.receipts, &env.store, &env.root, &required_checks(&models()), None).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required_checks(&models()),
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
     assert_eq!(backlog.traces, vec!["tr-1"], "the next run retries it");
 }
 

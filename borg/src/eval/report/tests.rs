@@ -61,6 +61,7 @@ fn stub_report(
         note_size,
         judged: true,
         new_claim_judgments: 0,
+        not_judgeable_claims: 0,
         grounding: vec![],
         tools_grounding: vec![],
         artifacts: vec![],
@@ -334,4 +335,50 @@ fn render_prints_tools_grounding_na_without_tools() {
         text.contains("  tools-grounding: N/A (no note renders a tool)\n"),
         "{text}"
     );
+}
+
+/// The JSONL shape of every `ClaimsOutcome`: `Judged` stays the verdict
+/// array the `eval/` tools read, `NotJudgeable` is the not-judgeable row
+/// object, `NotRun` is `null`. Each round-trips.
+#[test]
+fn claims_outcome_round_trips_all_three_jsonl_shapes() {
+    let cases = [
+        (
+            ClaimsOutcome::Judged(vec![ClaimVerdict::Supported, ClaimVerdict::Contradicted]),
+            serde_json::json!(["supported", "contradicted"]),
+        ),
+        (
+            ClaimsOutcome::NotJudgeable {
+                source_chars: 500_000,
+                cap: 400_000,
+            },
+            serde_json::json!({ "applicable": false, "reason": "source-over-cap", "source_chars": 500000, "cap": 400000 }),
+        ),
+        (ClaimsOutcome::NotRun, serde_json::Value::Null),
+    ];
+    for (outcome, wire) in cases {
+        let json = serde_json::to_value(&outcome).expect("serialize");
+        assert_eq!(json, wire, "{outcome:?}");
+        let back: ClaimsOutcome = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, outcome);
+        let metrics = TraceMetrics {
+            judge_claims: outcome.clone(),
+            ..TraceMetrics::default()
+        };
+        let line = serde_json::to_value(&metrics).expect("serialize metrics");
+        assert_eq!(line["judge_claims"], wire, "inside the JSONL metrics");
+    }
+}
+
+/// An object that is not a not-judgeable row is a parse error, never a
+/// silent `NotRun`.
+#[test]
+fn a_judge_claims_object_with_another_reason_does_not_parse() {
+    for bad in [
+        serde_json::json!({ "applicable": false, "reason": "something-else", "source_chars": 1, "cap": 1 }),
+        serde_json::json!({ "applicable": true, "reason": "source-over-cap", "source_chars": 1, "cap": 1 }),
+    ] {
+        let err = serde_json::from_value::<ClaimsOutcome>(bad.clone()).unwrap_err();
+        assert!(!err.to_string().is_empty(), "{bad}");
+    }
 }

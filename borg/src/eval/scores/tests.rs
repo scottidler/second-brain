@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DEFAULT_CLAIMS_SOURCE_MAX_CHARS;
 use crate::eval::judge::{AxisScores, ClaimVerdict};
 use crate::eval::report::{TraceError, TraceMetrics};
 
@@ -123,7 +124,11 @@ fn a_trace_with_every_required_check_current_and_clean_is_covered() {
     let store = ScoreStore::open_memory().unwrap();
     let required = required_one_judge();
     cover(&store, "tr-1", "h1", &required);
-    assert!(store.is_covered("tr-1", "h1", &required).unwrap());
+    assert!(
+        store
+            .is_covered("tr-1", "h1", &required, DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -140,7 +145,11 @@ fn a_trace_whose_only_current_row_for_a_required_check_is_an_error_is_not_covere
     err.rubric_version = claims.rubric_version.clone();
     err.error = Some("timeout".to_string());
     store2.put(&err).unwrap();
-    assert!(!store2.is_covered("tr-1", "h1", &required).unwrap());
+    assert!(
+        !store2
+            .is_covered("tr-1", "h1", &required, DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -148,7 +157,11 @@ fn a_trace_scored_only_by_a_judge_outside_the_required_set_is_not_covered() {
     let store = ScoreStore::open_memory().unwrap();
     let other = required_checks(&["claude-sonnet-5".to_string()]);
     cover(&store, "tr-1", "h1", &other);
-    assert!(!store.is_covered("tr-1", "h1", &required_one_judge()).unwrap());
+    assert!(
+        !store
+            .is_covered("tr-1", "h1", &required_one_judge(), DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -156,7 +169,11 @@ fn a_row_for_an_older_content_hash_does_not_cover_the_current_one() {
     let store = ScoreStore::open_memory().unwrap();
     let required = required_one_judge();
     cover(&store, "tr-1", "old-hash", &required);
-    assert!(!store.is_covered("tr-1", "new-hash", &required).unwrap());
+    assert!(
+        !store
+            .is_covered("tr-1", "new-hash", &required, DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -168,7 +185,11 @@ fn a_row_for_an_older_rubric_version_does_not_cover() {
         r.rubric_version = "v0".to_string();
         store.put(&r).unwrap();
     }
-    assert!(!store.is_covered("tr-1", "h1", &required).unwrap());
+    assert!(
+        !store
+            .is_covered("tr-1", "h1", &required, DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -182,13 +203,21 @@ fn candidate_and_inject_rows_never_cover_a_trace() {
             store.put(&r).unwrap();
         }
     }
-    assert!(!store.is_covered("tr-1", "h1", &required).unwrap());
+    assert!(
+        !store
+            .is_covered("tr-1", "h1", &required, DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
 fn an_empty_required_set_covers_nothing() {
     let store = ScoreStore::open_memory().unwrap();
-    assert!(!store.is_covered("tr-1", "h1", &[]).unwrap());
+    assert!(
+        !store
+            .is_covered("tr-1", "h1", &[], DEFAULT_CLAIMS_SOURCE_MAX_CHARS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -238,7 +267,7 @@ fn judge_rows_carry_verdicts_and_a_failed_call_becomes_an_error_row() {
         anchor_validity: 2,
         summary_faithfulness: 3,
     });
-    ok.metrics.judge_claims = Some(vec![ClaimVerdict::Supported, ClaimVerdict::Unsupported]);
+    ok.metrics.judge_claims = ClaimsOutcome::Judged(vec![ClaimVerdict::Supported, ClaimVerdict::Unsupported]);
     let rows = rows_from_record(&ok, true, "t");
     let claims = rows.iter().find(|r| r.check_name == CHECK_JUDGE_CLAIMS).unwrap();
     assert_eq!(claims.judge_model, "gemini-2.5-pro");
@@ -261,7 +290,7 @@ fn judge_rows_carry_verdicts_and_a_failed_call_becomes_an_error_row() {
 #[test]
 fn no_judge_writes_no_judge_rows() {
     let mut r = record("m");
-    r.metrics.judge_claims = Some(vec![ClaimVerdict::Supported]);
+    r.metrics.judge_claims = ClaimsOutcome::Judged(vec![ClaimVerdict::Supported]);
     let rows = rows_from_record(&r, false, "t");
     assert_eq!(rows.len(), DETERMINISTIC_CHECKS.len());
 }

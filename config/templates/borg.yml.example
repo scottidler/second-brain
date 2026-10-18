@@ -326,6 +326,12 @@ harvest:
 #     min-paired-catch-rate: 0.80
 #     min-samples: 30                 # also the default --inject --sample
 #   inject-workers: 4                 # traces judged in parallel by --inject
+#   # judge-claims reads the WHOLE source, never a trimmed one. A source longer
+#   # than claims-source-max-chars gets no claims call and a `not judgeable`
+#   # row (source-over-cap): never failing, covered, out of trust math.
+#   # Raising the cap re-queues exactly the traces that now fit.
+#   claims-source-max-chars: 400000
+#   claims-timeout-secs: 90           # per claims call; long sources run longer
 #   # A candidate distill pattern (`sb borg eval --candidate-pattern`, the
 #   # `otto gepa` search, `--apply-candidate`) scores quote grounding x claim
 #   # support x listicle survival against the current pattern. Cutting claims

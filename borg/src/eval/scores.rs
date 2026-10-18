@@ -21,7 +21,7 @@ use eyre::{Context, Result};
 use rusqlite::{Connection, params};
 
 use super::cache::{CLAIMS_RUBRIC_VERSION, RUBRIC_VERSION};
-use super::report::TraceRecord;
+use super::report::{ClaimsOutcome, REASON_SOURCE_OVER_CAP, TraceRecord};
 use super::{CHECK_JUDGE_CLAIMS, CHECK_JUDGE_DISTILLATION, RUN_KIND_BASELINE};
 
 /// Rubric version of the deterministic checks. Bump when a check's metric
@@ -270,7 +270,20 @@ impl ScoreStore {
     /// True when every check in `required` has a current, error-free baseline
     /// row for `trace` at `content_hash`. An empty `required` covers nothing:
     /// a loop that requires no check has no definition of "scored".
-    pub fn is_covered(&self, trace: &str, content_hash: &str, required: &[RequiredCheck]) -> Result<bool> {
+    ///
+    /// A `source-over-cap` row (not judgeable) covers its check only while
+    /// its `source_chars` is still over `claims_cap`
+    /// (`eval.claims-source-max-chars`): raising the cap re-queues exactly
+    /// the traces that now fit. `IS` keeps the predicate two-valued: with
+    /// `=`, a row with no `reason` makes the whole `NOT (..)` NULL and drops
+    /// every ordinary row. An over-cap row with no `source_chars` never covers.
+    pub fn is_covered(
+        &self,
+        trace: &str,
+        content_hash: &str,
+        required: &[RequiredCheck],
+        claims_cap: usize,
+    ) -> Result<bool> {
         if required.is_empty() {
             return Ok(false);
         }
@@ -279,17 +292,23 @@ impl ScoreStore {
             .prepare(
                 "SELECT judge_model, check_name, rubric_version FROM eval_scores
                  WHERE trace = ?1 AND run_kind = ?2 AND run_id = '' AND content_hash = ?3
-                   AND error IS NULL",
+                   AND error IS NULL
+                   AND NOT (json_extract(metrics_json, '$.reason') IS ?5
+                            AND COALESCE(json_extract(metrics_json, '$.source_chars') <= ?4, 1))",
             )
             .context("preparing eval coverage read")?;
+        let cap = i64::try_from(claims_cap).unwrap_or(i64::MAX);
         let have: BTreeSet<RequiredCheck> = stmt
-            .query_map(params![trace, RUN_KIND_BASELINE, content_hash], |r| {
-                Ok(RequiredCheck {
-                    judge_model: r.get(0)?,
-                    check_name: r.get(1)?,
-                    rubric_version: r.get(2)?,
-                })
-            })
+            .query_map(
+                params![trace, RUN_KIND_BASELINE, content_hash, cap, REASON_SOURCE_OVER_CAP],
+                |r| {
+                    Ok(RequiredCheck {
+                        judge_model: r.get(0)?,
+                        check_name: r.get(1)?,
+                        rubric_version: r.get(2)?,
+                    })
+                },
+            )
             .context("reading eval coverage")?
             .collect::<std::result::Result<_, _>>()
             .context("reading an eval coverage row")?;
@@ -372,15 +391,27 @@ pub fn rows_from_record(record: &TraceRecord, judged: bool, scored_at: &str) -> 
                 Some(error),
             ));
         }
-        if let Some(verdicts) = &m.judge_claims {
-            rows.push(row(
+        match &m.judge_claims {
+            ClaimsOutcome::Judged(verdicts) => rows.push(row(
                 &record.judge_model,
                 CHECK_JUDGE_CLAIMS,
                 CLAIMS_RUBRIC_VERSION,
                 serde_json::json!({ "verdicts": verdicts }),
                 None,
-            ));
-        } else if let Some(error) = error_of(CHECK_JUDGE_CLAIMS) {
+            )),
+            // The JSONL shape: `{"applicable":false,"reason":"source-over-cap",..}`.
+            not_judgeable @ ClaimsOutcome::NotJudgeable { .. } => rows.push(row(
+                &record.judge_model,
+                CHECK_JUDGE_CLAIMS,
+                CLAIMS_RUBRIC_VERSION,
+                serde_json::to_value(not_judgeable).unwrap_or_default(),
+                None,
+            )),
+            ClaimsOutcome::NotRun => {}
+        }
+        if m.judge_claims == ClaimsOutcome::NotRun
+            && let Some(error) = error_of(CHECK_JUDGE_CLAIMS)
+        {
             rows.push(row(
                 &record.judge_model,
                 CHECK_JUDGE_CLAIMS,

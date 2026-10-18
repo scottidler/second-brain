@@ -50,15 +50,17 @@ pub struct Backlog {
 
 /// Find the uncovered traces, stopping after `limit` when given. Without a
 /// limit it walks every succeeded receipt, which is what `--count` needs.
+/// `claims_cap` is `eval.claims-source-max-chars` ([`ScoreStore::is_covered`]).
 pub fn find_backlog(
     receipts: &Connection,
     store: &ScoreStore,
     staged_root: &Path,
     required: &[RequiredCheck],
     limit: Option<usize>,
+    claims_cap: usize,
 ) -> Result<Backlog> {
     log::debug!(
-        "eval::backlog::find_backlog: root={} required={} limit={limit:?}",
+        "eval::backlog::find_backlog: root={} required={} limit={limit:?} claims_cap={claims_cap}",
         staged_root.display(),
         required.len()
     );
@@ -79,7 +81,7 @@ pub fn find_backlog(
             }
         };
         let hash = judged_input(&fixture).content_hash;
-        if !store.is_covered(&trace, &hash, required)? {
+        if !store.is_covered(&trace, &hash, required, claims_cap)? {
             backlog.traces.push(trace);
         }
     }
@@ -159,7 +161,14 @@ pub fn run_unscored(
         );
     }
     let required = super::scores::required_checks(judge_models);
-    let backlog = find_backlog(receipts, store, staged_root, &required, limit)?;
+    let backlog = find_backlog(
+        receipts,
+        store,
+        staged_root,
+        &required,
+        limit,
+        opts.claims_source_max_chars,
+    )?;
     let mut fixtures = Vec::with_capacity(backlog.traces.len());
     for trace in &backlog.traces {
         if let Some(fixture) =

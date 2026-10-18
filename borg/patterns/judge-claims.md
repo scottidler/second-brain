@@ -18,9 +18,6 @@ to how the claims were produced; none of that matters.
 Attribution matters: a claim that credits a position to the wrong person or
 states the author's opinion as established fact is unsupported.
 
-If the SOURCE appears cut off and a claim plausibly comes from the missing part,
-answer unsupported (do not guess supported).
-
 # STEPS
 
 - Read the CLAIMS, then the SOURCE.

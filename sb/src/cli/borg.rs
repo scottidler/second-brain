@@ -536,7 +536,14 @@ fn run_eval_unscored(config: &borg::config::Config, opts: &borg::eval::EvalOpts,
         if config.eval.judge_models.is_empty() {
             eyre::bail!("eval.judge-models is empty: the required-check set is derived from it");
         }
-        let backlog = borg::eval::backlog::find_backlog(&receipts, &store, staged_root, &required, None)?;
+        let backlog = borg::eval::backlog::find_backlog(
+            &receipts,
+            &store,
+            staged_root,
+            &required,
+            None,
+            opts.claims_source_max_chars,
+        )?;
         for (trace, reason) in &backlog.unreadable {
             eprintln!("unreadable staged trace {trace}: {reason}");
         }
@@ -699,6 +706,8 @@ fn eval_opts(config: &borg::config::Config, a: &args::EvalArgs) -> Result<borg::
                 .map(vault::paths::expand_tilde)
                 .unwrap_or_else(|| config.staging.root.clone())
         }),
+        claims_source_max_chars: config.eval.claims_source_max_chars,
+        claims_timeout_secs: config.eval.claims_timeout_secs,
         ..borg::eval::EvalOpts::from(a)
     })
 }

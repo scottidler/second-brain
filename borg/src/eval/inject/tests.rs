@@ -227,7 +227,7 @@ fn an_unscored_side_is_an_error_never_a_pass() {
 fn judge_claims_flags_read_the_planted_claim_and_a_missing_verdict_is_an_error() {
     use ClaimVerdict::*;
     let metrics = TraceMetrics {
-        judge_claims: Some(vec![Supported, Unsupported, Supported]),
+        judge_claims: ClaimsOutcome::Judged(vec![Supported, Unsupported, Supported]),
         ..Default::default()
     };
     assert_eq!(flags(CHECK_JUDGE_CLAIMS, &metrics, Some(0)), Some(false));
@@ -730,4 +730,70 @@ fn the_sample_keeps_only_traces_some_class_applies_to() {
         picked.iter().map(|f| f.slug.as_str()).collect::<Vec<_>>(),
         vec!["t-two"]
     );
+}
+
+/// A pair whose source is over the claims cap is excluded from the
+/// `judge-claims` tally: neither `n` nor `errors`, so it can neither help nor
+/// hurt trust, and `ClassTally::add` is untouched for scored pairs.
+#[test]
+fn a_not_judgeable_judge_claims_pair_is_in_neither_n_nor_errors() {
+    let mut fixtures: Vec<Fixture> = (0..3).map(|i| fixture(&format!("t{i}"))).collect();
+    let cap = fixtures[0].source.chars().count();
+    fixtures[2]
+        .source
+        .push_str(" A closing remark about nothing in particular.");
+    let factory = |_: &EvalOpts| -> Result<(Box<dyn DistillationJudge>, Box<dyn ClaimJudge>)> {
+        Ok((
+            Box::new(MockJudge::new(AxisScores {
+                claim_coverage: 3,
+                anchor_validity: 3,
+                summary_faithfulness: 3,
+            })),
+            Box::new(MockClaimJudge::new(ClaimVerdict::Supported)),
+        ))
+    };
+    let env = env();
+    let config = eval_config(3);
+    let opts = EvalOpts {
+        claims_source_max_chars: cap,
+        ..EvalOpts::default()
+    };
+    let run = InjectRun {
+        opts: &opts,
+        eval: &config,
+        cache_path: &env.cache_path,
+        now: now(),
+    };
+    let report = run_inject(&fixtures, &run, &env.scores, &env.trust, &factory).unwrap();
+    let t = cell(&report, MODEL, CHECK_JUDGE_CLAIMS, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!(t.not_judgeable, 1, "only t2 is over the cap");
+    assert_eq!(t.errors, 0, "not judgeable is never an error");
+    assert_eq!(t.n, 2);
+    // judge-distillation still sees every pair.
+    let jd = cell(&report, MODEL, CHECK_JUDGE_DISTILLATION, PlantedClass::NumberSwap)
+        .tally
+        .unwrap();
+    assert_eq!(jd.n, fixtures.len());
+
+    let mut direct = ClassTally::default();
+    direct.exclude();
+    direct.add(Some(false), Some(true));
+    assert_eq!(
+        (direct.n, direct.errors, direct.not_judgeable, direct.paired_caught),
+        (1, 0, 1, 1)
+    );
+
+    let metrics = TraceMetrics {
+        judge_claims: ClaimsOutcome::NotJudgeable {
+            source_chars: 2,
+            cap: 1,
+        },
+        ..TraceMetrics::default()
+    };
+    assert!(not_judgeable(CHECK_JUDGE_CLAIMS, &metrics));
+    assert!(!not_judgeable(CHECK_JUDGE_DISTILLATION, &metrics));
+    assert!(!not_judgeable(CHECK_JUDGE_CLAIMS, &TraceMetrics::default()));
+    assert_eq!(flags(CHECK_JUDGE_CLAIMS, &metrics, Some(0)), None);
 }
