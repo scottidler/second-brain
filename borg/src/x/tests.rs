@@ -22,11 +22,15 @@ const CHROME: &[&str] = &[
 ];
 
 /// A stub fxtwitter serving `body` for every `/status/<id>`; returns its base URL.
+/// Like the live API, it answers 401 to a request with no `User-Agent`.
 async fn serve(status: StatusCode, content_type: &'static str, body: &'static str, delay: Duration) -> String {
     let app = Router::new().route(
         "/status/{id}",
-        get(move || async move {
+        get(move |headers: axum::http::HeaderMap| async move {
             tokio::time::sleep(delay).await;
+            if headers.get("user-agent").is_none_or(|ua| ua.is_empty()) {
+                return (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], "{}").into_response();
+            }
             (status, [("content-type", content_type)], body).into_response()
         }),
     );
@@ -308,4 +312,26 @@ async fn x_post_renders_quoted_article_blocks() {
         "{md}"
     );
     assert!(!md.contains("x.com/i/article"), "bare article link leaked:\n{md}");
+}
+
+#[tokio::test]
+async fn x_post_fetch_sends_descriptive_user_agent() {
+    let app = Router::new().route(
+        "/status/{id}",
+        get(|headers: axum::http::HeaderMap| async move {
+            let ua = headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let status = if ua == USER_AGENT { StatusCode::OK } else { StatusCode::UNAUTHORIZED };
+            (status, [("content-type", "application/json")], VIC).into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+    let post = fetch_post(&format!("http://127.0.0.1:{port}"), 2112024357551931564, 10).await;
+    assert!(post.is_ok(), "fxtwitter 401s without a User-Agent: {post:?}");
 }

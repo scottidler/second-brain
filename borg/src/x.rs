@@ -15,6 +15,9 @@ use std::time::Duration;
 pub const API_BASE: &str = "https://api.fxtwitter.com";
 /// The `extractor:` label a post's `fetched.yml` carries.
 pub const EXTRACTOR: &str = "fxtwitter-api";
+/// fxtwitter answers 401 to a request with no `User-Agent` and asks for a
+/// descriptive one; reqwest sends none by default.
+pub const USER_AGENT: &str = "second-brain-borg-x-fetcher/1.0 (+https://github.com/scottidler/second-brain)";
 
 const HOSTS: &[&str] = &[
     "x.com",
@@ -119,7 +122,10 @@ pub fn status_id(url: &str) -> Option<u64> {
 /// caller fails the ingest rather than fall back to the page scrape.
 pub async fn fetch_post(api_base: &str, id: u64, timeout_secs: u64) -> Result<Post> {
     log::debug!("x::fetch_post: api_base={api_base} id={id} timeout_secs={timeout_secs}");
-    let client = vault::http::client(Duration::from_secs(timeout_secs)).context("build fxtwitter client")?;
+    let client = vault::http::builder(vault::http::Timeouts::total(Duration::from_secs(timeout_secs)))
+        .user_agent(USER_AGENT)
+        .build()
+        .context("build fxtwitter client")?;
     let response = client
         .get(format!("{api_base}/status/{id}"))
         .send()

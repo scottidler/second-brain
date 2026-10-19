@@ -84,3 +84,18 @@
 - Deferred by the panel, for Scott: `cortex/src/summarize.rs:335` backfill always writes the transcript into the note, while cortex now reads Social/Reddit transcripts only from staging (same as Article since 2026-07-07). Affects the one trace-less Reddit note and X notes until reingested.
 - Deferred by the panel, for Scott: `pipeline.fxtwitter-timeout-secs` is absent from `config/templates/borg.yml.example` (as is `jina-timeout-secs`).
 - The changed thread patterns were never scored by `bin/promptfoo-check` (`otto ci` ran with `GEMINI_API_KEY` unset); no HN regression check exists for them.
+
+## Post-release fix: fxtwitter User-Agent (v0.18.2 rollout)
+
+### Design decisions
+- `x::fetch_post` sends `x::USER_AGENT` (`borg/src/x.rs`), built through `vault::http::builder` like `GitHubFetcher::new`. Cause: the first live reingest on ripr (vic post, v0.18.2) failed `fetch-failed: fxtwitter API returned status 401 Unauthorized`. fxtwitter's body: "You must identify yourself with a User-Agent header". reqwest sends no User-Agent by default; Phase 0 probed with curl, which does, and the axum stubs never checked the header.
+- Recurrence guard: the `borg/src/x/tests.rs` stub now answers 401 to a request with no User-Agent, as the live API does, and `x_post_fetch_sends_descriptive_user_agent` pins the exact header. Removing `.user_agent(USER_AGENT)` fails 10 `x_post_` tests (measured).
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Photo downloads (`pipeline/photos.rs`) keep the plain client: `pbs.twimg.com` returned 200 `image/jpeg` to a request with no User-Agent (measured from ripr).
+
+### Open questions
+- None.
