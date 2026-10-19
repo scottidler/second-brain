@@ -6,7 +6,7 @@ Branch: main
 
 Done: the claims judge is trusted. v0.18.1 is live on ripr and `judge_trust` reads `claude-sonnet-5|34|0.94` and `gemini-2.5-pro|34|0.97` on rubric `v3` (2026-10-18T22:17:45Z). The doc is Implemented. What is left is Scott's to decide, not to build:
 
-1. `sb borg eval --remediate` now shows `would-post 14`: 14 sources fail a trusted `judge-claims` verdict and `--apply` would re-distill them through the daemon. Nobody has run `--apply`. Ask Scott before doing so; it rewrites notes and spends LLM calls.
+1. Scott ordered `sb borg eval --remediate --apply` on 2026-10-18 and it ran on ripr: `posted 14  would-post 0  blocked (untrusted judge only) 119  not remediable 17`. `sb borg wait` drained the batch `cl-12f9bc97` in 242s, 14 succeeded, 0 failed. One receipt (`ht-88627403`, the Talos YouTube video) is `degraded`: the gemini YouTube engine returned HTTP 400 `Input blocked` from Gemini's filters, the yt-dlp fallback ran, and the distill itself completed with `fallback=none`. That degraded mark is the engine-fallback rule from `docs/design/2026-10-16-youtube-gemini-engine.md`, not a bad note. Log on ripr: `~/remediate-apply-v0.18.1.txt`. Nothing left to run here.
 2. The over-window acceptance bar missed on count (n 6 < 10, rate 0.83). If he wants the count, the next `--inject` needs `--sample` above 30 or more long sources in staging. Not a code change.
 3. Any hand run of `sb borg eval` over ssh on ripr needs `export PATH=/home/saidler/.local/bin:$PATH` first (fabric lives there; the systemd unit sets it, a plain ssh shell does not). The first Phase 3 run was void for exactly this (implementation notes, Phase 3).
 
