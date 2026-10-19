@@ -36,3 +36,17 @@
 - Vision-failure detection is "description empty after trim", not "raw response empty": `parse_vision_response` fills `description` from the first lines whenever the output is non-empty, so an empty description means the model returned no text.
 ### Open questions
 - An earlier mutation run of `x_post_fetch_error_fails_closed` (before the block-page stub hardening) published through the real ledger: it appended one row `| 2026-10-19 | 07:35 | cli | ✅ | [[x-thread]] | https://x.com/poster/status/100 | xp-closed |` to `~/.local/share/sb/borg/borg-ledger.md` (line 17) and created `~/.local/share/sb/borg/sources/xp-closed/` (`distilled.yml`, `transcript.md`). Removing them was denied by the auto-mode classifier; Scott should delete that ledger line and `rkvr rmrf` that directory.
+
+## Phase 3: Thread pattern framing
+### Design decisions
+- `distill-thread.md` now states two input shapes: the X shape (`# Post by`, optional `## Quoted post by`, `### Image N` with Description / Extracted Text / OCR Text, `# Article by`) and the Reddit / HN shape, whose OP-plus-comments framing is kept as written. Rules for `summary`, `claims` ordering and `post-count` got X-specific clauses (a quoted post is a post, never a reply; post-count is 1 or 2) (`borg/patterns/distill-thread.md`).
+- `-chunk.md` and `-reduce.md` carry a shorter version of the same framing, so chunked long X Articles attribute the same way.
+- The 3 X golden `source.md` files were regenerated from live `api.fxtwitter.com/status/<id>` JSON through `x::render` with an empty images slice, using a throwaway test appended to `borg/src/x/tests.rs` for one run and reverted (nothing committed, nothing under `docs/`).
+### Deviations
+- Fixture sources carry no image sections: two of the three posts (iximiuz, steipete) have a photo, and describing it needs Vision (Anthropic), which this phase was told not to call. The fixtures therefore render post text only.
+- `otto ci` was run with `GEMINI_API_KEY` unset (`env -u GEMINI_API_KEY otto ci`), so `bin/promptfoo-check` printed `NOT RUN: GEMINI_API_KEY is not set` instead of regenerating through the distiller (which calls Anthropic). It decided `running: differs from origin/main` for all three thread patterns. The grader has therefore not scored this pattern change.
+### Tradeoffs
+- Kept the three patterns in sync with short repeated paragraphs rather than a shared include: patterns are standalone prompts with no include mechanism.
+### Open questions
+- STALE, left untouched: each fixture's `distilled.yml` (the golden expected note, distilled from the old scrape; e.g. steipete and iximiuz say "no replies are shown", vllm says "positive engagement") and `capture-note.txt` (written from the old source; text still true of the posts). `distilled.yml` should be regenerated through the new patterns by someone willing to call the distiller (`sb borg eval --regenerate`), and `bin/promptfoo-check` run with GEMINI_API_KEY set.
+- Photo sections for the iximiuz and steipete fixtures are absent; add them when a Vision-enabled regenerate is acceptable.
