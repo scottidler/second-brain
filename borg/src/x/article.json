@@ -1,0 +1,119 @@
+{
+  "code": 200,
+  "message": "OK",
+  "tweet": {
+    "url": "https://x.com/UberEng/status/2106071967619322330",
+    "id": "2106071967619322330",
+    "text": "https://x.com/i/article/2106059544376066048",
+    "replies": 44,
+    "likes": 3139,
+    "views": 996066,
+    "author": {
+      "name": "Uber Engineering",
+      "screen_name": "UberEng"
+    },
+    "article": {
+      "title": "Designing MCP Gateway Uber's MCP Management Platform",
+      "content": {
+        "blocks": [
+          {
+            "type": "header-one",
+            "text": "Introduction"
+          },
+          {
+            "type": "unstyled",
+            "text": "Uber’s rapid adoption of AI agents has fundamentally changed how teams interact with code, data, and operational systems.  Early ad-hoc integrations with the MCP (Model Context Protocol) showed clear value: agents became dramatically more capable when they could access live business context, query internal services, and take meaningful actions on behalf of users. These early wins validated MCP as a powerful abstraction for building agentic systems inside Uber."
+          },
+          {
+            "type": "unstyled",
+            "text": "However, as adoption accelerated, significant challenges emerged. Individual teams independently built integrations, leading to fragmentation in tooling and duplicated infrastructure. MCP tools were hard to discover, difficult to operate reliably, and tightly coupled to specific services or agent implementations. While these approaches worked at a small scale, they didn’t meet Uber’s needs as hundreds of teams began exploring agentic workflows. Without a unified architecture, scaling MCP would increase operational complexity, security risk, and developer friction, ultimately limiting its impact."
+          },
+          {
+            "type": "unstyled",
+            "text": "To unlock MCP’s full potential at Uber’s scale, we needed a centralized, scalable solution to standardize how AI agents interact with existing back-end systems while preserving flexibility for teams. This solution needed to abstract protocol differences (HTTP, gRPC™, TChannel), enforce consistent security and observability guarantees, and make MCP tools easy to create, discover, and reuse across the company."
+          },
+          {
+            "type": "unstyled",
+            "text": "We built the MCP Gateway to address this need. It’s a foundational microservice that powers all MCP interactions at Uber, serving as an orchestration and routing layer between AI agents and existing back-end services and native MCP servers. By centralizing MCP logic into a single gateway, we provide a consistent execution model for agent-to-service interactions while eliminating the need for teams to reinvent core infrastructure. Existing APIs can be seamlessly exposed as MCP tools, governed and operated in one place, and consumed by multiple agents in a uniform way. MCP Gateway unlocked a scalable, fast, and consistent path to building AI agents within Uber and is currently hosting over 800 MCP servers and over 5000 tools."
+          },
+          {
+            "type": "atomic",
+            "text": " "
+          },
+          {
+            "type": "unstyled",
+            "text": "In this blog, we review the design of the MCP Gateway, covering the Proxy Layer (translation of MCP to existing protocols and back), Discovery Layer (MCP Registry and API crawling), and its control plane (authoring)."
+          },
+          {
+            "type": "header-two",
+            "text": "The Gateway"
+          },
+          {
+            "type": "unstyled",
+            "text": "MCP Gateway follows a microservice-based architecture, with the gateway acting as the central integration point between AI-enabled systems and Uber’s back-end services. The platform comprises two primary components: the MCP Registry, which serves as the control plane, and the Proxy Gateway, which forms the data plane."
+          },
+          {
+            "type": "unstyled",
+            "text": "The MCP Registry maintains a catalog of hundreds of MCP servers backed by internal services, along with thousands of MCP tools. These tools range from no-code definitions that expose existing APIs as MCP tools to fully native implementations built explicitly against the MCP specification. The registry provides a single source of truth for discovery, ownership, and enablement across the ecosystem."
+          },
+          {
+            "type": "unstyled",
+            "text": "The Proxy Gateway is responsible for executing MCP requests at runtime. It translates MCP protocol calls into HTTP, gRPC, or TChannel requests, forwards them to the appropriate back-end service, and converts the responses back into MCP-compatible results. This translation layer allows AI agents to interact with existing systems through a consistent MCP interface, without requiring changes to the underlying services."
+          },
+          {
+            "type": "header-two",
+            "text": "Control Plane"
+          },
+          {
+            "type": "unstyled",
+            "text": "Uber uses a microservice architecture and runs thousands of internal services that expose APIs over HTTP, gRPC, and TChannel. These APIs provide valuable context to an AI system, but asking teams to manually author an MCP server would be slow and painful. To solve this problem, we built AutoCrawler, which continuously scans Uber’s IDL registry for APIs, translates them, and updates them in the registry. It also queries native MCP servers and adds them to the registry."
+          },
+          {
+            "type": "unstyled",
+            "text": "AutoCrawler: Discovery Engine"
+          },
+          {
+            "type": "unstyled",
+            "text": "Autocrawler is a Cadence-powered distributed workflow system subscribed to Uber’s IDL registry and internal service signals. On a fixed schedule, a cron job triggers a Cadence workflow that scans for newly added services, APIs, and schema changes."
+          },
+          {
+            "type": "unstyled",
+            "text": "For every discovered entity, AutoCrawler is responsible for:"
+          },
+          {
+            "type": "unordered-list-item",
+            "text": "Creating or updating MCP server representations"
+          },
+          {
+            "type": "unordered-list-item",
+            "text": "Generating or fetching tool definitions and schemas"
+          },
+          {
+            "type": "unordered-list-item",
+            "text": "Registering tools in the MCP Registry in a disabled-by-default state"
+          },
+          {
+            "type": "unstyled",
+            "text": "This shared foundation enables MCP discovery to scale across thousands of services while keeping service teams off the critical path."
+          },
+          {
+            "type": "atomic",
+            "text": " "
+          },
+          {
+            "type": "unstyled",
+            "text": "Discovery for IDL-Backed Services"
+          },
+          {
+            "type": "unstyled",
+            "text": "For traditional back-end services defined through Protobuf or Thrift IDLs, AutoCrawler derives MCP servers and tools directly from the IDL Registry. For each service: API group, AutoCrawler performs the following steps:"
+          },
+          {
+            "type": "unordered-list-item",
+            "text": "Upsert MCP server: Creates or updates a virtual MCP server corresponding to the discovered service."
+          }
+        ]
+      }
+    }
+  }
+}

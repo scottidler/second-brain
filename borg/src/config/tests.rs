@@ -489,6 +489,7 @@ fn test_pipeline_config_defaults_for_split_fetch_timeouts() {
         "fabric -y: transcript fetch, 120s ceiling"
     );
     assert_eq!(p.markitdown_timeout_secs, 60, "markitdown fallback: 60s ceiling");
+    assert_eq!(p.fxtwitter_timeout_secs, 30);
 }
 
 #[test]
@@ -500,11 +501,13 @@ fn test_pipeline_config_split_fetch_timeouts_from_yaml() {
 fabric-url-timeout-secs: 45
 fabric-transcript-timeout-secs: 90
 markitdown-timeout-secs: 30
+fxtwitter-timeout-secs: 12
 ";
     let p: PipelineConfig = serde_yaml::from_str(yaml).expect("parse pipeline yaml");
     assert_eq!(p.fabric_url_timeout_secs, 45);
     assert_eq!(p.fabric_transcript_timeout_secs, 90);
     assert_eq!(p.markitdown_timeout_secs, 30);
+    assert_eq!(p.fxtwitter_timeout_secs, 12);
     // Other defaults are preserved (serde(default) on PipelineConfig).
     assert_eq!(p.hard_timeout_secs, 1800);
     assert_eq!(p.jina_timeout_secs, 60);

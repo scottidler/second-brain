@@ -401,6 +401,8 @@ pub struct PipelineConfig {
     pub yt_dlp_timeout_secs: u64,
     pub ocr_timeout_secs: u64,
     pub jina_timeout_secs: u64,
+    /// Bound on each fxtwitter API request and photo download made for an X post.
+    pub fxtwitter_timeout_secs: u64,
     pub fabric_url_timeout_secs: u64,
     pub fabric_transcript_timeout_secs: u64,
     pub markitdown_timeout_secs: u64,
@@ -432,6 +434,7 @@ impl Default for PipelineConfig {
             yt_dlp_timeout_secs: 600,
             ocr_timeout_secs: 60,
             jina_timeout_secs: 60,
+            fxtwitter_timeout_secs: 30,
             fabric_url_timeout_secs: DEFAULT_FABRIC_URL_TIMEOUT_SECS,
             fabric_transcript_timeout_secs: DEFAULT_FABRIC_TRANSCRIPT_TIMEOUT_SECS,
             markitdown_timeout_secs: DEFAULT_MARKITDOWN_TIMEOUT_SECS,

@@ -1,0 +1,37 @@
+{
+  "code": 200,
+  "message": "OK",
+  "tweet": {
+    "url": "https://x.com/VicVijayakumar/status/2112024357551931564",
+    "id": "2112024357551931564",
+    "text": "every single org is building this loop right now.\n\nif you're at a bigco, you will not be able to do the last step because of regulatory hurdles, but you can still dramatically speed up 90% of your sdlc",
+    "replies": 32,
+    "likes": 571,
+    "views": 53910,
+    "author": {
+      "name": "Vic 📠",
+      "screen_name": "VicVijayakumar"
+    },
+    "quote": {
+      "url": "https://x.com/boristane/status/2111966450311385154",
+      "id": "2111966450311385154",
+      "text": "the only sane code review loop",
+      "replies": 58,
+      "likes": 884,
+      "views": 98023,
+      "author": {
+        "name": "boris",
+        "screen_name": "boristane"
+      },
+      "media": {
+        "photos": [
+          {
+            "url": "https://pbs.twimg.com/media/HU82MggbAAAOOll.jpg?name=orig",
+            "width": 1038,
+            "height": 1460
+          }
+        ]
+      }
+    }
+  }
+}
