@@ -32,6 +32,7 @@ use atomic::{apply_original_date, apply_preserved_fields};
 use inflight::InflightGuard;
 
 mod handlers;
+mod photos;
 mod publish;
 pub(crate) mod session;
 mod tags;
@@ -741,11 +742,13 @@ async fn process_url_inner(
     // whose `Distilled.transcript` does not carry it: the repo README and the
     // thread markdown. Video and article leave it `None`.
     let mut archive_source_md: Option<String> = None;
-    let mut youtube_fell_back = false;
+    // The fetch landed but impoverished: the YouTube engine fell back, or an
+    // X post's photo was omitted or described from OCR alone.
+    let mut fetch_degraded = false;
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
-        youtube_fell_back = yt_result.fell_back;
+        fetch_degraded = yt_result.fell_back;
         let yt_title = yt_result.title;
         (
             yt_title.clone(),
@@ -809,7 +812,19 @@ async fn process_url_inner(
             },
             None => None,
         };
-        let (scraped_title, article_md, byline) = match readable_triple.or(hn_triple) {
+        // An X status URL is read from the fxtwitter API only. An `Err` fails
+        // the ingest (`fetch-failed`): the page-scrape fallback publishes the
+        // login wall and replies this path exists to remove.
+        let x_status = if is_thread { crate::x::status_id(&url_match.url) } else { None };
+        let x_triple = match x_status {
+            Some(status_id) => {
+                let post = process_x_post(&url_match.url, status_id, config, trace_id).await?;
+                fetch_degraded |= post.degraded;
+                Some((post.title, post.markdown, None))
+            }
+            None => None,
+        };
+        let (scraped_title, article_md, byline) = match readable_triple.or(hn_triple).or(x_triple) {
             Some(triple) => triple,
             None if use_fabric => match process_article_fabric(&url_match.url, config, trace_id).await {
                 Ok(triple) => triple,
@@ -1211,17 +1226,22 @@ async fn process_url_inner(
         trace_id: None,
         obsidian_url,
         failure_stage: None,
-        degraded: receipt_degraded(&distilled, tags_degraded, youtube_fell_back),
+        degraded: receipt_degraded(&distilled, tags_degraded, fetch_degraded),
     })
 }
 
 /// A URL receipt is degraded when the L2 distiller fell back, an enumeration
 /// fell short of its declared count (a resolved design decision), the tag
 /// classifier errored (tags-only design doc: "the receipt is degraded=true,
-/// and the note is still published"), OR the YouTube fetch came from the
-/// `youtube.fallback` engine (youtube-gemini-engine design doc).
-pub(crate) fn receipt_degraded(distilled: &vault::distilled::Distilled, tags_degraded: bool, fell_back: bool) -> bool {
-    distilled.meta.validation.is_degraded() || tags_degraded || fell_back
+/// and the note is still published"), OR the fetch degraded: the YouTube
+/// fetch came from the `youtube.fallback` engine (youtube-gemini-engine design
+/// doc) or an X post's photo degraded (x-post-fetcher design doc).
+pub(crate) fn receipt_degraded(
+    distilled: &vault::distilled::Distilled,
+    tags_degraded: bool,
+    fetch_degraded: bool,
+) -> bool {
+    distilled.meta.validation.is_degraded() || tags_degraded || fetch_degraded
 }
 
 /// Whether a file-based document is a PDF or a generic document (docx, pptx, etc.).

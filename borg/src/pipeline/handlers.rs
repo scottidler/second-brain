@@ -643,6 +643,65 @@ pub(crate) async fn process_hn_thread_from(
     Ok((title, thread_md, Some(crate::hackernews::CREATOR.to_string())))
 }
 
+/// An X post read from the fxtwitter API: the rendered markdown and title,
+/// and whether any photo degraded (omitted, or described from OCR alone
+/// because vision failed).
+pub(crate) struct FetchedPost {
+    pub(crate) title: String,
+    pub(crate) markdown: String,
+    pub(crate) degraded: bool,
+}
+
+/// Fetch an X post through the fxtwitter API and describe its photos. Every
+/// `Err` fails the ingest (`fetch-failed`); the caller never falls back to the
+/// page scrape. Persisted to staging as `extractor: fxtwitter-api`.
+pub(crate) async fn process_x_post(url: &str, status_id: u64, config: &Config, trace_id: &str) -> Result<FetchedPost> {
+    let api_base = crate::x::api_base()?;
+    process_x_post_from(&api_base, ocr::ocr_extract, url, status_id, config, trace_id).await
+}
+
+/// `process_x_post` against an explicit API base and OCR reader, so a test
+/// can serve both. A post with no text whose photos all failed is an `Err`:
+/// on a reingest an empty note must never replace a useful one.
+pub(crate) async fn process_x_post_from(
+    api_base: &str,
+    ocr: super::photos::OcrFn,
+    url: &str,
+    status_id: u64,
+    config: &Config,
+    trace_id: &str,
+) -> Result<FetchedPost> {
+    log::debug!("process_x_post[{trace_id}]: url={url} status_id={status_id}");
+    let post = crate::x::fetch_post(api_base, status_id, config.pipeline.fxtwitter_timeout_secs).await?;
+    let (images, degraded) = super::photos::describe_x_photos(&post, config, ocr, trace_id).await;
+    if images.is_empty() && !crate::x::has_text(&post) {
+        eyre::bail!("X post {status_id} has no text and no photo could be described");
+    }
+    let (title, markdown) = crate::x::render(&post, &images);
+    if let Err(e) = crate::stages::raw::persist_fetched_if_staging(
+        config,
+        trace_id,
+        url,
+        markdown.as_bytes(),
+        crate::x::EXTRACTOR,
+        200,
+        Some("text/markdown"),
+    ) {
+        log::warn!("[{trace_id}] persist_fetched ({}) failed: {e:#}", crate::x::EXTRACTOR);
+    }
+    crate::stages::raw::run_gate_1(config, trace_id, url, markdown.as_bytes(), 200)?;
+    log::debug!(
+        "process_x_post[{trace_id}]: images={} degraded={degraded} md_len={}",
+        images.len(),
+        markdown.len()
+    );
+    Ok(FetchedPost {
+        title,
+        markdown,
+        degraded,
+    })
+}
+
 pub(crate) async fn process_article_jina(
     url: &str,
     config: &Config,
@@ -791,28 +850,10 @@ pub(crate) async fn process_image_inner(
             }
         });
 
-    // Merge extracted text: vision preferred over tesseract
-    let extracted_text = vision
-        .as_ref()
-        .and_then(|v| (!v.extracted_text.is_empty()).then_some(v.extracted_text.clone()))
-        .unwrap_or_else(|| ocr_text.clone());
-
-    // Build the Vision+OCR concat that becomes the
-    // distiller's input AND the verbatim `## Transcript` archive in the
-    // published note.
-    let image_transcript = {
-        let mut parts = Vec::new();
-        if let Some(ref v) = vision
-            && !v.description.is_empty()
-        {
-            parts.push(format!("## Description\n\n{}", v.description));
-        }
-        if !extracted_text.is_empty() {
-            let label = if vision.is_some() { "Extracted Text" } else { "OCR Text" };
-            parts.push(format!("## {label}\n\n{extracted_text}"));
-        }
-        parts.join("\n\n")
-    };
+    // The Vision+OCR concat that becomes the distiller's input AND the
+    // verbatim `## Transcript` archive in the published note. The same builder
+    // describes an X post's photos, so the two cannot drift.
+    let image_transcript = super::photos::image_section(vision.as_ref(), &ocr_text, "##");
 
     let distilled = crate::stages::distill::distill_for_publish_image(
         &config.fabric,

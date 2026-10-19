@@ -153,6 +153,44 @@ pub async fn fetch_post(api_base: &str, id: u64, timeout_secs: u64) -> Result<Po
     Ok(post)
 }
 
+/// Each photo on the post, then each on its quoted post, with its owner.
+pub fn photos(post: &Post) -> Vec<(Owner, &Photo)> {
+    let own = post.media.iter().flat_map(|m| &m.photos).map(|p| (Owner::Post, p));
+    let quoted = post
+        .quote
+        .iter()
+        .flat_map(|q| q.media.iter().flat_map(|m| &m.photos))
+        .map(|p| (Owner::Quote, p));
+    own.chain(quoted).collect()
+}
+
+/// Whether the post, its quote, or its X Article blocks carry text the note
+/// can be built from. A bare Article link is not text, matching [`render`].
+pub fn has_text(post: &Post) -> bool {
+    let own = post.text.trim();
+    let own_text = !own.is_empty() && !(post.article.is_some() && is_bare_article_link(own));
+    let quote_text = post.quote.as_ref().is_some_and(|q| !q.text.trim().is_empty());
+    let article_text = post
+        .article
+        .as_ref()
+        .and_then(|a| a.content.as_ref())
+        .is_some_and(|c| !render_blocks(&c.blocks).is_empty());
+    own_text || quote_text || article_text
+}
+
+/// The fxtwitter root the ingest path reads: [`API_BASE`] in a build.
+#[cfg(not(test))]
+pub(crate) fn api_base() -> Result<String> {
+    Ok(API_BASE.to_string())
+}
+
+/// Tests reach only the stub named by [`bases::scope`]; outside one the
+/// ingest path fails instead of calling fxtwitter.
+#[cfg(test)]
+pub(crate) fn api_base() -> Result<String> {
+    bases::current()
+}
+
 /// Render a post as `(title, markdown)`: the post (or Article), its quoted
 /// post one level deep, and each described photo under its owner. The title
 /// is `@<handle> on X`.
@@ -247,6 +285,9 @@ fn render_blocks(blocks: &[Block]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+pub(crate) mod bases;
 
 #[cfg(test)]
 mod tests;

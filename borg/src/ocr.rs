@@ -171,7 +171,7 @@ async fn vision_call(
     let _permit = acquire_vision_permit().await;
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(format!("{}/v1/messages", messages_base()?))
         .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json")
@@ -196,6 +196,19 @@ async fn vision_call(
         .to_string();
 
     Ok(output)
+}
+
+/// The Anthropic API root every vision call posts `/v1/messages` under.
+#[cfg(not(test))]
+fn messages_base() -> Result<String> {
+    Ok("https://api.anthropic.com".to_string())
+}
+
+/// Tests reach only the stub named by [`bases::scope`]; outside one a vision
+/// call fails instead of calling Anthropic.
+#[cfg(test)]
+fn messages_base() -> Result<String> {
+    bases::current()
 }
 
 /// Extract text and describe an image using the Claude Vision API directly.
@@ -328,6 +341,9 @@ pub fn mime_from_extension(filename: &str) -> String {
     }
     .to_string()
 }
+
+#[cfg(test)]
+pub(crate) mod bases;
 
 #[cfg(test)]
 mod tests;

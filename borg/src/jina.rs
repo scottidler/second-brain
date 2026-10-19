@@ -38,7 +38,7 @@ pub async fn fetch_article_markdown(
 async fn jina_fetch(url: &str, timeout_secs: u64) -> Result<String> {
     let client =
         vault::http::client(Duration::from_secs(timeout_secs)).context("Failed to build Jina reqwest client")?;
-    let jina_url = format!("https://r.jina.ai/{url}");
+    let jina_url = format!("{}/{url}", reader_base()?);
 
     let response = client
         .get(&jina_url)
@@ -60,6 +60,22 @@ async fn jina_fetch(url: &str, timeout_secs: u64) -> Result<String> {
         .await
         .context("Failed to read Jina Reader response body")
 }
+
+/// The Jina Reader root; the article URL is appended as the path.
+#[cfg(not(test))]
+fn reader_base() -> Result<String> {
+    Ok("https://r.jina.ai".to_string())
+}
+
+/// Tests reach only the stub named by [`bases::scope`]; outside one a Jina
+/// fetch fails instead of calling r.jina.ai.
+#[cfg(test)]
+fn reader_base() -> Result<String> {
+    bases::current()
+}
+
+#[cfg(test)]
+pub(crate) mod bases;
 
 #[cfg(test)]
 mod tests;

@@ -255,3 +255,37 @@ async fn x_post_title_passes_quality_gate() {
         assert_eq!(crate::quality::detect_blocked_content(&md, &title), None, "{title}");
     }
 }
+
+#[tokio::test]
+async fn x_post_photos_are_post_then_quote() {
+    let post = fetch_fixture(VIC).await.expect("fetch");
+    let photos = photos(&post);
+    assert_eq!(photos.len(), 1, "vic's only photo is on the quoted post");
+    assert_eq!(photos[0].0, Owner::Quote);
+    assert!(photos[0].1.url.starts_with("https://pbs.twimg.com/media/"));
+}
+
+#[tokio::test]
+async fn x_post_has_text_reads_post_quote_and_article() {
+    for fixture in [VIC, LONG, ARTICLE] {
+        let post = fetch_fixture(fixture).await.expect("fetch");
+        assert!(has_text(&post));
+    }
+    let mut post = fetch_fixture(VIC).await.expect("fetch");
+    post.text = "  ".to_string();
+    assert!(has_text(&post), "the quote's text still counts");
+    if let Some(quote) = post.quote.as_mut() {
+        quote.text = String::new();
+    }
+    assert!(!has_text(&post), "no post, quote or article text");
+}
+
+#[tokio::test]
+async fn x_post_bare_article_link_with_no_blocks_has_no_text() {
+    let mut post = fetch_fixture(ARTICLE).await.expect("fetch");
+    post.text = "https://x.com/i/article/123".to_string();
+    if let Some(article) = post.article.as_mut() {
+        article.content = None;
+    }
+    assert!(!has_text(&post));
+}
