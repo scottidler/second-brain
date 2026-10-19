@@ -115,3 +115,17 @@
 
 ### Open questions
 - Correction to the User-Agent section: removing `.user_agent(USER_AGENT)` fails 15 of 26 `x_post_` tests (the panel's count, every fetch-backed test), not 10. The earlier count came from a filtered output that cut off at 10 lines.
+
+## Acceptance Criterion 4 amendment (rollout, v0.18.3)
+
+### Design decisions
+- None.
+
+### Deviations
+- Criterion 4's quoted-author check amended (Scott chose option A): `quot(ed|es|ing).{0,40}boristane|boristane.{0,40}quot` -> `\(@boristane\)`. Doc defect, not an implementation failure: the check tested for the word "quoted", while its stated intent is "boris is the quoted author, not a reply". Evidence, the v0.18.3 vic note on ripr (trace `cl-511c454e`): Summary "Vic Vijayakumar reacts to boris's flowchart", two claims tagged `(@boristane)`, `cortex-thread-post-count: 2`; old check exit 1, new check exit 0; `staysaasy|nkohari` exit 1; `repl(y|ies|ied|ying)` exit 1; `self-verif` exit 0.
+
+### Tradeoffs
+- Amend the check vs. push the thread pattern to say "quoted post" in the Summary: the attribution is already right, so a pattern change would only move wording, at the cost of another release and reingest.
+
+### Open questions
+- None.

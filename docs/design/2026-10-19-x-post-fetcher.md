@@ -281,7 +281,8 @@ V=$(fd -t f 'vicvijayakumar-on-x' notes inbox); test -n "$V" || echo "BAD CORPUS
   - Observed on main: exits 0 (34 of 34 match)
 - [ ] 4. The vic note carries the diagram and the right attribution, and no replies:
   - `rg -q -i 'self-verif' $V` exits 0 (the diagram reached Summary or Claims)
-  - `rg -q -i 'quot(ed|es|ing).{0,40}boristane|boristane.{0,40}quot' $V` exits 0 (boris is the quoted author)
+  - `rg -q '\(@boristane\)' $V` exits 0 (boris is credited as the author of his own post's claims; the two reply checks below prove he is not framed as a reply)
+    - Amended 2026-10-19 (Scott, option A): the original check `quot(ed|es|ing).{0,40}boristane|boristane.{0,40}quot` tested a word, not the attribution. The v0.18.3 vic note (trace `cl-511c454e`) credits boris correctly ("reacts to boris's flowchart", claims tagged `(@boristane)`, no reply framing) and failed it.
   - `rg -q 'staysaasy|nkohari' $V` exits 1
   - `rg -q -i 'repl(y|ies|ied|ying)' $V` exits 1
   - Observed on main: `self-verif` exits 1; quoted-boristane exits 1; `staysaasy|nkohari` exits 0; `repl(...)` exits 0
