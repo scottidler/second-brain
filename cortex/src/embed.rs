@@ -903,11 +903,11 @@ fn process_transcript_batch(
     let mut examined: Vec<(String, i64)> = Vec::new();
     for t in &targets {
         stats.scanned += 1;
-        // Video/Youtube/Article transcripts live in the staged distilled.yml
-        // (resolved via notes.trace), NOT the note body — those notes no longer
-        // render a `## Transcript` section (2026-07-07-distillation-output-restore).
-        // The verbatim-preservation kinds (Image/Audio/Note/Vocab) and
-        // threads (Social/Reddit) keep their in-note `## Transcript` section.
+        // Video/Youtube/Article (2026-07-07-distillation-output-restore) and
+        // Social/Reddit (2026-10-19-x-post-fetcher) transcripts live in the
+        // staged distilled.yml (resolved via notes.trace), NOT the note body.
+        // The verbatim-preservation kinds (Image/Audio/Note/Vocab) keep their
+        // in-note `## Transcript` section.
         let from_staging = NoteType::from_str(&t.note_type)
             .map(|nt| nt.transcript_from_staging())
             .unwrap_or(false);

@@ -164,18 +164,11 @@ pub fn photos(post: &Post) -> Vec<(Owner, &Photo)> {
     own.chain(quoted).collect()
 }
 
-/// Whether the post, its quote, or its X Article blocks carry text the note
-/// can be built from. A bare Article link is not text, matching [`render`].
+/// Whether the post or its quote (each with any X Article blocks) carries
+/// text the note can be built from. A bare Article link is not text,
+/// matching [`render`].
 pub fn has_text(post: &Post) -> bool {
-    let own = post.text.trim();
-    let own_text = !own.is_empty() && !(post.article.is_some() && is_bare_article_link(own));
-    let quote_text = post.quote.as_ref().is_some_and(|q| !q.text.trim().is_empty());
-    let article_text = post
-        .article
-        .as_ref()
-        .and_then(|a| a.content.as_ref())
-        .is_some_and(|c| !render_blocks(&c.blocks).is_empty());
-    own_text || quote_text || article_text
+    !body(post).is_empty() || post.quote.as_ref().is_some_and(|q| !body(q).is_empty())
 }
 
 /// The fxtwitter root the ingest path reads: [`API_BASE`] in a build.
@@ -196,36 +189,44 @@ pub(crate) fn api_base() -> Result<String> {
 /// is `@<handle> on X`.
 pub fn render(post: &Post, images: &[DescribedImage]) -> (String, String) {
     let title = format!("@{} on X", post.author.screen_name);
-    let mut out = String::new();
-    match &post.article {
-        Some(article) => {
-            let heading = article.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-            out.push_str(&format!("# Article by {}", byline(&post.author)));
-            if let Some(heading) = heading {
-                out.push_str(&format!(": {heading}"));
-            }
-            out.push_str("\n\n");
-            let text = post.text.trim();
-            if !text.is_empty() && !is_bare_article_link(text) {
-                out.push_str(text);
-                out.push_str("\n\n");
-            }
-            if let Some(content) = &article.content {
-                out.push_str(&render_blocks(&content.blocks));
-            }
-        }
-        None => {
-            out.push_str(&format!("# Post by {}\n\n", byline(&post.author)));
-            push_paragraph(&mut out, &post.text);
-        }
-    }
+    let mut out = format!("# {}\n\n", heading(post, "Post", "Article"));
+    push_paragraph(&mut out, &body(post));
     push_images(&mut out, images, Owner::Post, &post.author.screen_name);
     if let Some(quote) = &post.quote {
-        out.push_str(&format!("## Quoted post by {}\n\n", byline(&quote.author)));
-        push_paragraph(&mut out, &quote.text);
+        out.push_str(&format!("## {}\n\n", heading(quote, "Quoted post", "Quoted article")));
+        push_paragraph(&mut out, &body(quote));
         push_images(&mut out, images, Owner::Quote, &quote.author.screen_name);
     }
     (title, out.trim_end().to_string() + "\n")
+}
+
+/// `<Post|Article> by <name> (@handle)`, with an Article's title appended.
+fn heading(post: &Post, post_label: &str, article_label: &str) -> String {
+    match &post.article {
+        Some(article) => {
+            let mut line = format!("{article_label} by {}", byline(&post.author));
+            if let Some(title) = article.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                line.push_str(&format!(": {title}"));
+            }
+            line
+        }
+        None => format!("{post_label} by {}", byline(&post.author)),
+    }
+}
+
+/// A post's text, then its X Article blocks. A bare Article link is dropped:
+/// the blocks carry the Article.
+fn body(post: &Post) -> String {
+    let text = post.text.trim();
+    let mut out = String::new();
+    if !text.is_empty() && !(post.article.is_some() && is_bare_article_link(text)) {
+        out.push_str(text);
+        out.push_str("\n\n");
+    }
+    if let Some(content) = post.article.as_ref().and_then(|a| a.content.as_ref()) {
+        out.push_str(&render_blocks(&content.blocks));
+    }
+    out.trim_end().to_string()
 }
 
 fn byline(author: &Author) -> String {

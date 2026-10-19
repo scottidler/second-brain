@@ -83,16 +83,17 @@ fn cutoff() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-/// Video+Article scope: [`NoteType::transcript_from_staging`] is the exact
-/// set (Youtube/Video/Article) whose transcript moved out of the note body in
-/// this design -- the same seam the embed re-point keys on. Imported,
-/// never hardcoded, so this sweep can't drift from the schema.
+/// Video+Article scope: the Youtube/Video/Article set whose transcript moved
+/// out of the note body in this design. Pinned here, not read from
+/// [`NoteType::transcript_from_staging`]: the x-post-fetcher design widened that
+/// seam to Social/Reddit, whose old notes have no staged or archived
+/// transcript to fall back on, so following the seam would strip their only copy.
 fn in_scope_kind(note: &Note) -> bool {
     note.frontmatter
         .note_type
         .as_deref()
         .and_then(|s| s.parse::<NoteType>().ok())
-        .is_some_and(|nt| nt.transcript_from_staging())
+        .is_some_and(|nt| matches!(nt, NoteType::Youtube | NoteType::Video | NoteType::Article))
 }
 
 /// Locate the byte offset where a `## Transcript` heading LINE begins, if

@@ -66,3 +66,21 @@
 ### Open questions
 - `bin/strip-transcripts` scopes itself by `transcript_from_staging`, so its sweep now also covers Social/Reddit notes if re-run. It is a one-off tool; confirm that is acceptable or that it should not be re-run.
 - Rollout steps 4-6 (reingest of the 34 X notes after the release carrying this phase, Acceptance Criteria 3 and 5 on ripr) are post-release and not executed here.
+
+## Implementation audit fold-in (panel round 1, synthesis `~/.cache/review-panel/runs/CvpeNwww/synthesis.md`)
+
+### Design decisions
+- Quoted X Article renders its blocks (`borg/src/x.rs`: `render`, `heading`, `body`): the quote now goes through the same `body()` as the post, under `## Quoted article by <name> (@handle): <title>`. `has_text` checks `body()` for both, so a post whose only content is a quoted Article is no longer rejected. Test: `x_post_renders_quoted_article_blocks`. Audit finding: Phase 1 rendered only `quote.text`, dropping a quoted Article's body.
+- `bin/strip-transcripts` scope pinned to Youtube/Video/Article (`bin/strip-transcripts/src/lib.rs`: `in_scope_kind`) instead of following `NoteType::transcript_from_staging`. The panel measured that HEAD stripped a `type: social` note's transcript to EOF while v0.18.1 left it alone; 25 of 34 X notes have no staging or archive, so a re-run before the reingest would destroy their only transcript copy. `in_scope_kind_covers_youtube_video_article_only` now asserts social and reddit are out of scope.
+
+### Deviations
+- Supersedes Phase 4's "Deviations: None": stale thread-keeps-transcript comments remained at `borg/src/pipeline.rs` (transcript-emission policy), `cortex/src/embed.rs` (embed source comment), `distillers/src/render/tests.rs` (`site1_url_publish_policy_per_kind`). Fixed here.
+
+### Tradeoffs
+- Pinning strip-transcripts' kind set vs. adding an archive check to it: the tool is a one-shot for the 2026-07-07 design; pinning restores its original behavior exactly, an archive check would be new behavior on a tool meant never to run again.
+
+### Open questions
+- Supersedes Phase 3's remedy for the stale `config/eval/distill-fixtures/thread/x-com-*/distilled.yml` goldens: `sb borg eval --regenerate` grades in memory and writes nothing (`borg/src/eval/regenerate.rs`), so it does not refresh them. They stay stale until rewritten by hand or by a new tool.
+- Deferred by the panel, for Scott: `cortex/src/summarize.rs:335` backfill always writes the transcript into the note, while cortex now reads Social/Reddit transcripts only from staging (same as Article since 2026-07-07). Affects the one trace-less Reddit note and X notes until reingested.
+- Deferred by the panel, for Scott: `pipeline.fxtwitter-timeout-secs` is absent from `config/templates/borg.yml.example` (as is `jina-timeout-secs`).
+- The changed thread patterns were never scored by `bin/promptfoo-check` (`otto ci` ran with `GEMINI_API_KEY` unset); no HN regression check exists for them.

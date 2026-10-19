@@ -45,6 +45,8 @@ fn in_scope_kind_covers_youtube_video_article_only() {
     assert!(in_scope_kind(&note_with("article", None, "")));
     assert!(!in_scope_kind(&note_with("note", None, "")));
     assert!(!in_scope_kind(&note_with("github", None, "")));
+    assert!(!in_scope_kind(&note_with("social", None, "")));
+    assert!(!in_scope_kind(&note_with("reddit", None, "")));
 }
 
 #[test]

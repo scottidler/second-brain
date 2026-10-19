@@ -289,3 +289,23 @@ async fn x_post_bare_article_link_with_no_blocks_has_no_text() {
     }
     assert!(!has_text(&post));
 }
+
+#[tokio::test]
+async fn x_post_renders_quoted_article_blocks() {
+    let mut post = fetch_fixture(VIC).await.expect("fetch");
+    let article = fetch_fixture(ARTICLE).await.expect("fetch");
+    post.text = String::new();
+    post.quote = Some(Box::new(article));
+
+    assert!(has_text(&post), "a quoted Article's blocks count as text");
+    let (_, md) = render(&post, &[]);
+    assert!(
+        md.contains("## Quoted article by Uber Engineering (@UberEng): Designing MCP Gateway"),
+        "{md}"
+    );
+    assert!(
+        md.contains("MCP Gateway follows a microservice-based architecture"),
+        "{md}"
+    );
+    assert!(!md.contains("x.com/i/article"), "bare article link leaked:\n{md}");
+}

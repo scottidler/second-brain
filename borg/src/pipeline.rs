@@ -983,10 +983,9 @@ async fn process_url_inner(
     let filename_stub = hygiene::note_filename(&title, trace_id);
     let vault_root_resolved: PathBuf = config.vault_root()?;
     // Transcript-emission policy (distillation-output-restore). Every
-    // URL kind renders here: Video, Repo, and Article publish transcript-free
-    // (the verbatim text lives in the staged `distilled.yml` and is embedded
-    // from there), while Thread is a verbatim-preservation kind that keeps its
-    // in-note `## Transcript`. The choice is a typed policy keyed on the
+    // URL kind renders here, and every one publishes transcript-free: Video,
+    // Repo, Article, and Thread (x-post-fetcher) keep the verbatim text in the
+    // staged `distilled.yml` and embed it from there. The choice is a typed policy keyed on the
     // `KindPayload` seam, not on any extractor string.
     let rendered_distilled = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
     let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {

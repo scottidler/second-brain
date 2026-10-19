@@ -807,7 +807,7 @@ fn transcript_distilled(kind: Option<KindPayload>) -> Distilled {
 
 #[test]
 fn site1_url_publish_policy_per_kind() {
-    // pipeline.rs URL site: Thread keeps the transcript; Video/Repo/Article drop it.
+    // pipeline.rs URL site: every URL kind (Video/Repo/Article/Thread) drops it.
     let video = transcript_distilled(Some(KindPayload::Video(VideoPayload::default())));
     assert!(
         !RenderOptions::for_url_publish(&video).include_transcript,
