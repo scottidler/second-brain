@@ -110,15 +110,15 @@ pub struct Distilled {
     /// FIELD invariant (regression-guarded; do NOT revert to `None`): every
     /// distiller with source text keeps populating this field. The staged
     /// `distilled.yml` carries it as the durable record and the embedding
-    /// source; for Video/Article, cortex embeds transcript chunks by reading
-    /// this out of staging via the `notes.trace` join.
+    /// source; for Video/Article/Thread, cortex embeds transcript chunks by
+    /// reading this out of staging via the `notes.trace` join.
     ///
     /// RENDER, by contrast, is caller-gated
     /// (distillation-output-restore): `distillers::render` emits a `## Transcript`
     /// body section only when `RenderOptions.include_transcript` is set. The
-    /// verbatim kinds (VoiceNote/Idea/Vocabulary/Image/Thread) and cortex
-    /// summarize backfill set it; Video and Article publish do NOT. So a
-    /// video/article note carries this field `Some(...)` with no `## Transcript`
+    /// verbatim kinds (VoiceNote/Idea/Vocabulary/Image) and cortex summarize
+    /// backfill set it; Video, Article, and Thread publish do NOT. So a
+    /// video/article/thread note carries this field `Some(...)` with no `## Transcript`
     /// section, and that is correct by design — the verbatim text lives in
     /// staging, not the vault body. When present the section is indexed via the
     /// existing FTS5 `body` column (no new schema column required).

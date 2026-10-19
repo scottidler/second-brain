@@ -174,7 +174,7 @@ pub fn photos(post: &Post) -> Vec<(Owner, &Photo)> {
 /// text the note can be built from. A bare Article link is not text,
 /// matching [`render`].
 pub fn has_text(post: &Post) -> bool {
-    !body(post).is_empty() || post.quote.as_ref().is_some_and(|q| !body(q).is_empty())
+    !body(post, 2).is_empty() || post.quote.as_ref().is_some_and(|q| !body(q, 3).is_empty())
 }
 
 /// The fxtwitter root the ingest path reads: [`API_BASE`] in a build.
@@ -196,11 +196,11 @@ pub(crate) fn api_base() -> Result<String> {
 pub fn render(post: &Post, images: &[DescribedImage]) -> (String, String) {
     let title = format!("@{} on X", post.author.screen_name);
     let mut out = format!("# {}\n\n", heading(post, "Post", "Article"));
-    push_paragraph(&mut out, &body(post));
+    push_paragraph(&mut out, &body(post, 2));
     push_images(&mut out, images, Owner::Post, &post.author.screen_name);
     if let Some(quote) = &post.quote {
         out.push_str(&format!("## {}\n\n", heading(quote, "Quoted post", "Quoted article")));
-        push_paragraph(&mut out, &body(quote));
+        push_paragraph(&mut out, &body(quote, 3));
         push_images(&mut out, images, Owner::Quote, &quote.author.screen_name);
     }
     (title, out.trim_end().to_string() + "\n")
@@ -220,9 +220,10 @@ fn heading(post: &Post, post_label: &str, article_label: &str) -> String {
     }
 }
 
-/// A post's text, then its X Article blocks. A bare Article link is dropped:
-/// the blocks carry the Article.
-fn body(post: &Post) -> String {
+/// A post's text, then its X Article blocks with their top headings at
+/// `level` (`##` under the post, `###` under a quoted post). A bare Article
+/// link is dropped: the blocks carry the Article.
+fn body(post: &Post, level: usize) -> String {
     let text = post.text.trim();
     let mut out = String::new();
     if !text.is_empty() && !(post.article.is_some() && is_bare_article_link(text)) {
@@ -230,7 +231,7 @@ fn body(post: &Post) -> String {
         out.push_str("\n\n");
     }
     if let Some(content) = post.article.as_ref().and_then(|a| a.content.as_ref()) {
-        out.push_str(&render_blocks(&content.blocks));
+        out.push_str(&render_blocks(&content.blocks, level));
     }
     out.trim_end().to_string()
 }
@@ -259,9 +260,12 @@ fn push_images(out: &mut String, images: &[DescribedImage], owner: Owner, handle
     }
 }
 
-/// Draft.js blocks as markdown. `atomic` blocks (embedded media placeholders)
-/// and empty blocks are dropped.
-fn render_blocks(blocks: &[Block]) -> String {
+/// Draft.js blocks as markdown, `header-one`/`-two` at `level` and deeper
+/// headers one below. `atomic` blocks (embedded media placeholders) and empty
+/// blocks are dropped.
+fn render_blocks(blocks: &[Block], level: usize) -> String {
+    let top = "#".repeat(level);
+    let sub = "#".repeat(level + 1);
     let mut out = String::new();
     let mut ordinal = 0;
     let mut previous_kind = "";
@@ -272,8 +276,8 @@ fn render_blocks(blocks: &[Block]) -> String {
         }
         ordinal = if block.kind == "ordered-list-item" { ordinal + 1 } else { 0 };
         let line = match block.kind.as_str() {
-            "header-one" | "header-two" => format!("## {text}"),
-            "header-three" | "header-four" | "header-five" | "header-six" => format!("### {text}"),
+            "header-one" | "header-two" => format!("{top} {text}"),
+            "header-three" | "header-four" | "header-five" | "header-six" => format!("{sub} {text}"),
             "unordered-list-item" => format!("- {text}"),
             "ordered-list-item" => format!("{ordinal}. {text}"),
             "blockquote" => format!("> {text}"),

@@ -370,9 +370,9 @@ fn process_transcript_batch_expired_staged_file_degrades_to_sentinel_skip() {
 
 #[test]
 fn process_transcript_batch_verbatim_kind_still_reads_in_note_section() {
-    // Verbatim-preservation kinds (Image/Audio/Note/Vocab) and threads
-    // (Social/Reddit) keep the in-note ## Transcript section as their embedding
-    // source -- the re-point touches only Video/Youtube/Article. This proves
+    // Verbatim-preservation kinds (Image/Audio/Note/Vocab) keep the in-note
+    // ## Transcript section as their embedding source -- the re-point touches
+    // only Video/Youtube/Article/Social/Reddit. This proves
     // the unchanged path: an `audio` note (VoiceNote) with an in-note transcript
     // and NO staged file still embeds from the body.
     let mut index = SearchIndex::open_memory().expect("open");

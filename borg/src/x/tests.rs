@@ -128,15 +128,18 @@ fn x_post_article_drops_atomic_and_empty_blocks_and_numbers_lists() {
         kind: kind.to_string(),
         text: text.to_string(),
     };
-    let md = render_blocks(&[
-        block("unstyled", "before"),
-        block("atomic", " "),
-        block("unstyled", "   "),
-        block("ordered-list-item", "first"),
-        block("ordered-list-item", "second"),
-        block("unstyled", "after"),
-        block("ordered-list-item", "restart"),
-    ]);
+    let md = render_blocks(
+        &[
+            block("unstyled", "before"),
+            block("atomic", " "),
+            block("unstyled", "   "),
+            block("ordered-list-item", "first"),
+            block("ordered-list-item", "second"),
+            block("unstyled", "after"),
+            block("ordered-list-item", "restart"),
+        ],
+        2,
+    );
     assert_eq!(md, "before\n\n1. first\n2. second\n\nafter\n\n1. restart\n\n");
 }
 
@@ -312,6 +315,21 @@ async fn x_post_renders_quoted_article_blocks() {
         "{md}"
     );
     assert!(!md.contains("x.com/i/article"), "bare article link leaked:\n{md}");
+    assert!(
+        md.contains("\n### Introduction\n"),
+        "quoted Article headings nest under the quote:\n{md}"
+    );
+    assert!(!md.contains("\n## Introduction\n"), "{md}");
+}
+
+#[tokio::test]
+async fn x_post_quote_with_empty_text_and_article_blocks_has_text() {
+    let mut post = fetch_fixture(VIC).await.expect("fetch");
+    let mut article = fetch_fixture(ARTICLE).await.expect("fetch");
+    article.text = String::new();
+    post.text = String::new();
+    post.quote = Some(Box::new(article));
+    assert!(has_text(&post), "a quote with no text but Article blocks is content");
 }
 
 #[tokio::test]

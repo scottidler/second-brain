@@ -265,7 +265,7 @@ impl<F: FabricCaller + Clone> ArticleDistiller<F> {
             // Articles are the lossiest kind past the 60-day staging
             // retention (an 8K-word essay collapsing to a ≤2000-char summary +
             // a URL that may rot). Keep the fetched markdown verbatim in-note
-            // under `## Transcript`, mirroring video/voicenote/thread; this
+            // under `## Transcript`, mirroring voicenote; this
             // restores FTS + (with the `transcript_eligible()` amendment)
             // embedding reach for the whole article class.
             transcript: article_transcript(transcript),

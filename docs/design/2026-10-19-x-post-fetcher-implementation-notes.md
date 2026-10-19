@@ -99,3 +99,19 @@
 
 ### Open questions
 - None.
+
+## Panel round 2 fold-in (synthesis `~/.cache/review-panel/runs/CvpeNwww/synthesis.md`)
+
+### Design decisions
+- Quoted X Article headings nest under the quote (`borg/src/x.rs`: `body(post, level)`, `render_blocks(blocks, level)`): `header-one`/`-two` render at `##` under the post and `###` under `## Quoted article by`, deeper headers one below. The panel listed this as a defer; folded in because it is a two-argument change and deferral is Scott's call.
+- New test `x_post_quote_with_empty_text_and_article_blocks_has_text`: the case 25169d3 fixed (quote text empty, Article blocks present: old `has_text` false, new true). The panel showed `x_post_renders_quoted_article_blocks` still passed with the old `has_text`, because the fixture's quote text is a bare Article link the old check already counted. Reverting `has_text` and the heading level now fails both tests (measured).
+
+### Deviations
+- Undisclosed in 25169d3, disclosed here: a quote whose text is a bare Article link with no blocks went from `has_text` true (link rendered) to false, so an image-less post of that shape now fails `fetch-failed`. It matches the top-level bare-link rule (a bare link is not content).
+- Stale thread-keeps-transcript comments the first fold-in missed: `cortex/src/embed/tests.rs` (`process_transcript_batch_verbatim_kind_still_reads_in_note_section`), `vault/src/distilled.rs` (`transcript` field doc), `distillers/src/article.rs` (transcript comment). Fixed.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- Correction to the User-Agent section: removing `.user_agent(USER_AGENT)` fails 15 of 26 `x_post_` tests (the panel's count, every fetch-backed test), not 10. The earlier count came from a filtered output that cut off at 10 lines.
