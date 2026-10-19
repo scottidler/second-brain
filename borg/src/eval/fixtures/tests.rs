@@ -180,13 +180,13 @@ fn render_options_video_article_repo_are_transcript_free() {
 }
 
 #[test]
-fn render_options_thread_keeps_its_transcript() {
+fn render_options_thread_is_transcript_free() {
     let d = Distilled {
         tools: Vec::new(),
         kind_specific: Some(KindPayload::Thread(ThreadPayload::default())),
         ..Default::default()
     };
-    assert!(render_options_for_kind("thread", &d).include_transcript);
+    assert!(!render_options_for_kind("thread", &d).include_transcript);
 }
 
 #[test]

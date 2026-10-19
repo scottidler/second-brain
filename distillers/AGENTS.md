@@ -21,7 +21,7 @@ Per-kind Stage-2 processors that take a Stage-1 transcript (markitdown / VTT / t
 - **links** — outbound URLs discovered in source (distinct from the source URL).
 - **kind_specific** — `Option<KindPayload>`: `RepoPayload` (stars/language/last_commit/topics/install), `VideoPayload` (channel/duration/published_at), `ThreadPayload` (author/post_count/platform).
 - **meta** — `DistilledMeta` (extractor id, model, tokens, produced_at, validation).
-- **transcript** — `Option<String>`; set for Image/VoiceNote/Idea/Vocabulary (the note is the only persistent source) AND, for Video/Thread (the transcript powers chunked semantic recall — regression-guarded, do NOT revert). Article/Repo leave it `None` (the fetched markdown / origin URL is the archive).
+- **transcript** — `Option<String>`; set for Image/VoiceNote/Idea/Vocabulary (the note is the only persistent source) AND, for Video/Thread (the transcript powers chunked semantic recall — regression-guarded, do NOT revert; it lands in `distilled.yml` and the archive, never in the note: `RenderOptions::for_url_publish` is `include_transcript: false` for every URL kind). Article/Repo leave it `None` (the fetched markdown / origin URL is the archive).
 
 ## Contracts & Invariants
 

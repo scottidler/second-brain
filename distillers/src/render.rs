@@ -26,17 +26,15 @@ pub struct RenderOptions {
 
 impl RenderOptions {
     /// Transcript policy for borg's single URL render site (Video, Article,
-    /// Repo, and Thread all render there). Only Thread — a
-    /// verbatim-preservation kind — keeps its in-note `## Transcript`;
-    /// Video/Article/Repo publish transcript-free (the verbatim text lives in
-    /// the staged `distilled.yml`, embedded from there). Keyed on the typed
-    /// `KindPayload`, never on an extractor string. Note that at this site an
-    /// absent payload (`None`) is the Article case, which is correctly `false`;
-    /// the other transcript-keeping kinds (Idea/Vocabulary/Image/VoiceNote) do
-    /// NOT pass through this site — they have their own always-`true` seams.
-    pub fn for_url_publish(distilled: &Distilled) -> Self {
+    /// Repo, and Thread all render there): every URL kind publishes
+    /// transcript-free. The verbatim text lives in the staged `distilled.yml`
+    /// (`Distilled.transcript` stays set for Video/Thread) and cortex embeds it
+    /// from there. The other transcript-keeping kinds
+    /// (Idea/Vocabulary/Image/VoiceNote) do NOT pass through this site; they
+    /// have their own always-`true` seams.
+    pub fn for_url_publish(_distilled: &Distilled) -> Self {
         Self {
-            include_transcript: matches!(distilled.kind_specific, Some(KindPayload::Thread(_))),
+            include_transcript: false,
         }
     }
 }

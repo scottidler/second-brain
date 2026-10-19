@@ -411,7 +411,7 @@ pub fn judge_note_text(distilled: &Distilled) -> String {
 /// fixture of this `kind` (distillation-output-restore design:
 /// `sb borg eval` note-size wiring). Video/Article/Repo/Thread all render at
 /// borg's single URL site (`RenderOptions::for_url_publish`, keyed on the
-/// typed `KindPayload` so only Thread keeps its transcript); the
+/// typed `KindPayload`, transcript-free for all four); the
 /// verbatim-preservation kinds (Image/VoiceNote/Idea/Vocabulary) render at
 /// their own always-`true` seams in `text.rs`/`handlers.rs`. A fixture only
 /// carries the kind label (its directory name), so this maps that label to

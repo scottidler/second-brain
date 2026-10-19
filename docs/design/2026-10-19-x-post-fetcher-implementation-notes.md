@@ -50,3 +50,19 @@
 ### Open questions
 - STALE, left untouched: each fixture's `distilled.yml` (the golden expected note, distilled from the old scrape; e.g. steipete and iximiuz say "no replies are shown", vllm says "positive engagement") and `capture-note.txt` (written from the old source; text still true of the posts). `distilled.yml` should be regenerated through the new patterns by someone willing to call the distiller (`sb borg eval --regenerate`), and `bin/promptfoo-check` run with GEMINI_API_KEY set.
 - Photo sections for the iximiuz and steipete fixtures are absent; add them when a Vision-enabled regenerate is acceptable.
+
+## Phase 4: Threads render no in-note transcript
+### Design decisions
+- `RenderOptions::for_url_publish` returns `include_transcript: false` unconditionally and takes `_distilled` unused — `distillers/src/render.rs` — the signature stays so the one borg call site and its callers do not churn; a per-kind seam can return without an API change.
+- `NoteType::transcript_from_staging` adds `Social | Reddit` — `vault/src/schema.rs` — cortex's embed source (`cortex/src/embed.rs`, `embed/source.rs`) keys on it, so thread transcript chunks now come from staging/archive.
+- `Distilled.transcript` stays set for threads; only the in-note render changed.
+- Flipped by name: `distillers` render test's thread arm now asserts no `## Transcript`; `render_options_thread_keeps_its_transcript` renamed `render_options_thread_is_transcript_free` and asserts false.
+- New tests: `for_url_publish_thread_omits_transcript` (`distillers/src/render/tests.rs`), `transcript_from_staging_covers_social_and_reddit` (`vault/src/schema/tests.rs`).
+- Docs updated: `for_url_publish` and `transcript_from_staging` doc comments, `render_options_for_kind` comment, `distillers/AGENTS.md` transcript bullet, root `CLAUDE.md` one-way-data-flow paragraph (Video/Article/Social/Reddit). `vault/AGENTS.md` named no thread split, so it is unchanged.
+### Deviations
+- None.
+### Tradeoffs
+- Unconditional `false` vs removing the `Distilled` parameter — keeps the call sites stable.
+### Open questions
+- `bin/strip-transcripts` scopes itself by `transcript_from_staging`, so its sweep now also covers Social/Reddit notes if re-run. It is a one-off tool; confirm that is acceptable or that it should not be re-run.
+- Rollout steps 4-6 (reingest of the 34 X notes after the release carrying this phase, Acceptance Criteria 3 and 5 on ripr) are post-release and not executed here.

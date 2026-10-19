@@ -130,3 +130,32 @@ fn entity_description_states_the_hub_contract() {
         "Entity description must state the hub contract, got: {desc}"
     );
 }
+
+#[test]
+fn transcript_from_staging_covers_social_and_reddit() {
+    for t in [
+        NoteType::Youtube,
+        NoteType::Video,
+        NoteType::Article,
+        NoteType::Social,
+        NoteType::Reddit,
+    ] {
+        assert!(t.transcript_from_staging(), "{t} reads its transcript from staging");
+        assert!(
+            NoteType::transcript_eligible().contains(&t),
+            "{t} must stay transcript-eligible"
+        );
+    }
+    for t in [
+        NoteType::Image,
+        NoteType::Audio,
+        NoteType::Note,
+        NoteType::Vocab,
+        NoteType::Github,
+    ] {
+        assert!(
+            !t.transcript_from_staging(),
+            "{t} keeps its in-note transcript or has none"
+        );
+    }
+}

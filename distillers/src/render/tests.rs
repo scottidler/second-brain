@@ -844,15 +844,31 @@ fn site1_url_publish_policy_per_kind() {
         platform: "x".to_string(),
     })));
     assert!(
-        RenderOptions::for_url_publish(&thread).include_transcript,
-        "thread -> true (verbatim kind)"
+        !RenderOptions::for_url_publish(&thread).include_transcript,
+        "thread -> false (x-post-fetcher: no in-note transcript)"
     );
     assert!(
-        render(&thread, RenderOptions::for_url_publish(&thread))
+        !render(&thread, RenderOptions::for_url_publish(&thread))
             .body_markdown
             .contains("## Transcript"),
-        "thread publish body must keep its transcript"
+        "thread publish body must have no transcript"
     );
+}
+
+#[test]
+fn for_url_publish_thread_omits_transcript() {
+    let thread = transcript_distilled(Some(KindPayload::Thread(ThreadPayload {
+        author: None,
+        post_count: 3,
+        platform: "x".to_string(),
+    })));
+    assert!(
+        thread.transcript.is_some(),
+        "Distilled.transcript stays set for threads"
+    );
+    let opts = RenderOptions::for_url_publish(&thread);
+    assert!(!opts.include_transcript);
+    assert!(!render(&thread, opts).body_markdown.contains("## Transcript"));
 }
 
 #[test]

@@ -202,13 +202,17 @@ impl NoteType {
     /// Article notes no longer carry a `## Transcript` body section — the
     /// verbatim text is a consumed intermediate kept in borg's staging, and
     /// cortex embeds transcript chunks by reading it out of staging. The
-    /// remaining transcript-eligible kinds (Image / Audio / Note / Vocab /
-    /// Social / Reddit — the verbatim-preservation kinds and threads) keep their
-    /// in-note `## Transcript` section as the embedding source. A subset of
+    /// threads (Social / Reddit) followed in the x-post-fetcher design: no
+    /// in-note `## Transcript`. The remaining transcript-eligible kinds
+    /// (Image / Audio / Note / Vocab — the verbatim-preservation kinds) keep
+    /// their in-note `## Transcript` section as the embedding source. A subset of
     /// [`transcript_eligible`](Self::transcript_eligible); every variant here is
     /// also there.
     pub fn transcript_from_staging(&self) -> bool {
-        matches!(self, Self::Youtube | Self::Video | Self::Article)
+        matches!(
+            self,
+            Self::Youtube | Self::Video | Self::Article | Self::Social | Self::Reddit
+        )
     }
 }
 
