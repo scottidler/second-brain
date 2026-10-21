@@ -226,7 +226,7 @@ fn a_classify_sends_one_request_with_a_noul_question_per_canonical_tag() {
             "{tag} must carry its description as criteria.true"
         );
     }
-    assert_eq!(body["model"], "jev-latest");
+    assert_eq!(body["model"], "jev-1.14.0");
     assert_eq!(body["state"], format!("{title}\n\n{text}"));
     assert!(
         stub.headers(0)
@@ -342,7 +342,7 @@ fn a_400_names_api_usage_error() {
 /// the error text.
 #[test]
 fn a_422_drops_the_echoed_input() {
-    let echo = r#"{"detail":[{"type":"missing","loc":["body","state"],"msg":"Field required","input":{"model":"jev-latest","questions":{"rust":"ECHOED-REQUEST-MARKER"}}}]}"#;
+    let echo = r#"{"detail":[{"type":"missing","loc":["body","state"],"msg":"Field required","input":{"model":"jev-1.14.0","questions":{"rust":"ECHOED-REQUEST-MARKER"}}}]}"#;
     let stub = Stub::start(vec![Canned::json(422, echo)]);
     let (jev, _dir) = jev_for(&stub, shipped_canon(), 30);
     let err = jev.classify(&note()).expect_err("422 is an error");
@@ -567,12 +567,12 @@ fn empty_text_sends_no_request() {
 // --------------------------------------------------------------- config
 
 /// Inverts the old token-env default: the default names the TypeSafe key's
-/// variable and the `jev-latest` model.
+/// variable and the `jev-1.14.0` model.
 #[test]
-fn the_default_config_names_the_typesafe_key_and_jev_latest() {
+fn the_default_config_names_the_typesafe_key_and_jev_1_14_0() {
     let cfg = TagsClassifierConfig::default();
     assert_eq!(cfg.api_key, "ESCOTE_TYPESAFE_API_KEY");
-    assert_eq!(cfg.model, "jev-latest");
+    assert_eq!(cfg.model, "jev-1.14.0");
     assert!(cfg.base_url.is_none());
 }
 

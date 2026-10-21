@@ -36,9 +36,10 @@ const RETRY_REQUEST_ALLOWANCE: Duration = Duration::from_secs(1);
 /// The TypeSafe key's env var when `api-key` is not set.
 const DEFAULT_API_KEY_ENV: &str = "ESCOTE_TYPESAFE_API_KEY";
 
-/// `jev-latest` rather than a pinned id: `/v1/models` lists only
-/// `jev-latest` and `jev-preview`, so a pin can 400 once it is retired.
-const DEFAULT_MODEL: &str = "jev-latest";
+/// A pinned id, never `jev-latest`: the alias moves under us and shifts scores.
+/// `/v1/models` lists only the aliases, but the pinned id is accepted; TypeSafe
+/// gives 30 days' warning before retiring `jev-1.14.0`.
+const DEFAULT_MODEL: &str = "jev-1.14.0";
 
 /// Where a candidate tag came from. Provenance decides which implementations
 /// are allowed to consume it.

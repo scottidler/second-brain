@@ -211,7 +211,7 @@ tags:
     # resolves empty fails every jev classify, so the fallback runs.
     # api-key: ESCOTE_TYPESAFE_API_KEY
     # The jev model id sent on every request.
-    # model: jev-latest
+    # model: jev-1.14.0
     # timeout-secs: 30
 
 # Distillation feature toggles (all default-on; set false to disable a feature).
