@@ -51,6 +51,7 @@ htmd = "0.5.4"
 httpdate = "1.0.3"
 futures = "0.3.34"
 similar = "3.2.0"
+resvg = "0.48.1"
 
 [dependencies.serenity]
 version = "0.12"

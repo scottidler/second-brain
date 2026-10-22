@@ -332,3 +332,5 @@ fn with_images_section_appends_after_the_body_with_one_blank_line() {
     assert!(body.starts_with("## Summary\n\ns\n\n## Images\n\n![["), "{body}");
     assert!(body.ends_with("d\n"), "{body}");
 }
+
+mod collect;

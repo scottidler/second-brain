@@ -19,6 +19,7 @@ use crate::slides::publish::month_subdir;
 use crate::x::{self, DescribedImage, Owner, Place};
 use chrono::{DateTime, Utc};
 use eyre::{Context, Result};
+use prefilter::{Dedupe, Source, Verdict};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
@@ -51,6 +52,17 @@ impl FigureMime {
             "image/webp" => Some(Self::Webp),
             "image/svg+xml" => Some(Self::Svg),
             _ => None,
+        }
+    }
+
+    /// The `Content-Type` this format is sent to the vision API as.
+    pub(crate) fn content_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+            Self::Svg => "image/svg+xml",
         }
     }
 
@@ -300,102 +312,69 @@ pub(crate) struct XMedia {
     pub degraded: bool,
 }
 
-/// Every photo on an X post and its quote, described in order, plus every
-/// figure of the post's and the quote's X Article through the classified
-/// path ([`collect_classified`]). A degraded photo with no section is
-/// omitted, never published as an empty heading. With `images.enabled:
-/// false` the photos are still described (and still degrade the fetch),
-/// nothing is stored, and Article figures are not fetched at all.
+/// Every photo on an X post and its quote plus every figure of the post's and
+/// the quote's X Article, through the one [`collect`] path: photos skip the
+/// classifier (author-chosen), Article figures are classified. A degraded
+/// photo with no section is omitted, never published as an empty heading. With
+/// `images.enabled: false` the photos are still described (and still degrade
+/// the fetch), nothing is stored, and Article figures are not fetched at all.
 pub(crate) async fn describe_x_media(post: &x::Post, config: &Config, ocr: OcrFn, trace_id: &str) -> XMedia {
     let photos = x::photos(post);
     let mut owners: Vec<(Owner, &x::Post)> = vec![(Owner::Post, post)];
     if let Some(quote) = &post.quote {
         owners.push((Owner::Quote, quote));
     }
-    let article_figures: Vec<(Owner, usize, x::ArticleFigure)> = if config.images.enabled {
-        owners
-            .iter()
-            .flat_map(|(owner, p)| {
-                x::article_figures(p)
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(n, f)| (*owner, n, f))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Per owner, in source order: the Article's figures, then the photos; the
+    // post before its quote. This is also the order `collect` caps in and the
+    // order the FigureSet is stored in.
+    let mut placed: Vec<(Owner, Place)> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (owner, p) in &owners {
+        if config.images.enabled {
+            for (n, figure) in x::article_figures(p).into_iter().enumerate() {
+                placed.push((*owner, Place::Figure(n)));
+                candidates.push(Candidate {
+                    url: figure.url,
+                    provenance: figure
+                        .caption
+                        .unwrap_or_else(|| format!("In @{}'s article", handle(post, *owner))),
+                    source: Source::XArticle,
+                });
+            }
+        }
+        for (photo_owner, photo) in &photos {
+            if photo_owner == owner {
+                placed.push((*owner, Place::Photo));
+                candidates.push(Candidate {
+                    url: photo.url.clone(),
+                    provenance: format!("In @{}'s post", handle(post, *owner)),
+                    source: Source::XPhoto,
+                });
+            }
+        }
+    }
     log::debug!(
-        "describe_x_media[{trace_id}]: photos={} article_figures={}",
+        "describe_x_media[{trace_id}]: photos={} candidates={}",
         photos.len(),
-        article_figures.len()
+        candidates.len()
     );
-    let candidates: Vec<Candidate> = article_figures
-        .iter()
-        .map(|(owner, _, f)| Candidate {
-            url: f.url.clone(),
-            provenance: f
-                .caption
-                .clone()
-                .unwrap_or_else(|| format!("In @{}'s article", handle(post, *owner))),
-        })
-        .collect();
-    let (described, collected) = tokio::join!(
-        futures::future::join_all(
-            photos
-                .iter()
-                .map(|(_, photo)| describe_photo(&photo.url, config, ocr, trace_id)),
-        ),
-        collect_classified(&candidates, config, ocr, trace_id),
-    );
+    let collected = collect(&candidates, config, ocr, trace_id).await;
 
     let mut out = XMedia {
         images: Vec::new(),
         figures: FigureSet::default(),
         degraded: collected.degraded,
     };
-    // Per owner, in source order: the Article's figures, then the photos.
-    let mut photo_figures: Vec<(Owner, Figure)> = Vec::new();
-    for ((owner, _), (photo, photo_degraded)) in photos.iter().zip(described) {
-        out.degraded |= photo_degraded;
-        let Some(photo) = photo else { continue };
-        out.images.push(DescribedImage {
-            owner: *owner,
-            place: Place::Photo,
-            section: photo.section.clone(),
-        });
-        if !config.images.enabled {
-            continue;
-        }
-        match photo.mime {
-            Some(mime) => photo_figures.push((
-                *owner,
-                Figure {
-                    bytes: photo.bytes,
-                    mime,
-                    section: photo.section,
-                    provenance: format!("In @{}'s post", handle(post, *owner)),
-                },
-            )),
-            None => log::info!("[{trace_id}] X photo described but not stored: unsupported format"),
-        }
-    }
-    let mut kept: Vec<(Owner, Figure)> = Vec::new();
-    for ((owner, n, _), figure) in article_figures.iter().zip(collected.figures) {
+    for ((owner, place), figure) in placed.into_iter().zip(collected.figures) {
         let Some(figure) = figure else { continue };
         out.images.push(DescribedImage {
-            owner: *owner,
-            place: Place::Figure(*n),
+            owner,
+            place,
             section: figure.section.clone(),
         });
-        kept.push((*owner, figure));
-    }
-    for (owner, _) in &owners {
-        let article = kept.iter().filter(|(o, _)| o == owner);
-        let photos = photo_figures.iter().filter(|(o, _)| o == owner);
-        out.figures
-            .figures
-            .extend(article.chain(photos).map(|(_, f)| f.clone()));
+        if config.images.enabled {
+            out.figures.figures.push(figure);
+        }
     }
     out.figures.degraded = config.images.enabled && out.degraded;
     log::debug!(
@@ -407,16 +386,18 @@ pub(crate) async fn describe_x_media(post: &x::Post, config: &Config, ocr: OcrFn
     out
 }
 
-/// An image to run through the classified path: where it is, and the line
+/// An image to run through [`collect`]: where it is, where it came from
+/// (which decides the checks and whether the classifier runs), and the line
 /// the `## Images` block prints under its embed.
 #[derive(Debug, Clone)]
 pub(crate) struct Candidate {
     pub url: String,
     pub provenance: String,
+    pub source: Source,
 }
 
-/// What [`collect_classified`] kept: one slot per candidate, positionally
-/// aligned (`None` = dropped), and whether any drop degrades the receipt.
+/// What [`collect`] kept: one slot per candidate, positionally aligned
+/// (`None` = dropped), and whether any drop degrades the receipt.
 #[derive(Debug, Default)]
 pub(crate) struct Collected {
     pub figures: Vec<Option<Figure>>,
@@ -426,7 +407,9 @@ pub(crate) struct Collected {
 /// Why a candidate did not become a figure, counted for the per-trace log line.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Drops {
-    /// A format borg does not classify or store. Expected; not degraded.
+    /// The prefilter said no: a format borg does not store, a decoration URL
+    /// or size, an exact duplicate, an SVG that would not render. Expected;
+    /// not degraded.
     pub prefilter: usize,
     /// The classifier's category is not in `keep`, or under `min-confidence`.
     /// Expected; not degraded.
@@ -437,22 +420,41 @@ pub(crate) struct Drops {
     pub error: usize,
 }
 
-/// The classified figure path, for any source whose images are not all
-/// author-chosen (X Article figures; web articles reuse it): download the
-/// first `max-candidates`, classify each with `FIGURE_TAXONOMY_PROMPT` (keep
-/// if the category is in `images.content-filter.keep` at `min-confidence` or
-/// above), cap the survivors at `max-per-note` in source order, and only then
-/// describe, so a note costs at most `max-candidates` classify plus
+/// A downloaded image that passed the prefilter. `raster` is the PNG an SVG
+/// was rendered to for the vision API; `bytes` stays the original that is stored.
+struct Fetched {
+    index: usize,
+    bytes: Vec<u8>,
+    mime: FigureMime,
+    raster: Option<Vec<u8>>,
+}
+
+impl Fetched {
+    fn vision_bytes(&self) -> &[u8] {
+        self.raster.as_deref().unwrap_or(&self.bytes)
+    }
+
+    fn vision_mime(&self) -> &'static str {
+        if self.raster.is_some() {
+            FigureMime::Png.content_type()
+        } else {
+            self.mime.content_type()
+        }
+    }
+}
+
+/// The one figure path for every source: download the first `max-candidates`,
+/// run the [`prefilter`] (format checks for all, content heuristics for web
+/// articles only, sha256 dedupe), rasterize SVGs, classify the sources that are
+/// not author-chosen with `FIGURE_TAXONOMY_PROMPT` (keep if the category is in
+/// `images.content-filter.keep` at `min-confidence` or above; X post photos
+/// skip this), cap the survivors at `max-per-note` in source order, and only
+/// then describe, so a note costs at most `max-candidates` classify plus
 /// `max-per-note` describe vision calls. A download, classify, or describe
-/// failure drops that image and degrades; a "not a diagram" verdict, a format
-/// borg does not store, and the cap do not. With `content-filter.enabled:
-/// false` every downloaded image is kept (up to the cap) unclassified.
-pub(crate) async fn collect_classified(
-    candidates: &[Candidate],
-    config: &Config,
-    ocr: OcrFn,
-    trace_id: &str,
-) -> Collected {
+/// failure drops that image and degrades; a prefilter drop, a "not a diagram"
+/// verdict, and the cap do not. Writes the one `figures: kept=N dropped={...}`
+/// line per call. With `content-filter.enabled: false` nothing is classified.
+pub(crate) async fn collect(candidates: &[Candidate], config: &Config, ocr: OcrFn, trace_id: &str) -> Collected {
     let cfg = &config.images;
     let filter = &cfg.content_filter;
     let mut drops = Drops::default();
@@ -466,67 +468,105 @@ pub(crate) async fn collect_classified(
     let considered = candidates.len().min(cfg.max_candidates);
     drops.cap += candidates.len() - considered;
     log::debug!(
-        "collect_classified[{trace_id}]: candidates={} considered={considered} classify={}",
+        "collect[{trace_id}]: candidates={} considered={considered} classify={}",
         candidates.len(),
         filter.enabled
     );
 
-    let downloads = futures::future::join_all(
-        candidates[..considered]
-            .iter()
-            .map(|c| download_photo(&c.url, config.pipeline.fxtwitter_timeout_secs, cfg.max_download_bytes)),
-    )
-    .await;
-    let mut fetched: Vec<(usize, Vec<u8>, String)> = Vec::new();
-    for (index, download) in downloads.into_iter().enumerate() {
-        match download {
-            Ok((bytes, mime)) => match FigureMime::from_content_type(&mime) {
-                Some(FigureMime::Svg) | None => {
-                    log::info!(
-                        "[{trace_id}] figure {} dropped: unsupported-format {mime}",
-                        candidates[index].url
-                    );
-                    drops.prefilter += 1;
-                }
-                Some(_) => fetched.push((index, bytes, mime)),
-            },
-            Err(e) => {
-                log::warn!("[{trace_id}] figure dropped: {e:#}");
-                drops.error += 1;
+    // Candidates the URL alone rules out are never downloaded.
+    let mut to_download: Vec<usize> = Vec::new();
+    for (index, candidate) in candidates[..considered].iter().enumerate() {
+        match prefilter::prefilter_url(candidate.source, &candidate.url) {
+            Verdict::Keep => to_download.push(index),
+            Verdict::Drop(reason) => {
+                log::info!("[{trace_id}] figure {} dropped: {}", candidate.url, reason.as_str());
+                drops.prefilter += 1;
             }
         }
     }
-
-    let verdicts: Vec<Option<KeepOutcome>> = if filter.enabled {
-        let classified = futures::future::join_all(
-            fetched
-                .iter()
-                .map(|(_, bytes, mime)| classify::classify_figure(bytes, mime, filter, &config.llm)),
+    let downloads = futures::future::join_all(to_download.iter().map(|&i| {
+        download_photo(
+            &candidates[i].url,
+            config.pipeline.fxtwitter_timeout_secs,
+            cfg.max_download_bytes,
         )
-        .await;
-        classified
-            .iter()
-            .zip(&fetched)
-            .map(|(result, (index, _, _))| {
-                let outcome = classify::keep_outcome_for(result, &filter.keep, filter.min_confidence);
-                match result {
-                    Ok(class) => log::debug!(
-                        "[{trace_id}] figure {} classified {:?} {:.2}: {outcome:?}",
-                        candidates[*index].url,
-                        class.category,
-                        class.confidence
-                    ),
-                    Err(e) => log::warn!("[{trace_id}] figure {} classify failed: {e}", candidates[*index].url),
-                }
-                Some(outcome)
-            })
-            .collect()
-    } else {
-        vec![None; fetched.len()]
-    };
+    }))
+    .await;
 
-    let mut survivors: Vec<(usize, Vec<u8>, String)> = Vec::new();
-    for ((index, bytes, mime), verdict) in fetched.into_iter().zip(verdicts) {
+    let mut dedupe = Dedupe::default();
+    let mut fetched: Vec<Fetched> = Vec::new();
+    for (&index, download) in to_download.iter().zip(downloads) {
+        let candidate = &candidates[index];
+        let (bytes, content_type) = match download {
+            Ok(downloaded) => downloaded,
+            Err(e) => {
+                log::warn!("[{trace_id}] figure dropped: {e:#}");
+                drops.error += 1;
+                continue;
+            }
+        };
+        let mime = FigureMime::from_content_type(&content_type);
+        let (raster, dims) = match mime {
+            Some(FigureMime::Svg) => match rasterize_svg(&bytes, cfg.max_side_px).await {
+                Ok(raster) => (Some(raster.png), Some(raster.intrinsic)),
+                Err(e) => {
+                    log::info!(
+                        "[{trace_id}] figure {} dropped: svg did not render: {e:#}",
+                        candidate.url
+                    );
+                    drops.prefilter += 1;
+                    continue;
+                }
+            },
+            _ => (None, sniff_dims(&bytes)),
+        };
+        if let Verdict::Drop(reason) =
+            prefilter::prefilter(cfg, candidate.source, &candidate.url, &content_type, dims, &bytes)
+        {
+            log::info!(
+                "[{trace_id}] figure {} dropped: {} {content_type}",
+                candidate.url,
+                reason.as_str()
+            );
+            drops.prefilter += 1;
+            continue;
+        }
+        if !dedupe.first_seen(&bytes) {
+            log::info!("[{trace_id}] figure {} dropped: duplicate", candidate.url);
+            drops.prefilter += 1;
+            continue;
+        }
+        // The prefilter has already refused a MIME borg does not store.
+        let Some(mime) = mime else { continue };
+        fetched.push(Fetched {
+            index,
+            bytes,
+            mime,
+            raster,
+        });
+    }
+
+    let verdicts: Vec<Option<KeepOutcome>> = futures::future::join_all(fetched.iter().map(|f| async move {
+        if !filter.enabled || !candidates[f.index].source.is_classified() {
+            return None;
+        }
+        let result = classify::classify_figure(f.vision_bytes(), f.vision_mime(), filter, &config.llm).await;
+        let outcome = classify::keep_outcome_for(&result, &filter.keep, filter.min_confidence);
+        match &result {
+            Ok(class) => log::debug!(
+                "[{trace_id}] figure {} classified {:?} {:.2}: {outcome:?}",
+                candidates[f.index].url,
+                class.category,
+                class.confidence
+            ),
+            Err(e) => log::warn!("[{trace_id}] figure {} classify failed: {e}", candidates[f.index].url),
+        }
+        Some(outcome)
+    }))
+    .await;
+
+    let mut survivors: Vec<Fetched> = Vec::new();
+    for (image, verdict) in fetched.into_iter().zip(verdicts) {
         match verdict {
             None | Some(KeepOutcome::Keep) => {}
             Some(KeepOutcome::DroppedApiError | KeepOutcome::DroppedParseError) => {
@@ -542,26 +582,33 @@ pub(crate) async fn collect_classified(
             drops.cap += 1;
             continue;
         }
-        survivors.push((index, bytes, mime));
+        survivors.push(image);
     }
 
-    let described = futures::future::join_all(survivors.into_iter().map(|(index, bytes, mime)| async move {
-        let url = &candidates[index].url;
-        (index, describe_bytes(bytes, mime, url, config, ocr, trace_id).await)
+    let described = futures::future::join_all(survivors.into_iter().map(|image| async move {
+        let described = describe_bytes(
+            image.vision_bytes().to_vec(),
+            image.vision_mime().to_string(),
+            &candidates[image.index].url,
+            config,
+            ocr,
+            trace_id,
+        )
+        .await;
+        (image, described)
     }))
     .await;
-    for (index, (image, image_degraded)) in described {
+    for (image, (section, image_degraded)) in described {
         out.degraded |= image_degraded;
-        // Classified and kept, so the MIME is one borg stores.
-        let Some((image, mime)) = image.and_then(|i| i.mime.map(|m| (i, m))) else {
+        let Some(section) = section else {
             drops.error += 1;
             continue;
         };
-        out.figures[index] = Some(Figure {
+        out.figures[image.index] = Some(Figure {
             bytes: image.bytes,
-            mime,
-            section: image.section,
-            provenance: candidates[index].provenance.clone(),
+            mime: image.mime,
+            section,
+            provenance: candidates[image.index].provenance.clone(),
         });
     }
     out.degraded |= drops.error > 0;
@@ -576,6 +623,24 @@ pub(crate) async fn collect_classified(
     out
 }
 
+/// A raster image's `(width, height)` from its header alone; `None` when the
+/// bytes are not an image the `image` crate can read.
+fn sniff_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// SVG rasterization is CPU-bound; keep it off the async workers.
+async fn rasterize_svg(bytes: &[u8], max_side_px: u32) -> Result<svg::Raster> {
+    let owned = bytes.to_vec();
+    tokio::task::spawn_blocking(move || svg::rasterize(&owned, max_side_px))
+        .await
+        .context("svg rasterize task")?
+}
+
 fn handle(post: &x::Post, owner: Owner) -> &str {
     match (owner, &post.quote) {
         (Owner::Quote, Some(quote)) => &quote.author.screen_name,
@@ -583,33 +648,7 @@ fn handle(post: &x::Post, owner: Owner) -> &str {
     }
 }
 
-/// A downloaded, described image: its bytes, the format borg stores it as
-/// (`None` for a format it does not store), and its capped section.
-struct DescribedPhoto {
-    bytes: Vec<u8>,
-    mime: Option<FigureMime>,
-    section: String,
-}
-
-/// One photo: `(photo, degraded)`. Download, then [`describe_bytes`].
-async fn describe_photo(url: &str, config: &Config, ocr: OcrFn, trace_id: &str) -> (Option<DescribedPhoto>, bool) {
-    let (bytes, mime) = match download_photo(
-        url,
-        config.pipeline.fxtwitter_timeout_secs,
-        config.images.max_download_bytes,
-    )
-    .await
-    {
-        Ok(photo) => photo,
-        Err(e) => {
-            log::warn!("[{trace_id}] X photo omitted: {e:#}");
-            return (None, true);
-        }
-    };
-    describe_bytes(bytes, mime, url, config, ocr, trace_id).await
-}
-
-/// Describe downloaded image bytes: `(image, degraded)`. OCR runs on a
+/// Describe downloaded image bytes: `(section, degraded)`. OCR runs on a
 /// blocking thread joined with the vision call, as image ingest does; only
 /// vision takes a permit. Vision failing leaves an OCR-only section and
 /// degrades; neither producing text omits the image and degrades.
@@ -620,7 +659,7 @@ async fn describe_bytes(
     config: &Config,
     ocr: OcrFn,
     trace_id: &str,
-) -> (Option<DescribedPhoto>, bool) {
+) -> (Option<String>, bool) {
     let ocr_timeout = config.pipeline.ocr_timeout_secs;
     let ocr_bytes = bytes.clone();
     let ocr_handle = tokio::task::spawn_blocking(move || ocr_photo(&ocr_bytes, ocr, ocr_timeout));
@@ -657,13 +696,10 @@ async fn describe_bytes(
         log::warn!("[{trace_id}] image omitted: neither vision nor OCR produced text for {url}");
         return (None, true);
     }
-    let section = cap_section(&section, config.images.max_section_bytes);
-    let photo = DescribedPhoto {
-        bytes,
-        mime: FigureMime::from_content_type(&mime),
-        section,
-    };
-    (Some(photo), vision_failed)
+    (
+        Some(cap_section(&section, config.images.max_section_bytes)),
+        vision_failed,
+    )
 }
 
 /// `section` within `max_bytes`: over it, cut at the last line boundary that
@@ -731,6 +767,11 @@ fn ocr_photo(bytes: &[u8], ocr: OcrFn, timeout_secs: u64) -> Result<String> {
     file.write_all(bytes).context("write OCR temp file")?;
     ocr(file.path(), timeout_secs)
 }
+
+#[cfg_attr(not(test), expect(dead_code, reason = "no article path feeds candidates yet"))]
+mod candidates;
+mod prefilter;
+mod svg;
 
 #[cfg(test)]
 mod tests;
