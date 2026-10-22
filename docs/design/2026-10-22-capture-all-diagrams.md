@@ -207,6 +207,89 @@ images:
 - Paste the numbers into this doc under Phase 0 Results. No files under `docs/` besides this one.
 - **Success criteria:** keep-category precision >= 0.9 and recall >= 0.8 on the 60 labels with `min-confidence: 0.6`; fetch success, MIME mix, and kept-bytes p50/p90 per note recorded in this doc. A miss stops the build: the prompt is revised and re-measured before Phase 5.
 
+##### Phase 0 Results
+
+Measured 2026-10-22 on desk with a throwaway harness in the session scratchpad (Python: `requests` + `Pillow` for download and decode, a direct POST to the Anthropic Messages API for classify, the `resvg` 0.48.1 CLI for SVG). Nothing from the harness is committed. Model `claude-sonnet-5` (the `llm.model` borg inherits), `max_tokens: 64` (`VISION_CLASSIFY_MAX_TOKENS`), same request body as `ocr::vision_call` (one base64 image block, then the prompt text), same `CATEGORY:` / `CONFIDENCE:` reply schema. The Rust `vision_classify` was not driven: the harness calls the same endpoint with the same body, so the prompt is the only variable. Images over 3.5 MB or 2048 px on a side were downscaled to a 2048 px jpeg q85 before the call (the API takes 5 MB per image); every other image went as downloaded.
+
+**Sample**
+
+- Source set: staged `fetched.html` with `extractor: readable`, latest trace per source: 550 sources, 324 with at least one `![alt](url)` ref. The 40 most recent (by `fetched.html` mtime) are the sample.
+- 40 notes, 181 image refs (at most 40 per note, source order), plus the 8 X Article figures (UberEng 6, 0x_kaize 2), resolved through the design's entity path (`entityRanges[0].key` -> `entityMap` -> `mediaItems[].mediaId` -> `media_entities[].media_id` -> `original_img_url`): 8 of 8 resolved.
+- Refs per note in the sample: p50 2, max 18. `data:` URI refs in the sample: 0.
+
+**Fetch (BROWSER_UA, 30 s timeout, 20 MiB ceiling)**
+
+- Web refs: 178 of 181 returned 200 (98.3%); 3 failed, all `http404`.
+- X Article figures: 8 of 8 (200).
+- MIME by sniffed bytes (186 fetched): image/png 109, image/jpeg 56, image/webp 14, image/svg+xml 6, image/gif 1. avif 0, bmp 0, unknown 0.
+
+**Dimensions** (172 decoded raster web refs, px)
+
+| | min | p10 | p50 | p90 | max |
+|---|---|---|---|---|---|
+| width | 64 | 250 | 1600 | 2914 | 5712 |
+| height | 18 | 250 | 928 | 1742 | 3213 |
+
+X Article figures: widths 301-1200, heights 167-773, bytes 9140-204271.
+
+**Prefilter (format + URL tokens + `min-side-px` 200 + per-note sha256 dedupe; web refs only)**
+
+- Outcomes over 181 web refs: keep 143, too-small 17, url-token 10, svg 6 (rasterized separately, below), download-error 3, duplicate 2.
+- Survivor MIME: png 99, jpeg 32, webp 12.
+- Kept bytes per note, the stored bytes if every prefilter survivor were kept (all 40 notes, 13 of them with no survivor): p50 266455, p90 1901205. The note-level max is 34493808.
+- Per survivor file: p50 151301 B, p90 964865 B, max 3225614 B. 10 of 143 exceed `max-bytes` (2 MiB) and would hit the downscale path.
+- Kept bytes per note after the classifier, on the 17 notes behind the 60 labeled survivors: p50 0, p90 185758, max 1683101. Most articles keep nothing; a diagram-heavy note keeps about 1.7 MB.
+
+**Classifier: 60 hand labels, `min-confidence: 0.6`**
+
+- The 60 are a seeded random draw (`random.seed(20261022)`) from the 143 web prefilter survivors, from 17 notes. Each was labeled by looking at the image, before the classifier ran. Labels were not changed after the run.
+- Gold: 21 keep-category, 39 not.
+- Result (prompt below, one run, no revisions): TP 20, FP 2, FN 1, TN 37. **Precision 0.909, recall 0.952.** Both clear the gate (>= 0.9, >= 0.8).
+- Errors: 0 parse failures, 0 API failures across 68 calls.
+- The three disagreements, all judgment calls: #30 an Obsidian canvas screenshot with cards and arrows (labeled keep, model `app-ui` 0.75, a miss); #41 a slide of five labeled portraits with captions (labeled not-keep, model `infographic` 0.85, a false positive); #56 an Obsidian graph-view screenshot (labeled not-keep, model `chart` 0.60, a false positive at exactly the threshold).
+- The margin is one image: a single extra false positive makes precision 0.870. Re-measure if the prompt or model changes.
+- Model category counts over all 68 calls: terminal 18, app-ui 13, chart 13, b-roll 8, architecture-diagram 7, flowchart 3, infographic 3, code 2, webpage 1.
+- Keep-category slides with a chart or diagram inside a framed slide (stateof.ai "Air Street Capital" slides, 5 of the 21 keeps) were classified keep; the prompt's "judged by the figure itself" line is what that rests on.
+- X Article figures (8, labeled separately and included in the 68-call totals): labeled 4 keep (UberEng Figure 1, Figure 2, Figure 5, and the uncaptioned Omni MCP diagram), 4 not (UberEng Figure 3 and Figure 4, both UI screenshots; the 0x_kaize style-picker banner and meme). UberEng keeps 4 of 6, inside Acceptance Criterion 3's 1-6 range. All 8 matched at 0.6. Counting them in, precision 0.923 and recall 0.960 (TP 24, FP 2, FN 1, TN 41).
+
+**SVG (10 sampled, rasterized with `resvg --background white -w 1024`, original `.svg` bytes are what Phase 4 stores)**
+
+- Sample: the 6 SVGs in the 40 notes (leonardgrazian jev charts x2, martinfowler spdd diagrams x4) plus 4 more from other staged articles (cybernetist `bot_arch.svg`, a google-calendar logo, an HTG logo, an XDA logo). Sizes 1175-10677 B.
+- Hand labels: 7 keep (2 charts, 5 diagrams), 3 not (the three logos).
+- Classifier at 0.6: TP 6, FP 0, FN 1, TN 3. The miss is `spdd-workflow.svg` (`other` 0.55). Others: charts `chart` 0.75/0.85, `architecture-diagram` 0.65/0.75, `flowchart` 0.60/0.75, logos `b-roll` 0.90/0.90/0.80.
+- **Finding for Phase 4:** the `resvg` CLI drew no text on any of the 10 (webfont `font-family` lists with no system match, so every label is invisible), and two spdd SVGs (`spdd-workflow`, `code-review`) rendered as solid black shapes because their CSS class styling was skipped (`simplecss` warns on `@import` and `@font-face`). The classifier still got 6 of 7 from shape alone, but the rasters are worse than what Obsidian shows. Phase 4's rasterizer should load a fallback font through `usvg`'s `fontdb` (sans-serif), and its tests should assert that a text node produces non-background pixels.
+
+**Final draft `FIGURE_TAXONOMY_PROMPT` (verbatim, Phase 5 consumes this text)**
+
+```text
+You are classifying a single image taken from a web page or a social-media post into exactly ONE category.
+
+Classify by the DOMINANT content - the largest, central thing in the image. The image may be a cropped figure, a screenshot, a photo, or a slide-style graphic embedded in an article. A figure inside a slide-style frame or with a caption is judged by the figure itself.
+
+Categories (choose exactly one):
+- architecture-diagram: components/systems wired together by arrows or lines; data/control flow between boxes, layers, or services.
+- sequence-diagram: UML or interaction sequence (lifelines, ordered messages between actors).
+- flowchart: flow or decision diagram (process steps, decision diamonds, yes/no branches).
+- code: source code shown as an image (an editor, a code block, syntax-highlighted text).
+- terminal: a terminal, TUI, or CLI session / command output.
+- infographic: a framework, maturity-model, quadrant, or marketing-style graphic. NOT a real wired diagram - boxes that are LISTS or LABELS, not connected components.
+- chart: a bar, line, scatter, pie, or plot chart of DATA.
+- app-ui: an application GUI or website screenshot (buttons, menus, panels, a page in a browser).
+- webpage: a browser showing a blog, docs page, or website.
+- talking-head: one or more people on camera or a portrait photo.
+- b-roll: a photograph of physical objects, hardware, products, or scenery; stock or decorative photos; logos, icons, mascots, and memes.
+- title-card: a banner, hero, cover, or title graphic (large title text, little else).
+- other: anything that fits none of the above.
+
+Draw a SHARP line between true diagrams (architecture-diagram / sequence-diagram / flowchart),
+which show connected components with flow, and infographic / chart, which present labels or data
+without a wired system. When unsure between a diagram and an infographic, prefer infographic.
+
+Respond with EXACTLY two lines and nothing else:
+CATEGORY: <one of the category strings above, lowercase, hyphenated>
+CONFIDENCE: <a number between 0.0 and 1.0>
+```
+
 #### Phase 1: Config and owned-images plumbing
 **Model:** sonnet
 - The whole `images:` config block (`ImagesConfig`, `FigureFilterConfig` with its own defaults) and its annotated example. Every later phase reads it.
