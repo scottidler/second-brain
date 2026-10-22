@@ -33,7 +33,6 @@ use inflight::InflightGuard;
 
 mod figures;
 mod handlers;
-mod photos;
 mod publish;
 pub(crate) mod session;
 mod tags;
@@ -745,6 +744,7 @@ async fn process_url_inner(
     // The fetch landed but impoverished: the YouTube engine fell back, or an
     // X post's photo was omitted or described from OCR alone.
     let mut fetch_degraded = false;
+    let mut figure_set = figures::FigureSet::default();
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
@@ -820,6 +820,7 @@ async fn process_url_inner(
             Some(status_id) => {
                 let post = process_x_post(&url_match.url, status_id, config, trace_id).await?;
                 fetch_degraded |= post.degraded;
+                figure_set = post.figures;
                 Some((post.title, post.markdown, None))
             }
             None => None,
@@ -1025,14 +1026,13 @@ async fn process_url_inner(
         (rendered_distilled.body_markdown.clone(), Vec::new())
     };
 
-    // The figure stage has no producer yet (X photos arrive in the next phase),
-    // so the set is empty; the plan -> render -> gate -> store -> publish
-    // ordering below is already the final one.
-    let figure_set = figures::FigureSet::default();
+    // plan -> render -> gate -> store -> publish. The `## Images` section goes
+    // after the distilled body, ahead of the Source footer `render_note` adds.
     let figure_plan = figures::plan(&figure_set, trace_id, &chrono::Utc::now(), &config.images);
     let image_stage_degraded = figure_set.degraded || figure_plan.degraded;
     let image_paths: Vec<String> = figure_plan.planned.iter().map(|f| f.vault_path.clone()).collect();
     fetch_degraded |= image_stage_degraded;
+    let distilled_body = figures::with_images_section(&distilled_body, &figure_plan);
 
     let note = NoteContent {
         title: title.clone(),

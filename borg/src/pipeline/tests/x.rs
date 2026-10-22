@@ -320,3 +320,211 @@ async fn x_post_fetch_error_fails_closed() {
     assert_eq!(std::fs::read_to_string(&note).expect("note"), before);
     assert_eq!(vault_files(&dir.path().join("vault")), files_before);
 }
+
+// ---------------------------------------------------------------------------
+// Stored photos (docs/design/2026-10-22-capture-all-diagrams.md):
+// fetch an X post through the stubs, then plan -> render -> publish through the
+// real note writer (`publish_url_note`), the same helpers `process_url_inner`
+// calls, so the note and its files are what a reingest would leave.
+// ---------------------------------------------------------------------------
+
+const VIC: &str = include_str!("../../x/vic.json");
+
+/// The vic fixture with its photo pointed at the stub's JPEG.
+fn vic_reply(base: &str) -> Reply {
+    (
+        200,
+        VIC.replace("https://pbs.twimg.com/media/", &format!("{base}/media/ok")),
+    )
+}
+
+struct Published {
+    vault: PathBuf,
+    note: String,
+    images_frontmatter: Vec<String>,
+}
+
+fn publish_post(post: &FetchedPost, config: &Config, dir: &Path) -> Published {
+    let vault = dir.join("vault");
+    std::fs::create_dir_all(vault.join("inbox")).expect("inbox");
+    let now = chrono::Utc::now();
+    let plan = figures::plan(&post.figures, "cl-8c531660", &now, &config.images);
+    let body = figures::with_images_section("## Summary\n\nvic argues.", &plan);
+    let images: Vec<String> = plan.planned.iter().map(|f| f.vault_path.clone()).collect();
+    let content = crate::markdown::NoteContent {
+        title: post.title.clone(),
+        source_url: Some("https://x.com/poster/status/100".to_string()),
+        trace_id: Some("cl-8c531660".to_string()),
+        images: images.clone(),
+        distilled_body: Some(body),
+        ..Default::default()
+    };
+    let rendered = crate::markdown::render_note(&content, &config.frontmatter);
+    let distilled = vault::distilled::Distilled {
+        summary: "s".to_string(),
+        ..Default::default()
+    };
+    let archive_root = dir.join("archive");
+    let archive = crate::archive::SourceArchive {
+        root: &archive_root,
+        trace_id: "cl-8c531660",
+        distilled: &distilled,
+        source_md: None,
+    };
+    let desired = vault.join("inbox/vic.md");
+    let inbox = vault.join("inbox");
+    let old_owned = crate::slides::cleanup::Owned::default();
+    let (note_path, _) = publish_url_note(&UrlPublish {
+        archive: &archive,
+        desired_path: &desired,
+        note_bytes: rendered.as_bytes(),
+        replaces: None,
+        vault_dirs: std::slice::from_ref(&inbox),
+        vault_root: &vault,
+        max_note_bytes: config.pipeline.max_note_bytes,
+        figures: &plan.planned,
+        image_stage_degraded: post.figures.degraded || plan.degraded,
+        old_owned: &old_owned,
+        new_slides: &[],
+    })
+    .expect("publish");
+    Published {
+        vault,
+        note: std::fs::read_to_string(note_path).expect("note"),
+        images_frontmatter: rendered
+            .lines()
+            .filter(|l| l.starts_with("  - system/attachments/images/"))
+            .map(|l| l.trim_start_matches("  - ").to_string())
+            .collect(),
+    }
+}
+
+/// Criterion 1: the vic note embeds its one photo under `## Images`, lists it
+/// in `images:`, and the file is in the vault.
+#[tokio::test]
+async fn vic_photo_is_stored_embedded_and_listed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, _) = serve(vic_reply, (200, VISION_OK.into())).await;
+    let config = config(dir.path());
+
+    let post = fetch(&base, &config).await.expect("fetch");
+    assert!(!post.degraded);
+    let published = publish_post(&post, &config, dir.path());
+
+    let (head, images) = published.note.split_once("## Images\n").expect("## Images section");
+    assert!(
+        !head.contains("![["),
+        "the embed lives only under ## Images:\n{}",
+        published.note
+    );
+    let embeds: Vec<&str> = images.lines().filter(|l| l.contains("![[")).collect();
+    assert_eq!(embeds.len(), 1, "{}", published.note);
+    assert!(
+        embeds[0].starts_with("![[cl-8c531660-1-") && embeds[0].ends_with(".jpg]]"),
+        "{embeds:?}"
+    );
+    assert!(images.contains("*In @boristane's post.*"), "{}", published.note);
+    assert!(
+        images.contains("#### Description\n\nA flowchart of an AI code review loop."),
+        "{}",
+        published.note
+    );
+    assert!(
+        images
+            .find("---\n\n*Source:")
+            .is_some_and(|at| at > images.find("![[").unwrap()),
+        "`## Images` sits before the Source footer:\n{}",
+        published.note
+    );
+    assert_eq!(published.images_frontmatter.len(), 1, "{}", published.note);
+    let stored = published.vault.join(&published.images_frontmatter[0]);
+    assert!(stored.is_file(), "{} missing", stored.display());
+    assert_eq!(std::fs::read(&stored).expect("bytes"), "\u{ff}fake-jpeg".as_bytes());
+    assert!(
+        published.images_frontmatter[0].ends_with(embeds[0].trim_start_matches("![[").trim_end_matches("]]")),
+        "embed and images: name the same file"
+    );
+}
+
+/// Criterion 2: an undownloadable photo leaves no `## Images`, no `images:`
+/// entry, no file, and the fetch is degraded (so a reingest over a note that
+/// owns images is refused by the writer).
+#[tokio::test]
+async fn photo_download_error_yields_no_images_section_and_degrades() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, _) = serve(
+        |b| post_json(b, "my take", "", &["missing1"], &[]),
+        (200, VISION_OK.into()),
+    )
+    .await;
+    let config = config(dir.path());
+
+    let post = fetch(&base, &config).await.expect("text still publishes");
+    assert!(post.degraded, "fetch_degraded");
+    assert!(post.figures.degraded, "the image stage is degraded");
+    assert!(post.figures.figures.is_empty());
+    let published = publish_post(&post, &config, dir.path());
+
+    assert!(!published.note.contains("## Images"), "{}", published.note);
+    assert!(published.images_frontmatter.is_empty());
+    assert!(!published.vault.join("system").exists(), "no asset written");
+}
+
+/// `max-download-bytes` is a ceiling on the read, not a note: an over-size
+/// photo is dropped and degrades.
+#[tokio::test]
+async fn photo_over_max_download_bytes_is_dropped_and_degrades() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, hits) = serve(vic_reply, (200, VISION_OK.into())).await;
+    let mut config = config(dir.path());
+    config.images.max_download_bytes = 4; // "\u{ff}fake-jpeg" is 11 bytes
+
+    let post = fetch(&base, &config).await.expect("text still publishes");
+
+    assert!(post.degraded);
+    assert!(post.figures.figures.is_empty());
+    assert!(!post.markdown.contains("### Image"), "{}", post.markdown);
+    assert_eq!(hits.count("/v1/messages"), 0, "no vision call for a refused download");
+}
+
+/// `images.enabled: false` restores today's behavior: described, not stored.
+#[tokio::test]
+async fn images_disabled_describes_but_stores_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, _) = serve(vic_reply, (200, VISION_OK.into())).await;
+    let mut config = config(dir.path());
+    config.images.enabled = false;
+
+    let post = fetch(&base, &config).await.expect("fetch");
+
+    assert!(post.markdown.contains("#### Description"), "still described");
+    assert!(post.figures.figures.is_empty());
+    assert!(!post.figures.degraded);
+    let published = publish_post(&post, &config, dir.path());
+    assert!(!published.note.contains("## Images"));
+    assert!(published.images_frontmatter.is_empty());
+}
+
+/// A long description is capped at `max-section-bytes` before it reaches the
+/// distiller source or the note.
+#[tokio::test]
+async fn photo_section_is_capped_at_max_section_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let long = format!(
+        r#"{{"content":[{{"type":"text","text":"TEXT: {}\nDESCRIPTION: A chart.\nTITLE: t\nTAGS: ai"}}]}}"#,
+        ["line of extracted text"; 40].join("\\n")
+    );
+    let (base, _) = serve(vic_reply, (200, long)).await;
+    let mut config = config(dir.path());
+    config.images.max_section_bytes = 120;
+
+    let post = fetch(&base, &config).await.expect("fetch");
+
+    let section = &post.figures.figures[0].section;
+    assert!(section.len() <= 120 + '\u{2026}'.len_utf8(), "{} bytes", section.len());
+    assert!(section.ends_with('\u{2026}'), "{section}");
+    assert!(
+        post.markdown.contains(section.as_str()),
+        "the distiller sees the capped section"
+    );
+}

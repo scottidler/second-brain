@@ -42,3 +42,27 @@
 
 ### Open questions
 - Should a figure-file write failure degrade-and-drop instead of failing the publish? That needs `store` to run before render, which would put file writes ahead of the size gate and break the "gate fails write 0 files" criterion. Left as fail-closed.
+
+## Phase 2: X post photos stored and embedded
+### Design decisions
+- `photos.rs` and its tests moved into `figures.rs` / `figures/tests.rs` (the old files are gone); `describe_x_photos` now returns `XPhotos { images, figures, degraded }`: `images` is the per-photo section list the distiller source markdown still splices (`x::render` unchanged), `figures` is the `FigureSet` to store — `borg/src/pipeline/figures.rs` — so the distiller input and the stored note cannot disagree about which photos were described.
+- `describe_photo` returns a `DescribedPhoto { bytes, mime: Option<FigureMime>, section }`; the MIME is the response `Content-Type` mapped by `FigureMime::from_content_type`, never the URL — `figures.rs:describe_photo`.
+- `download_photo` enforces `images.max-download-bytes` twice: a declared `Content-Length` over the ceiling bails before any read, and the body is read in chunks and bails the moment the running total crosses it (a missing or lying header cannot defeat it) — `figures.rs:download_photo`.
+- The section is capped once, at describe time (`cap_section`, line boundary, trailing `…`), so the distiller input and the `## Images` block carry the same text — `figures.rs`.
+- `Plan` gained `images_section` (built inside `plan` from the same loop that assigns names), and `with_images_section` appends it to the distilled body after plan and before `render_note` adds the Source footer — `figures.rs:plan`, `pipeline.rs:process_url_inner`. A dropped figure (oversize after downscale) leaves no embed, so the embed list and `images:` come from one pass and cannot diverge.
+- `Figure` gained `provenance` (`In @handle's post`); the quoted post's photo carries the quoted author's handle (the vic flowchart is `@boristane`'s).
+- `FetchedPost.degraded` stays the describe-stage flag (it holds with `images.enabled: false`, as before); `FigureSet.degraded` is the image-stage flag and is only set when images are enabled. `process_url_inner` ORs `FetchedPost.degraded` and the plan's flag into `fetch_degraded`, and the writer gets `figure_set.degraded || plan.degraded`.
+- Success-criteria tests run through the real writer, not `process_x_post_from` alone: `vic_photo_is_stored_embedded_and_listed` and `photo_download_error_yields_no_images_section_and_degrades` (`borg/src/pipeline/tests/x.rs`) fetch through the stubs, then `plan` -> `with_images_section` -> `render_note` -> `publish_url_note`. Each was broken once (figure push skipped; download error returning non-degraded) and shown failing before restore.
+- Phase 1's `#[expect(dead_code)]` markers on `Gif`/`Webp` and `Figure.section` are removed (now constructed and read).
+
+### Deviations
+- The publish-path tests assemble plan -> render -> `publish_url_note` by hand instead of driving `process_url`: a full `process_url` run needs the distiller LLM, tags, and the real XDG ledger (`ledger::append_entry`), which a test must not write to. Same helpers as production (`figures::plan`, `with_images_section`, `render_note`, `publish_url_note`); `process_url_inner`'s own glue (`figure_set = post.figures`, the `with_images_section` call) has no direct test.
+- A photo that downloaded but is in a format borg does not store (avif, bmp, tiff, ...) is described for the distiller as before but not stored or embedded, and does not degrade: the design's prefilter makes those a drop, not an error. The full prefilter is Phase 4; this is the minimum Phase 2 needs to name a file extension from the MIME.
+- A photo whose vision and OCR both produce nothing is still omitted entirely (not stored), as before: its section would be empty and the doc says a dropped image never publishes an empty heading.
+
+### Tradeoffs
+- Cap at describe time vs cap in `plan`: describe-time keeps one text for both the distiller and the note, at the cost of the distiller seeing the truncated form of a very long OCR dump (the design wants the cap to protect the note budget; the 1500-byte default is also what the model needs).
+- Chunked read vs `response.bytes()` with a post-hoc length check: the chunked read stops a hostile body at the ceiling instead of buffering 20 MiB+ first.
+
+### Open questions
+- None.

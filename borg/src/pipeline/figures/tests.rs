@@ -28,6 +28,7 @@ fn figure(bytes: Vec<u8>, mime: FigureMime) -> Figure {
         bytes,
         mime,
         section: "#### Description\n\nd".to_string(),
+        provenance: "In @poster's post".to_string(),
     }
 }
 
@@ -210,4 +211,124 @@ fn store_failure_removes_what_it_already_created() {
     let err = store(vault.path(), &figures).unwrap_err();
     assert!(format!("{err:#}").contains("t-2-bbbbbbbb.png"), "{err:#}");
     assert!(!vault.path().join(&figures[0].vault_path).exists());
+}
+
+fn vision(description: &str, text: &str) -> VisionResult {
+    VisionResult {
+        description: description.to_string(),
+        suggested_title: String::new(),
+        suggested_tags: Vec::new(),
+        extracted_text: text.to_string(),
+    }
+}
+
+#[test]
+fn image_section_prefers_vision_text_under_extracted_text() {
+    let v = vision("A diagram.", "vision words");
+    let section = image_section(Some(&v), "ocr words", "##");
+    assert_eq!(
+        section,
+        "## Description\n\nA diagram.\n\n## Extracted Text\n\nvision words"
+    );
+}
+
+#[test]
+fn image_section_falls_back_to_ocr_when_vision_has_no_text() {
+    let v = vision("A photo.", "");
+    let section = image_section(Some(&v), "ocr words", "####");
+    assert_eq!(
+        section,
+        "#### Description\n\nA photo.\n\n#### Extracted Text\n\nocr words"
+    );
+}
+
+#[test]
+fn image_section_without_vision_is_ocr_text() {
+    assert_eq!(image_section(None, "ocr words", "##"), "## OCR Text\n\nocr words");
+}
+
+#[test]
+fn image_section_with_nothing_is_empty() {
+    assert_eq!(image_section(None, "", "##"), "");
+    assert_eq!(image_section(Some(&vision("", "")), "", "####"), "");
+}
+
+#[test]
+fn from_content_type_maps_stored_formats_and_refuses_the_rest() {
+    assert_eq!(FigureMime::from_content_type("image/jpeg"), Some(FigureMime::Jpeg));
+    assert_eq!(FigureMime::from_content_type("image/png"), Some(FigureMime::Png));
+    assert_eq!(FigureMime::from_content_type("image/gif"), Some(FigureMime::Gif));
+    assert_eq!(FigureMime::from_content_type("image/webp"), Some(FigureMime::Webp));
+    assert_eq!(FigureMime::from_content_type("image/svg+xml"), Some(FigureMime::Svg));
+    assert_eq!(FigureMime::from_content_type("image/avif"), None);
+    assert_eq!(FigureMime::from_content_type("image/bmp"), None);
+}
+
+#[test]
+fn cap_section_leaves_a_short_section_alone() {
+    assert_eq!(
+        cap_section("#### Description\n\nshort", 100),
+        "#### Description\n\nshort"
+    );
+}
+
+#[test]
+fn cap_section_cuts_at_a_line_boundary_and_marks_the_cut() {
+    let section = "#### Description\n\nfirst line\nsecond line\nthird line";
+    let capped = cap_section(section, 38);
+    assert_eq!(capped, "#### Description\n\nfirst line\u{2026}");
+    assert!(capped.len() <= 38);
+}
+
+#[test]
+fn cap_section_never_splits_a_character() {
+    let capped = cap_section(&"\u{e9}".repeat(50), 11);
+    assert!(capped.ends_with('\u{2026}'));
+    assert!(capped.len() <= 11, "{} bytes", capped.len());
+}
+
+#[test]
+fn plan_renders_images_section_in_source_order_with_provenance() {
+    let mut second = figure(b"two".to_vec(), FigureMime::Png);
+    second.provenance = String::new();
+    let plan = plan(
+        &set(vec![figure(b"one".to_vec(), FigureMime::Png), second]),
+        "cl-1",
+        &now(),
+        &ImagesConfig::default(),
+    );
+    let first_name = &plan.planned[0].basename;
+    let second_name = &plan.planned[1].basename;
+    assert_eq!(
+        plan.images_section,
+        format!(
+            "## Images\n\n![[{first_name}]]\n\n*In @poster's post.*\n\n#### Description\n\nd\n\n![[{second_name}]]\n\n#### Description\n\nd\n"
+        )
+    );
+}
+
+#[test]
+fn plan_images_section_skips_a_dropped_figure_and_is_empty_with_none() {
+    let cfg = ImagesConfig {
+        max_bytes: 10,
+        ..ImagesConfig::default()
+    };
+    let undecodable = figure(vec![0; 64], FigureMime::Png);
+    let plan = plan(&set(vec![undecodable]), "cl-1", &now(), &cfg);
+    assert!(plan.degraded);
+    assert_eq!(plan.images_section, "");
+    assert_eq!(with_images_section("body\n", &plan), "body\n");
+}
+
+#[test]
+fn with_images_section_appends_after_the_body_with_one_blank_line() {
+    let plan = plan(
+        &set(vec![figure(b"x".to_vec(), FigureMime::Png)]),
+        "cl-1",
+        &now(),
+        &ImagesConfig::default(),
+    );
+    let body = with_images_section("## Summary\n\ns\n\n", &plan);
+    assert!(body.starts_with("## Summary\n\ns\n\n## Images\n\n![["), "{body}");
+    assert!(body.ends_with("d\n"), "{body}");
 }
