@@ -159,6 +159,7 @@ pub(crate) async fn process_text_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        images: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
         frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
@@ -320,6 +321,7 @@ pub(crate) async fn process_vocab(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        images: Vec::new(),
         distilled_body: Some(rendered_distilled.body_markdown),
         frontmatter_additions: insert_author_tags(rendered_distilled.frontmatter_additions, &outcome.author_tags),
         origin: None,
@@ -696,6 +698,7 @@ pub(crate) async fn process_code_snippet(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        images: Vec::new(),
         frontmatter_additions: insert_author_tags(std::collections::BTreeMap::new(), &outcome.author_tags),
         ..NoteContent::default()
     };

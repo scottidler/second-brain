@@ -345,10 +345,122 @@ pub(crate) fn archive_then_publish(
     atomic::publish_unique(desired_path, bytes, replaces, vault_dirs).map_err(PublishError::NoteWrite)
 }
 
-/// The terminal `IngestResult` for a failed publish, its stage taken from the
-/// typed error.
-pub(crate) fn publish_failure_result(
-    err: &PublishError,
+/// Everything the URL note writer needs after the note is rendered. The
+/// caller has already planned the figures and rendered the note with their
+/// `images:` and `## Images`, so the size gate sees the full note.
+pub(crate) struct UrlPublish<'a> {
+    pub archive: &'a crate::archive::SourceArchive<'a>,
+    pub desired_path: &'a Path,
+    pub note_bytes: &'a [u8],
+    pub replaces: Option<&'a Path>,
+    pub vault_dirs: &'a [PathBuf],
+    pub vault_root: &'a Path,
+    pub max_note_bytes: usize,
+    pub figures: &'a [figures::PlannedFigure],
+    /// A candidate that passed the prefilter failed, or planning dropped one.
+    pub image_stage_degraded: bool,
+    /// What the note being replaced owns; empty for a fresh ingest.
+    pub old_owned: &'a crate::slides::cleanup::Owned,
+    /// The slide paths the new note owns (`slides:` is YouTube's own key).
+    pub new_slides: &'a [String],
+}
+
+/// Why the URL note writer refused or failed. Each variant maps to the
+/// terminal failure stage the receipt records.
+#[derive(Debug, thiserror::Error)]
+pub enum UrlPublishError {
+    /// The composed note is over `pipeline.max-note-bytes`; nothing was written.
+    #[error("{0}")]
+    SizeGate(String),
+    /// The old note owns images and this run's image stage degraded: the old
+    /// note and its files stay untouched rather than be replaced by a worse one.
+    #[error(
+        "image stage degraded and the existing note owns {owned} image(s); keeping the existing note and its files"
+    )]
+    DegradedReingest { owned: usize },
+    /// A figure file could not be written; the ones this run created are removed.
+    #[error("failed to store figures: {0:#}")]
+    Store(eyre::Report),
+    #[error(transparent)]
+    Publish(#[from] PublishError),
+}
+
+impl UrlPublishError {
+    pub fn failure_stage(&self) -> FailureStage {
+        match self {
+            Self::SizeGate(_) => FailureStage::QualityBlocked,
+            Self::DegradedReingest { .. } => FailureStage::FetchFailed,
+            Self::Store(_) => FailureStage::PublishFailed,
+            Self::Publish(e) => e.failure_stage(),
+        }
+    }
+}
+
+/// The URL note writer. The order is the contract:
+///
+/// 1. refuse a degraded reingest over a note that owns images;
+/// 2. size-gate the fully rendered note, so a fail writes no asset;
+/// 3. [`figures::store`] the figure files (no-clobber);
+/// 4. [`archive_then_publish`]; if it fails, only the files step 3 created
+///    are removed (a reused path is never touched);
+/// 5. only after the note is durable, remove the files the old note owned
+///    that the new one no longer does (best-effort, logged).
+///
+/// Returns the published path and the orphans that were targeted.
+pub(crate) fn publish_url_note(spec: &UrlPublish<'_>) -> std::result::Result<(PathBuf, Vec<String>), UrlPublishError> {
+    let trace_id = spec.archive.trace_id;
+    log::debug!(
+        "publish_url_note: trace={trace_id} figures={} old_images={} degraded={}",
+        spec.figures.len(),
+        spec.old_owned.images.len(),
+        spec.image_stage_degraded
+    );
+    if spec.image_stage_degraded && !spec.old_owned.images.is_empty() {
+        return Err(UrlPublishError::DegradedReingest {
+            owned: spec.old_owned.images.len(),
+        });
+    }
+    if let Some(reason) = note_size_gate(spec.note_bytes.len(), spec.max_note_bytes) {
+        return Err(UrlPublishError::SizeGate(reason));
+    }
+    let created = figures::store(spec.vault_root, spec.figures).map_err(UrlPublishError::Store)?;
+    let note_path = match archive_then_publish(
+        spec.archive,
+        spec.desired_path,
+        spec.note_bytes,
+        spec.replaces,
+        spec.vault_dirs,
+    ) {
+        Ok(path) => path,
+        Err(e) => {
+            if let Err(cleanup) = crate::rkvr::remove(&created) {
+                log::warn!(
+                    "[{trace_id}] could not remove {} figure(s) after a failed publish: {cleanup:#}",
+                    created.len()
+                );
+            }
+            return Err(e.into());
+        }
+    };
+    let new_owned = crate::slides::cleanup::Owned {
+        slides: spec.new_slides.to_vec(),
+        images: spec.figures.iter().map(|f| f.vault_path.clone()).collect(),
+    };
+    let orphans = crate::slides::cleanup::compute_all_orphans(spec.old_owned, &new_owned);
+    if !orphans.is_empty() {
+        let abs = crate::slides::cleanup::resolve_existing(spec.vault_root, &orphans);
+        match crate::slides::cleanup::rkvr_remove(&abs) {
+            Ok(()) => log::info!("[{trace_id}] archived {} orphan file(s)", orphans.len()),
+            Err(e) => log::warn!("[{trace_id}] orphan cleanup failed: {e:#}"),
+        }
+    }
+    Ok((note_path, orphans))
+}
+
+/// The terminal `IngestResult` for a failed URL publish, its stage taken from
+/// the typed error.
+pub(crate) fn url_publish_failure_result(
+    err: &UrlPublishError,
     method: IngestMethod,
     canonical: &str,
     trace_id: &str,

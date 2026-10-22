@@ -15,6 +15,7 @@ mod discord;
 mod engine;
 mod eval;
 mod harvest;
+mod images;
 mod ntfy;
 mod signal;
 mod telegram;
@@ -27,6 +28,7 @@ pub use eval::{
     ReportConfig, SECOND_JUDGE_MODEL, TrustConfig,
 };
 pub use harvest::{HarvestConfig, HarvestMode};
+pub use images::{FigureFilterConfig, ImagesConfig};
 pub use ntfy::NtfyConfig;
 pub use signal::SignalConfig;
 pub use telegram::TelegramConfig;
@@ -174,6 +176,8 @@ pub struct Config {
     pub intake: IntakeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
+    #[serde(default)]
+    pub images: ImagesConfig,
     pub log_level: Option<String>,
 }
 

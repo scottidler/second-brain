@@ -701,6 +701,7 @@ pub(crate) async fn process_session_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: Vec::new(),
+        images: Vec::new(),
         distilled_body: Some(distilled_body),
         frontmatter_additions,
         origin: Some(vault::schema::Origin::Generated),

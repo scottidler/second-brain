@@ -77,6 +77,7 @@ fn test_render_includes_ingested_field() {
         method: None,
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -119,6 +120,7 @@ fn test_render_article_note() {
         method: None,
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -151,6 +153,7 @@ fn test_render_youtube_note() {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            images: Vec::new(),
             ..NoteContent::default()
         };
     let rendered = render_note(&note, &test_config());
@@ -181,6 +184,7 @@ fn test_render_with_default_tags() {
         method: None,
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &config);
@@ -203,6 +207,7 @@ fn test_render_note_without_source() {
         method: Some(IngestMethod::Telegram),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -227,6 +232,7 @@ fn test_render_image_note() {
         method: Some(IngestMethod::Cli),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -249,6 +255,7 @@ fn test_render_note_with_trace_id() {
         method: Some(IngestMethod::Telegram),
         trace_id: Some("tg-7f3a2c".to_string()),
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -274,6 +281,7 @@ fn test_render_note_without_trace_id() {
         method: None,
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -296,6 +304,7 @@ fn test_render_github_note() {
         method: Some(IngestMethod::Telegram),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -318,6 +327,7 @@ fn test_render_social_note() {
         method: Some(IngestMethod::Telegram),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -338,6 +348,7 @@ fn test_render_reddit_note() {
         method: Some(IngestMethod::Telegram),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -361,6 +372,7 @@ fn test_render_youtube_note_with_description_callout() {
             method: Some(IngestMethod::Telegram),
             trace_id: None,
             slides: Vec::new(),
+            images: Vec::new(),
             ..NoteContent::default()
         };
     let rendered = render_note(&note, &test_config());
@@ -394,6 +406,7 @@ fn test_render_note_without_description_has_no_callout() {
         method: None,
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = render_note(&note, &test_config());
@@ -771,6 +784,7 @@ fn render_note_keys_matches_the_writer() {
             method: Some(IngestMethod::Cli),
             trace_id: Some("hv-deadbeef".to_string()),
             slides: vec!["assets/slide-1.jpg".to_string()],
+            images: vec!["system/attachments/images/2026-10/tr-1-aaaaaaaa.png".to_string()],
             distilled_body: None,
             // Deliberately EMPTY: `frontmatter_additions` keys belong to the
             // caller, not to `render_note`, and are policed by each caller's
@@ -796,4 +810,35 @@ fn render_note_keys_matches_the_writer() {
         unemitted.is_empty(),
         "RENDER_NOTE_KEYS declares key(s) render_note never emits: {unemitted:?}"
     );
+}
+
+#[test]
+fn render_writes_images_list_and_omits_the_key_when_empty() {
+    let with = NoteContent {
+        title: "N".to_string(),
+        content_type: ContentType::Social,
+        images: vec![
+            "system/attachments/images/2026-10/cl-1-aaaaaaaa.jpg".to_string(),
+            "system/attachments/images/2026-10/cl-2-bbbbbbbb.png".to_string(),
+        ],
+        ..NoteContent::default()
+    };
+    let rendered = render_note(&with, &test_config());
+    let fm = frontmatter_keys(&rendered);
+    assert!(fm.contains(&"images".to_string()), "{rendered}");
+    assert!(rendered.contains(
+        "images:\n  - system/attachments/images/2026-10/cl-1-aaaaaaaa.jpg\n  - system/attachments/images/2026-10/cl-2-bbbbbbbb.png\n"
+    ));
+    let without = NoteContent {
+        title: "N".to_string(),
+        content_type: ContentType::Social,
+        ..NoteContent::default()
+    };
+    assert!(!frontmatter_keys(&render_note(&without, &test_config())).contains(&"images".to_string()));
+}
+
+#[test]
+fn images_is_regenerated_on_reingest_not_preserved() {
+    assert!(!BORG_PRESERVE_KEYS.contains(&"images"));
+    assert!(!vault::schema::CORTEX_PRESERVE_KEYS.contains(&"images"));
 }

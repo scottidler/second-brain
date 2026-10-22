@@ -26,6 +26,11 @@ pub struct NoteContent {
     /// Vault-relative paths to slide JPEGs the note owns. Rendered into the
     /// `slides:` frontmatter list so cleanup on replay can find them.
     pub slides: Vec<String>,
+    /// Vault-relative paths to the figure files the note owns (X photos, X
+    /// Article figures, web-article diagrams). Rendered into the `images:`
+    /// frontmatter list; a reingest diffs it against the old note's to find
+    /// orphans. Mirrors `slides:`; not `asset:`, which means the note IS the asset.
+    pub images: Vec<String>,
     /// Pre-rendered structured body produced by
     /// `distillers::render`. When `Some`, replaces the legacy
     /// `## Summary\n\n{summary}` block - the rendered Distilled already
@@ -129,6 +134,7 @@ pub const RENDER_NOTE_KEYS: &[&str] = &[
     "trace",
     CAPTURE_NOTE_KEY,
     "slides",
+    "images",
     "tags",
     "creator",
     "duration",
@@ -228,6 +234,13 @@ pub fn render_note(note: &NoteContent, frontmatter_config: &FrontmatterConfig) -
         fm.push_str("slides:\n");
         for s in &note.slides {
             fm.push_str(&format!("  - {s}\n"));
+        }
+    }
+
+    if !note.images.is_empty() {
+        fm.push_str("images:\n");
+        for path in &note.images {
+            fm.push_str(&format!("  - {path}\n"));
         }
     }
 

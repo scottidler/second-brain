@@ -31,6 +31,7 @@ pub mod permits;
 use atomic::{apply_original_date, apply_preserved_fields};
 use inflight::InflightGuard;
 
+mod figures;
 mod handlers;
 mod photos;
 mod publish;
@@ -622,7 +623,7 @@ async fn process_url_inner(
 
     let mut original_date: Option<String> = None;
     let mut preserved_fields: Vec<(String, publish::FieldValue)> = Vec::new();
-    let mut old_slides_frontmatter: Vec<String> = Vec::new();
+    let mut old_owned = crate::slides::cleanup::Owned::default();
     // Instead of deleting the old note up front (which would create
     // a window where the vault has no copy of the URL's note while the rest
     // of the pipeline runs), capture its path here and remove only after
@@ -680,15 +681,14 @@ async fn process_url_inner(
             // publishing, and the old note is left untouched either way.
             preserved_fields = read_preserved_fields(old_path)?;
             reingest_dest = old_path.parent().map(|p| p.to_path_buf());
-            // Capture the old note's `slides:` frontmatter list BEFORE removing it
-            // so reingest cleanup can find any orphaned slide attachments.
-            old_slides_frontmatter = crate::slides::cleanup::read_old_slides_frontmatter(old_path).unwrap_or_default();
+            // Capture the old note's `slides:` and `images:` lists BEFORE it is
+            // replaced so reingest cleanup can find orphaned attachments, and so a
+            // degraded image stage can refuse to replace a note that owns images.
+            // Fails CLOSED like the preserved-fields read above.
+            old_owned = crate::slides::cleanup::read_old_owned(old_path)?;
             log::debug!("[{trace_id}] Preserved original date: {:?}", original_date);
             log::debug!("[{trace_id}] Preserved frontmatter fields: {:?}", preserved_fields);
-            log::debug!(
-                "[{trace_id}] Captured old slides for cleanup: {:?}",
-                old_slides_frontmatter
-            );
+            log::debug!("[{trace_id}] Captured old owned files for cleanup: {old_owned:?}");
             log::debug!("[{trace_id}] Will overwrite in: {:?}", reingest_dest);
             // Do NOT delete the old note here. The pipeline below
             // produces the new note bytes; we delete the old path only after
@@ -1025,6 +1025,15 @@ async fn process_url_inner(
         (rendered_distilled.body_markdown.clone(), Vec::new())
     };
 
+    // The figure stage has no producer yet (X photos arrive in the next phase),
+    // so the set is empty; the plan -> render -> gate -> store -> publish
+    // ordering below is already the final one.
+    let figure_set = figures::FigureSet::default();
+    let figure_plan = figures::plan(&figure_set, trace_id, &chrono::Utc::now(), &config.images);
+    let image_stage_degraded = figure_set.degraded || figure_plan.degraded;
+    let image_paths: Vec<String> = figure_plan.planned.iter().map(|f| f.vault_path.clone()).collect();
+    fetch_degraded |= image_stage_degraded;
+
     let note = NoteContent {
         title: title.clone(),
         source_url: Some(url_match.url.clone()),
@@ -1038,6 +1047,7 @@ async fn process_url_inner(
         method: Some(method),
         trace_id: Some(trace_id.to_string()),
         slides: slide_paths.clone(),
+        images: image_paths,
         distilled_body: Some(distilled_body),
         frontmatter_additions: {
             // Stamp the absolute retention expiry alongside `trace`/`ingested`.
@@ -1109,23 +1119,6 @@ async fn process_url_inner(
     // formatted value over it is how the field came to have two spellings.
     // `date:` remains the original content date, restored above.
 
-    // Note-size hard gate (distillation-output-restore):
-    // with `## Transcript` gone from video/article/repo publish, an oversize
-    // note is a bug - a verbatim leak the gates above should already have
-    // caught - so this hard-fails rather than publishing degraded. Checked
-    // on the exact bytes about to hit disk, right before the atomic write.
-    if let Some(reason) = note_size_gate(final_str.len(), config.pipeline.max_note_bytes) {
-        log::warn!("[{trace_id}] note-size gate blocked publish: {reason}");
-        return Ok(IngestResult {
-            status: IngestStatus::Failed { reason },
-            method: Some(method),
-            canonical_url: Some(canonical.clone()),
-            trace_id: Some(trace_id.to_string()),
-            failure_stage: Some(FailureStage::QualityBlocked),
-            ..Default::default()
-        });
-    }
-
     // Titles are not unique across sources (three different pages were all
     // "Claude Code Mods"), so only THIS URL's own previous note may be
     // overwritten; any other existing note keeps its file and this one lands
@@ -1139,17 +1132,30 @@ async fn process_url_inner(
         distilled: &distilled,
         source_md: archive_source_md.as_deref(),
     };
-    let note_path = match archive_then_publish(
-        &archive,
-        &desired_path,
-        final_str.as_bytes(),
-        old_path_to_delete.as_deref(),
-        &vault_dirs,
-    ) {
-        Ok(path) => path,
+    // Note-size hard gate (distillation-output-restore): with `## Transcript`
+    // gone from video/article/repo publish, an oversize note is a bug - a
+    // verbatim leak the gates above should already have caught - so it
+    // hard-fails rather than publishing degraded. It runs inside the writer,
+    // on the exact bytes about to hit disk and BEFORE any figure file is
+    // written. The writer then stores figures, publishes, and only after the
+    // note is durable archives the old note's orphaned slides and images.
+    let (note_path, _orphans) = match publish_url_note(&UrlPublish {
+        archive: &archive,
+        desired_path: &desired_path,
+        note_bytes: final_str.as_bytes(),
+        replaces: old_path_to_delete.as_deref(),
+        vault_dirs: &vault_dirs,
+        vault_root: &vault_root_resolved,
+        max_note_bytes: config.pipeline.max_note_bytes,
+        figures: &figure_plan.planned,
+        image_stage_degraded,
+        old_owned: &old_owned,
+        new_slides: &slide_paths,
+    }) {
+        Ok(published) => published,
         Err(e) => {
-            log::error!("[{trace_id}] publish failed: {e}");
-            return Ok(publish_failure_result(&e, method, &canonical, trace_id));
+            log::warn!("[{trace_id}] publish refused or failed: {e}");
+            return Ok(url_publish_failure_result(&e, method, &canonical, trace_id));
         }
     };
     if note_path != desired_path {
@@ -1179,21 +1185,6 @@ async fn process_url_inner(
     }
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
-
-    // Slide cleanup: now that the new note is durable, archive any orphan
-    // slide attachments the old note used to reference. Best-effort - if
-    // rkvr fails we log and move on rather than failing the ingestion.
-    if !old_slides_frontmatter.is_empty() || !slide_paths.is_empty() {
-        let orphans = crate::slides::cleanup::compute_orphans(&old_slides_frontmatter, &slide_paths);
-        if !orphans.is_empty() {
-            let abs = crate::slides::cleanup::resolve_existing(&vault_root_resolved, &orphans);
-            if let Err(e) = crate::slides::cleanup::rkvr_remove(&abs) {
-                log::warn!("[{trace_id}] Slide cleanup failed: {e:#}");
-            } else {
-                log::info!("[{trace_id}] Archived {} orphan slide(s)", orphans.len());
-            }
-        }
-    }
 
     // Log success to Borg Ledger
     ledger::append_entry(

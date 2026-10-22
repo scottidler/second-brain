@@ -109,6 +109,28 @@ desktop:
   timeout-ms: 5000
   appname: borg
 
+# Figures stored from X posts, X Articles, and web articles
+# (docs/design/2026-10-22-capture-all-diagrams.md). Each kept image lands under
+# system/attachments/images/YYYY-MM/, is embedded in an `## Images` section with
+# its description, and is listed in the note's `images:` frontmatter. Defaults shown.
+# `enabled: false` restores the old behavior: X photos described, not stored.
+# Vision calls share the pool sized by
+# youtube.slides.content-filter.max-vision-concurrency; there is no knob here.
+images:
+  enabled: true
+  max-candidates: 40          # images downloaded per note, in source order
+  max-download-bytes: 20971520  # one image over this is dropped before decode
+  max-per-note: 20            # images kept per note, cap applied before describe
+  max-section-bytes: 1500     # description + extracted text per image in the note
+  min-side-px: 200            # web articles: either axis under this is decoration
+  max-bytes: 2097152          # stored file over this is downscaled to max-side-px
+  max-side-px: 2048           # also the SVG raster bound
+  content-filter:             # web-article images and X Article figures; X post photos are always kept
+    enabled: true
+    keep: [architecture-diagram, sequence-diagram, flowchart, chart, infographic]
+    model: ""                 # empty = inherit llm.model
+    min-confidence: 0.6
+
 # YouTube ingestion settings.
 # `slides.enabled: false` surgically disables frame capture only; audio, Whisper
 # transcript, summary, classify, and publish all continue unchanged.

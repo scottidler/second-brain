@@ -32,7 +32,12 @@ fn archive_write_under_unwritable_root_fails_publish_and_writes_no_note() {
 
     let err = result.expect_err("an unwritable archive root must fail the publish");
     assert!(matches!(err, PublishError::ArchiveWrite(_)), "got {err:?}");
-    let ingest = publish_failure_result(&err, IngestMethod::Cli, "https://example.com/x", "tr-ro");
+    let ingest = url_publish_failure_result(
+        &UrlPublishError::from(err),
+        IngestMethod::Cli,
+        "https://example.com/x",
+        "tr-ro",
+    );
     assert_eq!(ingest.failure_stage, Some(FailureStage::PublishFailed));
     assert_eq!(terminal_failure_stage(&ingest).as_str(), "publish-failed");
     assert!(!desired.exists(), "no vault note may be written when the archive fails");
@@ -333,4 +338,288 @@ fn test_find_note_by_source_skips_dotfiles() {
 
     let found = find_note_by_source(vault, "https://example.com/hidden");
     assert!(found.is_none(), "should skip dot-prefixed directories");
+}
+
+// ---------------------------------------------------------------------------
+// `publish_url_note`: the plan -> render -> size gate -> store -> publish order
+// (docs/design/2026-10-22-capture-all-diagrams.md, Store and publish ordering).
+// These run through the note writer itself, not `process_x_post_from`.
+// ---------------------------------------------------------------------------
+
+use crate::pipeline::figures::PlannedFigure;
+use crate::slides::cleanup::Owned;
+
+const DIR: &str = "system/attachments/images/2026-10";
+
+fn rel(name: &str) -> String {
+    format!("{DIR}/{name}")
+}
+
+fn planned(name: &str, bytes: &[u8]) -> PlannedFigure {
+    PlannedFigure {
+        vault_path: rel(name),
+        basename: name.to_string(),
+        bytes: bytes.to_vec(),
+    }
+}
+
+/// A vault with `inbox/` and an old note at `inbox/note.md` owning `old_images`
+/// (each file written), plus a writable archive root.
+struct Fixture {
+    vault: tempfile::TempDir,
+    archive_root: tempfile::TempDir,
+    distilled: vault::distilled::Distilled,
+}
+
+impl Fixture {
+    fn new(old_images: &[&str]) -> Self {
+        let vault = tempfile::TempDir::new().unwrap();
+        let inbox = vault.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(vault.path().join(DIR)).unwrap();
+        if !old_images.is_empty() {
+            let list: String = old_images.iter().map(|n| format!("  - {}\n", rel(n))).collect();
+            std::fs::write(
+                inbox.join("note.md"),
+                format!("---\ntitle: old\nimages:\n{list}---\nOLD BODY\n"),
+            )
+            .unwrap();
+            for name in old_images {
+                std::fs::write(vault.path().join(rel(name)), format!("old {name}")).unwrap();
+            }
+        }
+        Self {
+            vault,
+            archive_root: tempfile::TempDir::new().unwrap(),
+            distilled: vault::distilled::Distilled {
+                summary: "s".to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn inbox(&self) -> PathBuf {
+        self.vault.path().join("inbox")
+    }
+
+    fn old_note(&self) -> PathBuf {
+        self.inbox().join("note.md")
+    }
+
+    fn old_owned(&self) -> Owned {
+        crate::slides::cleanup::read_old_owned(&self.old_note()).unwrap()
+    }
+
+    fn publish(
+        &self,
+        archive_root: &Path,
+        note: &[u8],
+        figures: &[PlannedFigure],
+        degraded: bool,
+        max_note_bytes: usize,
+    ) -> std::result::Result<(PathBuf, Vec<String>), UrlPublishError> {
+        let archive = crate::archive::SourceArchive {
+            root: archive_root,
+            trace_id: "tr-new",
+            distilled: &self.distilled,
+            source_md: None,
+        };
+        let old_owned = self.old_owned();
+        let old_note = self.old_note();
+        let inbox = self.inbox();
+        publish_url_note(&UrlPublish {
+            archive: &archive,
+            desired_path: &old_note,
+            note_bytes: note,
+            replaces: old_note.exists().then_some(old_note.as_path()),
+            vault_dirs: std::slice::from_ref(&inbox),
+            vault_root: self.vault.path(),
+            max_note_bytes,
+            figures,
+            image_stage_degraded: degraded,
+            old_owned: &old_owned,
+            new_slides: &[],
+        })
+    }
+}
+
+const NOTE_CEILING: usize = 64 * 1024;
+
+#[test]
+fn reingest_that_drops_one_of_two_images_keeps_one_and_removes_the_other() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"]);
+    // The new note keeps the first image's path and drops the second.
+    let keep = planned("tr-old-1-aaaaaaaa.png", b"new bytes ignored: path reused");
+    let (path, orphans) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\nNEW\n",
+            &[keep],
+            false,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert_eq!(path, fx.old_note());
+    assert_eq!(orphans, vec![rel("tr-old-2-bbbbbbbb.png")]);
+    assert!(
+        fx.vault.path().join(rel("tr-old-1-aaaaaaaa.png")).exists(),
+        "kept file stays"
+    );
+    assert!(
+        !fx.vault.path().join(rel("tr-old-2-bbbbbbbb.png")).exists(),
+        "dropped file is removed"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "---\ntitle: new\n---\nNEW\n");
+}
+
+#[test]
+fn note_over_the_size_gate_writes_no_asset_and_no_note() {
+    let fx = Fixture::new(&[]);
+    // No old note, so nothing under `system/attachments` exists but its dir.
+    std::fs::remove_dir_all(fx.vault.path().join("system")).unwrap();
+    let oversize = vec![b'x'; 200];
+    let err = fx
+        .publish(
+            fx.archive_root.path(),
+            &oversize,
+            &[planned("tr-new-1-cccccccc.png", b"png")],
+            false,
+            100,
+        )
+        .unwrap_err();
+    assert!(matches!(err, UrlPublishError::SizeGate(_)), "got {err:?}");
+    assert_eq!(err.failure_stage(), FailureStage::QualityBlocked);
+    assert!(
+        !fx.vault.path().join("system").exists(),
+        "the gate runs before any asset is written"
+    );
+    assert!(!fx.old_note().exists());
+    assert_eq!(std::fs::read_dir(fx.inbox()).unwrap().count(), 0);
+    assert!(
+        !crate::archive::is_durable(fx.archive_root.path(), "tr-new"),
+        "the gate runs before the archive too"
+    );
+}
+
+#[test]
+fn publish_failure_removes_the_created_file_and_leaves_a_reused_path() {
+    let fx = Fixture::new(&[]);
+    let reused = fx.vault.path().join(rel("tr-new-1-aaaaaaaa.png"));
+    std::fs::write(&reused, b"pre-existing").unwrap();
+    let created = fx.vault.path().join(rel("tr-new-2-bbbbbbbb.png"));
+    // A file where the archive root dir should be makes the archive write fail
+    // after `store` has already run.
+    let bad_root_parent = tempfile::TempDir::new().unwrap();
+    let bad_root = bad_root_parent.path().join("sources");
+    std::fs::write(&bad_root, b"not a dir").unwrap();
+
+    let err = fx
+        .publish(
+            &bad_root,
+            b"---\ntitle: new\n---\n",
+            &[
+                planned("tr-new-1-aaaaaaaa.png", b"would clobber"),
+                planned("tr-new-2-bbbbbbbb.png", b"fresh"),
+            ],
+            false,
+            NOTE_CEILING,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, UrlPublishError::Publish(PublishError::ArchiveWrite(_))),
+        "got {err:?}"
+    );
+    assert_eq!(err.failure_stage(), FailureStage::PublishFailed);
+    assert!(!created.exists(), "the file this run created is removed");
+    assert_eq!(
+        std::fs::read(&reused).unwrap(),
+        b"pre-existing",
+        "a reused path is never touched"
+    );
+    assert!(!fx.old_note().exists(), "no note on a failed publish");
+}
+
+#[test]
+fn degraded_reingest_over_a_note_that_owns_images_fails_fetch_failed_and_changes_nothing() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png"]);
+    let old_bytes = std::fs::read(fx.old_note()).unwrap();
+    let err = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: worse\n---\nWORSE\n",
+            &[planned("tr-new-1-dddddddd.png", b"new")],
+            true,
+            NOTE_CEILING,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, UrlPublishError::DegradedReingest { owned: 1 }),
+        "got {err:?}"
+    );
+    assert_eq!(err.failure_stage(), FailureStage::FetchFailed);
+    assert_eq!(
+        std::fs::read(fx.old_note()).unwrap(),
+        old_bytes,
+        "old note bytes unchanged"
+    );
+    assert!(
+        fx.vault.path().join(rel("tr-old-1-aaaaaaaa.png")).exists(),
+        "old file unchanged"
+    );
+    assert!(
+        !fx.vault.path().join(rel("tr-new-1-dddddddd.png")).exists(),
+        "no new file written"
+    );
+    assert!(!crate::archive::is_durable(fx.archive_root.path(), "tr-new"));
+}
+
+#[test]
+fn degraded_fresh_ingest_publishes_as_usual() {
+    let fx = Fixture::new(&[]);
+    let (path, orphans) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\n",
+            &[planned("tr-new-1-eeeeeeee.png", b"img")],
+            true,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert!(path.is_file());
+    assert!(orphans.is_empty());
+    assert!(fx.vault.path().join(rel("tr-new-1-eeeeeeee.png")).exists());
+}
+
+#[test]
+fn degraded_reingest_over_a_note_with_no_images_publishes() {
+    // Owns `slides:` only: the fail-closed rule is about images.
+    let fx = Fixture::new(&[]);
+    std::fs::write(fx.old_note(), "---\ntitle: old\nslides:\n  - s/a.jpg\n---\nOLD\n").unwrap();
+    let (path, _) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\n",
+            &[],
+            true,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "---\ntitle: new\n---\n");
+}
+
+#[test]
+fn images_disabled_reingest_writes_empty_images_and_removes_the_old_files() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"]);
+    let (_, orphans) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\n",
+            &[],
+            false,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert_eq!(orphans.len(), 2);
+    assert!(!fx.vault.path().join(rel("tr-old-1-aaaaaaaa.png")).exists());
+    assert!(!fx.vault.path().join(rel("tr-old-2-bbbbbbbb.png")).exists());
 }

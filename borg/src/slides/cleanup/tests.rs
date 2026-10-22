@@ -11,7 +11,7 @@ fn write_note(path: &Path, frontmatter_yaml: &str, body: &str) {
 }
 
 #[test]
-fn test_read_old_slides_frontmatter_present() {
+fn test_read_old_owned_present() {
     let tmp = std::env::temp_dir().join("borg-test-cleanup-read");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -21,56 +21,113 @@ fn test_read_old_slides_frontmatter_present() {
         "title: Hello\ntrace: ht-abc\nslides:\n  - system/attachments/images/2026-04/foo-slide-001.jpg\n  - system/attachments/images/2026-04/foo-slide-002.jpg\n",
         "# body\n",
     );
-    let slides = read_old_slides_frontmatter(&note).unwrap();
+    let slides = read_old_owned(&note).unwrap().slides;
     assert_eq!(slides.len(), 2);
     assert!(slides[0].ends_with("foo-slide-001.jpg"));
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
-fn test_read_old_slides_frontmatter_missing() {
+fn test_read_old_owned_missing() {
     let tmp = std::env::temp_dir().join("borg-test-cleanup-missing");
     let _ = std::fs::remove_dir_all(&tmp);
     let note = tmp.join("nonexistent.md");
-    let slides = read_old_slides_frontmatter(&note).unwrap();
+    let slides = read_old_owned(&note).unwrap().slides;
     assert!(slides.is_empty());
 }
 
 #[test]
-fn test_read_old_slides_frontmatter_no_slides_field() {
+fn test_read_old_owned_no_slides_field() {
     let tmp = std::env::temp_dir().join("borg-test-cleanup-nofield");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let note = tmp.join("note.md");
     write_note(&note, "title: Hello\ntrace: ht-abc\n", "# body\n");
-    let slides = read_old_slides_frontmatter(&note).unwrap();
+    let slides = read_old_owned(&note).unwrap().slides;
     assert!(slides.is_empty());
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
-fn test_read_old_slides_frontmatter_no_frontmatter_block() {
+fn test_read_old_owned_no_frontmatter_block() {
     let tmp = std::env::temp_dir().join("borg-test-cleanup-noblock");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let note = tmp.join("note.md");
     std::fs::write(&note, "no frontmatter here\n").unwrap();
-    let slides = read_old_slides_frontmatter(&note).unwrap();
+    let slides = read_old_owned(&note).unwrap().slides;
     assert!(slides.is_empty());
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
-fn test_read_old_slides_frontmatter_malformed_yaml() {
+fn test_read_old_owned_malformed_yaml() {
     let tmp = std::env::temp_dir().join("borg-test-cleanup-malformed");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let note = tmp.join("note.md");
     write_note(&note, "!! not yaml ::?\n", "# body\n");
     // We tolerate malformed frontmatter; cleanup is best-effort.
-    let slides = read_old_slides_frontmatter(&note).unwrap();
+    let slides = read_old_owned(&note).unwrap().slides;
     assert!(slides.is_empty());
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_read_old_owned_reads_both_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let note = tmp.path().join("note.md");
+    write_note(
+        &note,
+        "title: Hello\nslides:\n  - s/a.jpg\nimages:\n  - system/attachments/images/2026-10/tr-1-aaaaaaaa.png\n  - system/attachments/images/2026-10/tr-2-bbbbbbbb.jpg\n",
+        "# body\n",
+    );
+    let owned = read_old_owned(&note).unwrap();
+    assert_eq!(owned.slides, vec!["s/a.jpg"]);
+    assert_eq!(owned.images.len(), 2);
+}
+
+#[test]
+fn test_read_old_owned_unreadable_note_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A directory exists() but cannot be read as a note: fail closed.
+    assert!(read_old_owned(tmp.path()).is_err());
+}
+
+#[test]
+fn test_compute_all_orphans_diffs_each_key_on_its_own() {
+    let old = Owned {
+        slides: vec!["s/1.jpg".into(), "s/2.jpg".into()],
+        images: vec!["i/1.png".into(), "i/2.png".into()],
+    };
+    let new = Owned {
+        slides: vec!["s/2.jpg".into()],
+        // A path that moved between keys is still an orphan of its old key.
+        images: vec!["s/1.jpg".into(), "i/2.png".into()],
+    };
+    assert_eq!(compute_all_orphans(&old, &new), vec!["s/1.jpg", "i/1.png"]);
+}
+
+#[test]
+fn test_cleanup_orphans_removes_dropped_image_and_keeps_the_kept_one() {
+    let vault = tempfile::tempdir().unwrap();
+    let dir = vault.path().join("system/attachments/images/2026-10");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("tr-1-aaaaaaaa.png"), b"keep").unwrap();
+    std::fs::write(dir.join("tr-2-bbbbbbbb.png"), b"drop").unwrap();
+    let rel = |n: &str| format!("system/attachments/images/2026-10/{n}");
+    let old = Owned {
+        slides: Vec::new(),
+        images: vec![rel("tr-1-aaaaaaaa.png"), rel("tr-2-bbbbbbbb.png")],
+    };
+    let new = Owned {
+        slides: Vec::new(),
+        images: vec![rel("tr-1-aaaaaaaa.png")],
+    };
+    let orphans = cleanup_orphans(vault.path(), &old, &new).unwrap();
+    assert_eq!(orphans, vec![rel("tr-2-bbbbbbbb.png")]);
+    assert!(dir.join("tr-1-aaaaaaaa.png").exists());
+    assert!(!dir.join("tr-2-bbbbbbbb.png").exists());
 }
 
 #[test]
@@ -159,7 +216,12 @@ fn test_cleanup_orphans_end_to_end() {
         "system/attachments/images/2026-04/foo-slide-003.jpg".to_string(),
     ];
 
-    let orphans = cleanup_orphans(&vault, &note, &new_owned).unwrap();
+    let old = read_old_owned(&note).unwrap();
+    let new = Owned {
+        slides: new_owned,
+        images: Vec::new(),
+    };
+    let orphans = cleanup_orphans(&vault, &old, &new).unwrap();
     assert_eq!(orphans.len(), 1);
     assert!(orphans[0].ends_with("foo-slide-001.jpg"));
     // The orphan file is gone from the vault (rkvr archived it elsewhere).

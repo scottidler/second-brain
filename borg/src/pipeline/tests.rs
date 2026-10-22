@@ -401,6 +401,7 @@ fn test_render_code_note() {
         method: Some(IngestMethod::Cli),
         trace_id: None,
         slides: Vec::new(),
+        images: Vec::new(),
         ..NoteContent::default()
     };
     let rendered = markdown::render_note(

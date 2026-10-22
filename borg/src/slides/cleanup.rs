@@ -1,9 +1,9 @@
 //! Replay/reingest cleanup.
 //!
-//! When a note that previously had embedded slides is re-published (replay
-//! or fresh-trace re-ingestion of the same URL), the old slide JPEGs become
-//! orphans the moment the new note's `slides:` frontmatter list points
-//! elsewhere. We delete those orphans via `rkvr rmrf` (per the safety rule;
+//! When a note that previously owned slides or images is re-published (replay
+//! or fresh-trace re-ingestion of the same URL), the old files become
+//! orphans the moment the new note's `slides:` / `images:` frontmatter lists
+//! point elsewhere. We delete those orphans via `rkvr rmrf` (per the safety rule;
 //! the tool archives before deleting, enabling recovery).
 //!
 //! The order matters and is the same as the design doc:
@@ -20,21 +20,32 @@
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Pull the `slides:` list out of a vault note's YAML frontmatter. Returns
-/// an empty vec if the note has no frontmatter or no `slides:` field, or if
-/// the file does not exist (a fresh slug has no prior state).
-pub fn read_old_slides_frontmatter(note_path: &Path) -> Result<Vec<String>> {
+/// The vault files a note owns, read from its frontmatter: `slides:` (YouTube
+/// slide JPEGs) and `images:` (figures from X posts and articles). Each key
+/// keeps its own list and is diffed on its own, so slides behave as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owned {
+    pub slides: Vec<String>,
+    pub images: Vec<String>,
+}
+
+/// Pull the `slides:` and `images:` lists out of a vault note's YAML
+/// frontmatter. Both are empty if the note has no frontmatter, lacks the
+/// fields, or does not exist (a fresh slug has no prior state). A note that
+/// exists but cannot be read is an error: guessing "owns nothing" would
+/// orphan its files.
+pub fn read_old_owned(note_path: &Path) -> Result<Owned> {
     if !note_path.exists() {
-        return Ok(Vec::new());
+        return Ok(Owned::default());
     }
     let content = std::fs::read_to_string(note_path)
-        .with_context(|| format!("read note for slides frontmatter: {}", note_path.display()))?;
+        .with_context(|| format!("read note for owned-files frontmatter: {}", note_path.display()))?;
     let trimmed = content.trim_start_matches('\n');
     let Some(rest) = trimmed.strip_prefix("---\n") else {
-        return Ok(Vec::new());
+        return Ok(Owned::default());
     };
     let Some(end_idx) = rest.find("\n---") else {
-        return Ok(Vec::new());
+        return Ok(Owned::default());
     };
     let yaml = &rest[..end_idx];
     // Parse loosely - if frontmatter is malformed don't crash the pipeline.
@@ -42,22 +53,21 @@ pub fn read_old_slides_frontmatter(note_path: &Path) -> Result<Vec<String>> {
         Ok(v) => v,
         Err(e) => {
             log::warn!("failed to parse frontmatter at {}: {e:#}", note_path.display());
-            return Ok(Vec::new());
+            return Ok(Owned::default());
         }
     };
-    let Some(slides_val) = parsed.get("slides") else {
-        return Ok(Vec::new());
-    };
-    let Some(seq) = slides_val.as_sequence() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(seq.len());
-    for v in seq {
-        if let Some(s) = v.as_str() {
-            out.push(s.to_string());
-        }
-    }
-    Ok(out)
+    Ok(Owned {
+        slides: string_list(&parsed, "slides"),
+        images: string_list(&parsed, "images"),
+    })
+}
+
+fn string_list(frontmatter: &serde_yaml::Value, key: &str) -> Vec<String> {
+    frontmatter
+        .get(key)
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|seq| seq.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
 }
 
 /// Compute the set difference `old - new`: paths the new note no longer
@@ -68,7 +78,7 @@ pub fn compute_orphans(old: &[String], new: &[String]) -> Vec<String> {
     old.iter().filter(|p| !new_set.contains(p.as_str())).cloned().collect()
 }
 
-/// Resolve vault-relative slide paths to absolute paths under `vault_root`,
+/// Resolve vault-relative paths to absolute paths under `vault_root`,
 /// dropping any that don't actually exist (already-deleted, or never written).
 pub fn resolve_existing(vault_root: &Path, vault_relative: &[String]) -> Vec<PathBuf> {
     vault_relative
@@ -78,25 +88,31 @@ pub fn resolve_existing(vault_root: &Path, vault_relative: &[String]) -> Vec<Pat
         .collect()
 }
 
-/// Delete orphan slide files, preferring `rkvr rmrf` (recoverable) and falling
+/// Delete orphan files, preferring `rkvr rmrf` (recoverable) and falling
 /// back to non-recoverable removal with a WARN when rkvr is not on PATH. rkvr
 /// is preferred, not required. See [`crate::rkvr`].
 pub fn rkvr_remove(paths: &[PathBuf]) -> Result<()> {
     crate::rkvr::remove(paths)
 }
 
-/// End-to-end orphan cleanup. Reads the old note's `slides:` list from
-/// `note_path`, diffs against `new_owned`, resolves to absolute paths under
-/// `vault_root`, and runs `rkvr rmrf` on the diff. Returns the list of
-/// orphans (vault-relative) that were targeted - useful for tests and
-/// audit logs.
+/// Orphans across both keys: `old - new` for `slides:` then for `images:`,
+/// vault-relative, in `old` order.
+pub fn compute_all_orphans(old: &Owned, new: &Owned) -> Vec<String> {
+    let mut orphans = compute_orphans(&old.slides, &new.slides);
+    orphans.extend(compute_orphans(&old.images, &new.images));
+    orphans
+}
+
+/// End-to-end orphan cleanup: diffs the old note's owned files against
+/// `new`, resolves the orphans to absolute paths under `vault_root`, and runs
+/// `rkvr rmrf` on them. Returns the orphans (vault-relative) that were
+/// targeted - useful for tests and audit logs.
 ///
 /// Caller must invoke this AFTER the new note is durable on disk (`fsync` +
 /// rename), so a crash never leaves both the new note pointing at deleted
-/// slides AND the old note still on disk.
-pub fn cleanup_orphans(vault_root: &Path, note_path: &Path, new_owned: &[String]) -> Result<Vec<String>> {
-    let old = read_old_slides_frontmatter(note_path)?;
-    let orphans = compute_orphans(&old, new_owned);
+/// files AND the old note still on disk.
+pub fn cleanup_orphans(vault_root: &Path, old: &Owned, new: &Owned) -> Result<Vec<String>> {
+    let orphans = compute_all_orphans(old, new);
     let abs = resolve_existing(vault_root, &orphans);
     rkvr_remove(&abs)?;
     Ok(orphans)
