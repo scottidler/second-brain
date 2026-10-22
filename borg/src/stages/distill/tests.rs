@@ -642,18 +642,44 @@ fn gate_keeps_clean_and_clears_chrome_heavy() {
     let clean = "This is a genuine article body with several sentences of real prose \
         that clearly exceeds the minimum length and reads as content, not chrome, so \
         the coarse quality gate leaves the transcript in place for publication.";
-    let kept = gate_article_transcript(distilled_with(clean), true);
+    let kept = gate_article_transcript(distilled_with(clean), true, clean);
     assert!(
         kept.transcript.is_some(),
         "clean transcript must be kept for a clean source"
     );
 
     let chrome = vec!["Afghanistan"; 40].join("\n");
-    let cleared = gate_article_transcript(distilled_with(&chrome), true);
+    let cleared = gate_article_transcript(distilled_with(&chrome), true, &chrome);
     assert!(
         cleared.transcript.is_none(),
         "chrome-heavy transcript must be cleared even for a clean source"
     );
+}
+
+/// capture-all-diagrams, Distiller input: the coarse gate judges the article
+/// as fetched, before figure sections were spliced in. A spliced transcript
+/// that is mostly short OCR lines is KEPT (whole, spliced) when the pre-splice
+/// article passes; the converse, a pre-splice article that fails, is cleared
+/// even though the spliced text would pass.
+#[test]
+fn gate_judges_the_pre_splice_source_and_keeps_the_spliced_transcript() {
+    let article = "This is a genuine article body with several sentences of real prose \
+        that clearly exceeds the minimum length and reads as content, not chrome, so \
+        the coarse quality gate leaves the transcript in place for publication.";
+    let ocr_lines = vec!["p50 42ms"; 60].join("\n");
+    let spliced = format!("{article}\n\n### Image 1\n\n#### Extracted Text\n\n{ocr_lines}");
+    assert!(
+        !transcript_quality_ok(&spliced),
+        "precondition: the spliced text alone would be cleared"
+    );
+    let kept = gate_article_transcript(distilled_with(&spliced), true, article);
+    assert_eq!(kept.transcript.as_deref(), Some(spliced.as_str()));
+
+    let chrome = vec!["Afghanistan"; 40].join("\n");
+    let prose_spliced = format!("{chrome}\n\n{article}\n{article}\n{article}\n{article}\n{article}");
+    assert!(transcript_quality_ok(&prose_spliced), "precondition");
+    let cleared = gate_article_transcript(distilled_with(&prose_spliced), true, &chrome);
+    assert!(cleared.transcript.is_none(), "the pre-splice source decides");
 }
 
 /// Source gate (finding #1 fix): a clean-LOOKING transcript from a NON-clean fetch
@@ -666,7 +692,7 @@ fn gate_clears_transcript_from_non_clean_source() {
     let clean = "A perfectly clean-looking article body with several real sentences \
         of prose that easily clears the coarse quality gate, but it came from a \
         non-readable fallback fetch, so it must not be stored as a transcript.";
-    let out = gate_article_transcript(distilled_with(clean), false);
+    let out = gate_article_transcript(distilled_with(clean), false, clean);
     assert!(
         out.transcript.is_none(),
         "a non-clean fetch source must drop the transcript even when the text looks clean"
@@ -706,7 +732,8 @@ fn gate_and_persist_article_clears_before_staged_write() {
         ..Default::default()
     };
 
-    let gated = gate_and_persist_article(&staging, "trace-gate-order", dirty, false);
+    let source = dirty.transcript.clone().expect("transcript");
+    let gated = gate_and_persist_article(&staging, "trace-gate-order", dirty, false, &source);
     assert!(
         gated.transcript.is_none(),
         "returned Distilled must have the transcript cleared"

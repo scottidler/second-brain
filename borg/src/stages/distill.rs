@@ -346,7 +346,7 @@ const MAX_CHROME_RATIO: f64 = 0.9;
 /// flagged a fine-grained chrome ratio as brittle on link-dense-but-legit articles),
 /// so on its own it does NOT catch a chrome-heavy-but-mixed-line fallback page -
 /// which is exactly why the source gate, not this ratio, is load-bearing.
-fn transcript_quality_ok(transcript: &str) -> bool {
+pub(crate) fn transcript_quality_ok(transcript: &str) -> bool {
     if transcript.chars().count() < MIN_TRANSCRIPT_CHARS {
         return false;
     }
@@ -383,12 +383,19 @@ fn transcript_quality_ok(transcript: &str) -> bool {
 /// - otherwise (clean source): run the coarse `transcript_quality_ok` as
 ///   defense-in-depth against a readable mis-extraction.
 ///
+/// The coarse gate judges `quality_source`, the article markdown as fetched,
+/// BEFORE figure sections were spliced in (capture-all-diagrams design,
+/// Distiller input): a figure's short OCR lines would otherwise push a good
+/// readable article over the short-line ratio and clear its whole transcript.
+/// The transcript kept is the spliced one, so the figure text still reaches
+/// staging and the transcript embeddings.
+///
 /// The removed `distill.article-transcript` config toggle (an `enabled`
 /// bool here) is gone: with `## Transcript` no longer rendered for articles at
 /// all (`RenderOptions::for_url_publish`), there was nothing left
 /// for the toggle to configure. Every article transcript now flows through
 /// this same two-stage quality gate before landing in staging.
-fn gate_article_transcript(mut distilled: Distilled, clean_source: bool) -> Distilled {
+fn gate_article_transcript(mut distilled: Distilled, clean_source: bool, quality_source: &str) -> Distilled {
     let had_transcript = distilled.transcript.is_some();
     if !clean_source {
         if had_transcript {
@@ -397,12 +404,10 @@ fn gate_article_transcript(mut distilled: Distilled, clean_source: bool) -> Dist
         distilled.transcript = None;
         return distilled;
     }
-    if let Some(t) = distilled.transcript.as_deref()
-        && !transcript_quality_ok(t)
-    {
+    if had_transcript && !transcript_quality_ok(quality_source) {
         log::warn!(
-            "gate_article_transcript: clean-source transcript failed coarse quality gate ({} chars) -> cleared",
-            t.chars().count()
+            "gate_article_transcript: clean-source article failed coarse quality gate ({} chars before figures) -> cleared",
+            quality_source.chars().count()
         );
         distilled.transcript = None;
     }
@@ -422,35 +427,50 @@ fn gate_and_persist_article(
     trace_id: &str,
     distilled: Distilled,
     clean_source: bool,
+    quality_source: &str,
 ) -> Distilled {
-    let distilled = gate_article_transcript(distilled, clean_source);
+    let distilled = gate_article_transcript(distilled, clean_source, quality_source);
     if let Err(e) = write_distilled_yml(staging, trace_id, &distilled) {
         log::warn!("[{trace_id}] distill_for_publish_article: persist distilled.yml failed: {e:#}");
     }
     distilled
 }
 
-/// Run the article distiller against the raw article
-/// markdown and return the `Distilled`. `clean_source` mirrors the caller's
-/// fetch provenance (true only for the in-process readable extractor's
-/// output); the source/quality gate (`gate_article_transcript`) runs on the
-/// raw dispatch output BEFORE `distilled.yml` is persisted, so a non-clean fetch source or a chrome-heavy body never
-/// reaches staging or embeddings - not just the rendered note. On any error
-/// (dispatch failure, etc.) the same gate still runs against the
-/// `fallback_distilled` payload, so publish never blocks on distillation and
-/// the gate never has a bypass path.
+/// The article text the distiller reads and where it came from.
+#[derive(Debug, Clone, Copy)]
+pub struct ArticleInput<'a> {
+    /// What the distiller reads and what is kept as the transcript: the
+    /// fetched markdown with each kept figure's section spliced in at its image.
+    pub markdown: &'a str,
+    /// The fetched markdown before any figure was spliced in; the coarse
+    /// quality gate judges this. Equal to `markdown` when no figure was kept.
+    pub quality_source: &'a str,
+    /// True only for the in-process readable extractor's output.
+    pub clean_source: bool,
+}
+
+/// Run the article distiller against the article markdown and return the
+/// `Distilled`. `input.clean_source` mirrors the caller's fetch provenance;
+/// the source/quality gate (`gate_article_transcript`) runs on the raw
+/// dispatch output BEFORE `distilled.yml` is persisted, so a non-clean fetch
+/// source or a chrome-heavy body never reaches staging or embeddings - not
+/// just the rendered note. On any error (dispatch failure, etc.) the same gate
+/// still runs against the `fallback_distilled` payload, so publish never
+/// blocks on distillation and the gate never has a bypass path.
 pub async fn distill_for_publish_article(
     fabric: &FabricConfig,
     staging: &StagingConfig,
     trace_id: &str,
     url: &str,
-    article_md: &str,
+    input: ArticleInput<'_>,
     capture_note: Option<&str>,
-    clean_source: bool,
 ) -> Distilled {
+    let article_md = input.markdown;
     log::debug!(
-        "distill_for_publish_article: trace={trace_id} url={url} clean_source={clean_source} transcript_len={}",
-        article_md.len()
+        "distill_for_publish_article: trace={trace_id} url={url} clean_source={} transcript_len={} quality_source_len={}",
+        input.clean_source,
+        article_md.len(),
+        input.quality_source.len()
     );
     let stage = DistillStage::from_fabric_config(fabric);
     let started = std::time::Instant::now();
@@ -481,7 +501,7 @@ pub async fn distill_for_publish_article(
         fallback,
         elapsed_ms,
     );
-    gate_and_persist_article(staging, trace_id, distilled, clean_source)
+    gate_and_persist_article(staging, trace_id, distilled, input.clean_source, input.quality_source)
 }
 
 /// Run the VoiceNote distiller against a Groq ASR

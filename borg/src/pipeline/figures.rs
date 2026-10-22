@@ -2,13 +2,15 @@
 //! (`docs/design/2026-10-22-capture-all-diagrams.md`).
 //!
 //! This module owns both sides of the pipeline. The source side: the one
-//! section builder ([`image_section`], shared with image ingest) and the
-//! per-photo download + describe an X post runs, which fills a [`FigureSet`].
+//! section builder ([`image_section`], shared with image ingest) and the one
+//! download -> prefilter -> classify -> cap -> describe path ([`collect`]) that
+//! an X post ([`describe_x_media`]) and a web article
+//! ([`describe_article_media`]) both run, each filling a [`FigureSet`].
 //! The vault side: [`plan`] assigns every kept figure its path and bounds its
 //! bytes (pure, no I/O) and builds the `## Images` body; [`store`] is the only
 //! writer.
 //!
-//! The X path calls the `ocr` functions directly and never re-enters
+//! Both paths call the `ocr` functions directly and never re-enter
 //! `process_content`: the URL trace already holds a GENERAL permit, so a
 //! nested `process_image` would wait on the pool it is holding.
 
@@ -386,6 +388,72 @@ pub(crate) async fn describe_x_media(post: &x::Post, config: &Config, ocr: OcrFn
     out
 }
 
+/// What the figure stage produced for a web article: the source markdown with
+/// each kept figure's block spliced in at its image, for the distiller, and
+/// the figures to store and embed.
+pub(crate) struct ArticleMedia {
+    pub markdown: String,
+    pub figures: FigureSet,
+}
+
+/// Every `![alt](url)` in a fetched article (readable, fabric, or jina
+/// markdown) through the one [`collect`] path as a web-article candidate:
+/// content heuristics, classify, cap, describe. Each kept figure's block
+/// replaces its image in the markdown, so the distiller reads the diagram
+/// where the author put it; the provenance printed under its embed is the alt
+/// text. With `images.enabled: false` the markdown is returned untouched and
+/// nothing is fetched.
+pub(crate) async fn describe_article_media(
+    markdown: &str,
+    page_url: &str,
+    config: &Config,
+    ocr: OcrFn,
+    trace_id: &str,
+) -> ArticleMedia {
+    if !config.images.enabled {
+        log::debug!("describe_article_media[{trace_id}]: images disabled");
+        return ArticleMedia {
+            markdown: markdown.to_string(),
+            figures: FigureSet::default(),
+        };
+    }
+    let images = candidates::parse_markdown_images(markdown, page_url);
+    let candidates: Vec<Candidate> = images
+        .iter()
+        .map(|image| Candidate {
+            url: image.url.clone(),
+            provenance: image.alt.trim().to_string(),
+            source: Source::WebArticle,
+        })
+        .collect();
+    log::debug!(
+        "describe_article_media[{trace_id}]: page={page_url} candidates={}",
+        candidates.len()
+    );
+    let collected = collect(&candidates, config, ocr, trace_id).await;
+
+    let mut figures = FigureSet {
+        figures: Vec::new(),
+        degraded: collected.degraded,
+    };
+    let mut placed: Vec<(&candidates::MarkdownImage, String)> = Vec::new();
+    for (image, figure) in images.iter().zip(collected.figures) {
+        let Some(figure) = figure else { continue };
+        placed.push((
+            image,
+            splice::figure_block(placed.len() + 1, &image.alt, &figure.section),
+        ));
+        figures.figures.push(figure);
+    }
+    let markdown = splice::splice(markdown, &placed);
+    log::debug!(
+        "describe_article_media[{trace_id}]: kept={} degraded={}",
+        figures.figures.len(),
+        figures.degraded
+    );
+    ArticleMedia { markdown, figures }
+}
+
 /// An image to run through [`collect`]: where it is, where it came from
 /// (which decides the checks and whether the classifier runs), and the line
 /// the `## Images` block prints under its embed.
@@ -485,7 +553,7 @@ pub(crate) async fn collect(candidates: &[Candidate], config: &Config, ocr: OcrF
         }
     }
     let downloads = futures::future::join_all(to_download.iter().map(|&i| {
-        download_photo(
+        download_image(
             &candidates[i].url,
             config.pipeline.fxtwitter_timeout_secs,
             cfg.max_download_bytes,
@@ -719,20 +787,25 @@ pub(crate) fn cap_section(section: &str, max_bytes: usize) -> String {
     format!("{}{MARK}", head.trim_end())
 }
 
-/// Fetch an image's bytes and MIME type. Non-2xx, a `Content-Type` that is
-/// not `image/*`, or a body over `max_bytes` (declared or read) is an `Err`.
-/// The MIME comes from the header because the URL ends `.jpg?name=orig`,
-/// which `ocr::mime_from_extension` misreads.
-async fn download_photo(url: &str, timeout_secs: u64, max_bytes: u64) -> Result<(Vec<u8>, String)> {
-    let client = vault::http::client(Duration::from_secs(timeout_secs)).context("build photo client")?;
+/// Fetch an image's bytes and MIME type, as a browser would ask for it (the
+/// design doc's fetch measurement used this UA; some image CDNs refuse a bare
+/// client). Non-2xx, a `Content-Type` that is not `image/*`, or a body over
+/// `max_bytes` (declared or read) is an `Err`. The MIME comes from the header
+/// because an X URL ends `.jpg?name=orig`, which `ocr::mime_from_extension`
+/// misreads, and a web URL often carries no extension at all.
+async fn download_image(url: &str, timeout_secs: u64, max_bytes: u64) -> Result<(Vec<u8>, String)> {
+    let client = vault::http::builder(vault::http::Timeouts::total(Duration::from_secs(timeout_secs)))
+        .user_agent(crate::readability::BROWSER_UA)
+        .build()
+        .context("build image client")?;
     let mut response = client
         .get(url)
         .send()
         .await
-        .with_context(|| format!("download X photo {url}"))?;
+        .with_context(|| format!("download image {url}"))?;
     let status = response.status();
     if !status.is_success() {
-        eyre::bail!("X photo {url} returned status {status}");
+        eyre::bail!("image {url} returned status {status}");
     }
     let mime = response
         .headers()
@@ -742,22 +815,22 @@ async fn download_photo(url: &str, timeout_secs: u64, max_bytes: u64) -> Result<
         .map(|v| v.trim().to_ascii_lowercase())
         .unwrap_or_default();
     if !mime.starts_with("image/") {
-        eyre::bail!("X photo {url} has content-type {mime:?}, not an image");
+        eyre::bail!("image {url} has content-type {mime:?}, not an image");
     }
     if response.content_length().is_some_and(|len| len > max_bytes) {
         eyre::bail!(
-            "X photo {url} declares {:?} bytes, over max-download-bytes {max_bytes}",
+            "image {url} declares {:?} bytes, over max-download-bytes {max_bytes}",
             response.content_length()
         );
     }
     let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.with_context(|| format!("read X photo {url}"))? {
+    while let Some(chunk) = response.chunk().await.with_context(|| format!("read image {url}"))? {
         if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
-            eyre::bail!("X photo {url} is over max-download-bytes {max_bytes}");
+            eyre::bail!("image {url} is over max-download-bytes {max_bytes}");
         }
         bytes.extend_from_slice(&chunk);
     }
-    log::debug!("download_photo: url={url} mime={mime} bytes={}", bytes.len());
+    log::debug!("download_image: url={url} mime={mime} bytes={}", bytes.len());
     Ok((bytes, mime))
 }
 
@@ -768,9 +841,9 @@ fn ocr_photo(bytes: &[u8], ocr: OcrFn, timeout_secs: u64) -> Result<String> {
     ocr(file.path(), timeout_secs)
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "no article path feeds candidates yet"))]
 mod candidates;
 mod prefilter;
+mod splice;
 mod svg;
 
 #[cfg(test)]

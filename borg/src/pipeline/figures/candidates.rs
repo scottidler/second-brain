@@ -4,7 +4,7 @@
 //! images, so the destination arrives as
 //! `<https://host/p/{"src":"https://substack-post-media...",...}>`: the real
 //! URL is the JSON's `src`. Relative URLs resolve against the page URL.
-//! The parser is pure; no article path calls it yet.
+//! The parser is pure; `figures::describe_article_media` calls it.
 
 use regex::Regex;
 use std::ops::Range;

@@ -11,7 +11,7 @@ use vault::http::Timeouts;
 
 /// A realistic desktop Firefox UA. Some sites gate plain/library UAs but serve
 /// browser-looking clients; mirrors `stages::fetcher::BROWSER_UA`.
-const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
+pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0";
 
 /// Typed failure modes for [`fetch_article_readable`]. The caller falls through
 /// to the existing fabric-u/Jina/browser-UA chain on ANY variant, matching on

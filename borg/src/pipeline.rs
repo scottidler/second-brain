@@ -31,6 +31,7 @@ pub mod permits;
 use atomic::{apply_original_date, apply_preserved_fields};
 use inflight::InflightGuard;
 
+mod article;
 mod figures;
 mod handlers;
 mod publish;
@@ -742,7 +743,9 @@ async fn process_url_inner(
     // thread markdown. Video and article leave it `None`.
     let mut archive_source_md: Option<String> = None;
     // The fetch landed but impoverished: the YouTube engine fell back, or an
-    // X post's photo was omitted or described from OCR alone.
+    // X post's photo was omitted or described from OCR alone. The figure
+    // stage's own flag (an X or web-article image that passed the prefilter
+    // and then failed) is OR-ed in after `figures::plan` below.
     let mut fetch_degraded = false;
     let mut figure_set = figures::FigureSet::default();
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
@@ -892,21 +895,24 @@ async fn process_url_inner(
             )
             .await
         } else {
-            // Source/quality gate (article-only) now runs INSIDE
-            // distill_for_publish_article, before distilled.yml is persisted
-            // (distillation-output-restore design) - so
-            // chrome junk from a non-clean fetch never reaches staging or
-            // embeddings, not just the rendered note.
-            crate::stages::distill::distill_for_publish_article(
-                &config.fabric,
-                &config.staging,
-                trace_id,
+            // The article's figures are described and spliced in at their
+            // images before distill (capture-all-diagrams design); the
+            // source/quality gate runs INSIDE distill_for_publish_article on
+            // the pre-splice markdown, before distilled.yml is persisted
+            // (distillation-output-restore design) - so chrome junk from a
+            // non-clean fetch never reaches staging or embeddings.
+            let stage = article::distill_article(
                 &url_match.url,
                 &article_md,
-                capture_note,
                 transcript_clean_source,
+                capture_note,
+                config,
+                ocr::ocr_extract,
+                trace_id,
             )
-            .await
+            .await;
+            figure_set = stage.figures;
+            stage.distilled
         };
         // Gate-2 runs against the concise Distilled summary, which is what
         // we now display to users; it is also what the tag classifier

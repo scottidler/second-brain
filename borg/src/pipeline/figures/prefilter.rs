@@ -19,10 +19,6 @@ pub(crate) enum Source {
     /// A figure inside an X Article: author-placed, classified.
     XArticle,
     /// An image in a web article: content heuristics and classified.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "constructed once the article paths feed candidates")
-    )]
     WebArticle,
 }
 

@@ -338,21 +338,27 @@ fn vic_reply(base: &str) -> Reply {
     )
 }
 
-struct Published {
-    vault: PathBuf,
-    note: String,
-    images_frontmatter: Vec<String>,
+pub(super) struct Published {
+    pub(super) vault: PathBuf,
+    pub(super) note: String,
+    pub(super) images_frontmatter: Vec<String>,
 }
 
 fn publish_post(post: &FetchedPost, config: &Config, dir: &Path) -> Published {
+    publish_figures(&post.figures, &post.title, config, dir)
+}
+
+/// plan -> render -> `publish_url_note` for a figure set, the steps
+/// `process_url_inner` runs after the fetch, under trace `cl-8c531660`.
+pub(super) fn publish_figures(set: &figures::FigureSet, title: &str, config: &Config, dir: &Path) -> Published {
     let vault = dir.join("vault");
     std::fs::create_dir_all(vault.join("inbox")).expect("inbox");
     let now = chrono::Utc::now();
-    let plan = figures::plan(&post.figures, "cl-8c531660", &now, &config.images);
+    let plan = figures::plan(set, "cl-8c531660", &now, &config.images);
     let body = figures::with_images_section("## Summary\n\nvic argues.", &plan);
     let images: Vec<String> = plan.planned.iter().map(|f| f.vault_path.clone()).collect();
     let content = crate::markdown::NoteContent {
-        title: post.title.clone(),
+        title: title.to_string(),
         source_url: Some("https://x.com/poster/status/100".to_string()),
         trace_id: Some("cl-8c531660".to_string()),
         images: images.clone(),
@@ -383,7 +389,7 @@ fn publish_post(post: &FetchedPost, config: &Config, dir: &Path) -> Published {
         vault_root: &vault,
         max_note_bytes: config.pipeline.max_note_bytes,
         figures: &plan.planned,
-        image_stage_degraded: post.figures.degraded || plan.degraded,
+        image_stage_degraded: set.degraded || plan.degraded,
         old_owned: &old_owned,
         new_slides: &[],
     })
