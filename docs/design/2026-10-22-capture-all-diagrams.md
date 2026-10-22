@@ -7,7 +7,7 @@
 
 ## Summary
 
-Borg sees the diagrams in X posts and web articles and throws them away. X photos get downloaded and described, then the bytes die; X Article figures and web-article images never get downloaded at all. This doc stores every diagram as a vault asset, embeds it in the note under an `## Images` section with its description, and rebuilds the existing X notes.
+Borg sees the diagrams in X posts and web articles and throws them away. X photos get downloaded and described, then the bytes die; X Article figures and web-article images never get downloaded at all. This doc stores every X post photo, and every diagram in an X Article or web article, as a vault asset, embeds it in the note under an `## Images` section with its description, and rebuilds the existing X notes.
 
 ## Problem Statement
 
@@ -282,7 +282,7 @@ echo "$emb $fm $ex"
 ## Resolved Decisions
 
 - 2026-10-22, Scott: scope is X posts plus web articles (option B over X-only).
-- 2026-10-22, author + staff engineer (round 1): X post photos skip the classifier (author-chosen, at most 4, often the whole content); X Article figures and web-article images are classified. Architect dissent recorded: classify everything (memes, selfies). Not taken: storing X photos is exactly what Scott asked for on the vic post, and the 2026-10-19 doc already describes every one.
+- 2026-10-22, author + staff engineer (round 1): X post photos skip the classifier (author-chosen, at most 4, often the whole content); X Article figures and web-article images are classified. Architect dissent recorded: classify everything (memes, selfies). Not taken: storing X photos is exactly what Scott asked for on the vic post, and the 2026-10-19 doc already describes every one. Round 2: two of the architect's three examples (steipete's OpenClaw terminal screenshot carrying the 458MB/503MB/173MB breakdown, and the RepoBar app screenshot) are post content that the `keep` list (no `terminal`, no `app-ui`) would delete; the cost of the skip is decorative art, at most 4 per post.
 - 2026-10-22, author: one module for all three sources (`figures.rs`), extending the 2026-10-19 shared `image_section` rule.
 - 2026-10-22, author + both seats: descriptions stay in the note body under each embed, for FTS reach, capped by `max-section-bytes`; the in-note transcript stays eradicated.
 - 2026-10-22, author + staff engineer: two vision calls per kept classified image, with the cap before describe. Architect dissent recorded: one combined call. Not taken: see Alternative 4.
