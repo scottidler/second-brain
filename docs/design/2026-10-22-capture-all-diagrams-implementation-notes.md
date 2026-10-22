@@ -66,3 +66,31 @@
 
 ### Open questions
 - None.
+
+## Phase 3: X Article figures
+### Design decisions
+- Serde for `entityRanges`, `entityMap` (a list of `{key, value}`), and `media_entities` on `x::Block` / `x::ArticleContent` / `x::Article`; every key and media id is read through one `key_as_string` deserializer, since a block's range key is a JSON number and the entity map's is a string — `borg/src/x.rs` — one comparison type, and a non-scalar key is a parse error (fail loudly), pinned by `x_article_entity_key_rejects_non_scalar`.
+- `x::article_figures(post)` resolves `atomic` block -> `entityRanges[0].key` -> entity -> `MEDIA` -> each `mediaItems[].mediaId` -> `media_entities[].media_info.original_img_url`, caption from the entity; any break in that chain skips the block with an `info` log line and returns the rest — `x.rs:article_figures` / `resolve_atomic`.
+- `DescribedImage` gained `place: Place { Photo | Figure(n) }`, `n` indexing `article_figures` of the owning post; `render_blocks` emits a placed figure at its `atomic` block as `<sub> Image N`, `*caption*`, then the section, and an atomic block with nothing placed still renders nothing — `x.rs:render_blocks` — so the distiller sees the figure where the author put it.
+- `FIGURE_TAXONOMY_PROMPT` sits beside `TAXONOMY_PROMPT` with `classify_figure(bytes, mime, &FigureFilterConfig, &LlmConfig)`, same `parse_classification` and fail-closed `ClassifyError`; the prompt text was checked byte-equal against the doc's Phase 0 block (2050 bytes) — `borg/src/slides/classify.rs`.
+- `keep_outcome` now delegates to `keep_outcome_for(result, keep, min_confidence)`, which the figure path calls with `images.content-filter` — `slides/classify.rs` — one keep rule for slides and figures.
+- `figures::collect_classified(candidates, config, ocr, trace_id) -> Collected` is the source-agnostic classified path Phase 5 reuses: first `max-candidates` downloaded concurrently -> classify concurrently (vision pool bounds it) -> keep -> cap at `max-per-note` in source order -> describe concurrently; returns one slot per candidate, positionally aligned. Drops are tallied `prefilter / not-diagram / cap / error` and written as the design's one `info` line per call; only `error` degrades — `borg/src/pipeline/figures.rs`.
+- `describe_photo` split into `download_photo` + `describe_bytes` so the classified path describes bytes it already downloaded (no second fetch) through the same OCR + vision + `image_section` + `cap_section` code as X photos.
+- `describe_x_photos`/`XPhotos` became `describe_x_media`/`XMedia`: photos (unclassified, as before) and both posts' Article figures (classified) run concurrently; `FigureSet` is assembled in source order, per owner the Article's figures then its photos, post before quote. A kept figure's provenance is its caption, else `In @<handle>'s article`.
+- With `images.enabled: false` no Article figure is downloaded, classified, or placed (today's behavior); with `content-filter.enabled: false` every downloaded figure is kept unclassified up to the cap. Classify uses `content-filter.model` and ignores `vision.enabled`, as `classify_slide` does.
+- Success-criterion tests, each broken once and seen failing before restore: (1) `x::tests::x_article_ubereng_yields_six_figures_in_block_order_with_captions` (broken: caption dropped); (2) `x::tests::x_article_unresolvable_atomic_block_is_skipped_and_render_succeeds` (broken: an unresolvable block aborts resolution); (3) `pipeline::tests::x::article::x_article_title_card_figure_is_not_kept` (broken: `DroppedNotInKeep` treated as keep; 6 describe calls instead of 5).
+
+### Deviations
+- Criterion 1 says "each with its `Figure N` caption"; the live Article's sixth figure (block 84, the Omni MCP diagram) has no caption in fxtwitter's JSON (Phase 0 Results already calls it "uncaptioned"). The test asserts captions `Figure 1`..`Figure 5` plus `None` for the sixth, and that figure's provenance falls back to `In @UberEng's article`.
+- `Candidate` is `{ url, provenance }`, not `{ url, alt, caption, origin }`: the only thing `origin` decided was "X post photos skip classify", and X photos never enter `collect_classified`, so every candidate there is classified by construction. Phase 5 adds what web articles need (alt text into provenance fits the same field).
+- The fixture replaces `borg/src/x/article.json` rather than adding a second UberEng file: one Article fixture, now trimmed from the live JSON with all 93 blocks (`type`, `text`, `entityRanges`), the full `entityMap`, and `media_entities` cut to `media_id` + `media_info.{original_img_url,width,height}`. Every pre-existing test on `ARTICLE` still passes against it.
+- SVG reaching the classified path is dropped as `prefilter` (`unsupported-format`): the vision API takes no svg and the rasterizer is Phase 4. X Article media is pbs JPEG, so nothing hits this today.
+- `Figure` still carries no `category`/`width`/`height`: nothing reads them yet.
+- Overflow past `max-candidates` is counted in the `cap` bucket of the log line (the design names only the four buckets).
+
+### Tradeoffs
+- Concurrent classify and describe fan-out via `join_all` vs a `JoinSet` like `classify_slides`: the vision permit pool already bounds in-flight calls and `join_all` keeps results in order without an index-reassembly step; a panic in one future would take the trace down rather than one figure, accepted since the futures do no unchecked indexing.
+- Placing figures by index into a fresh `article_figures` call at render time vs threading block indices through `DescribedImage`: the resolution is pure and cheap, and one function stays the only place the entity chain is walked.
+
+### Open questions
+- Should X post photos also route through a shared `collect` (classify skipped) so they emit the same `figures: kept=… dropped={…}` line? Phase 2's path is unchanged and logs per photo only.

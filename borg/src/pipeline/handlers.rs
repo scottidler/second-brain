@@ -676,11 +676,11 @@ pub(crate) async fn process_x_post_from(
 ) -> Result<FetchedPost> {
     log::debug!("process_x_post[{trace_id}]: url={url} status_id={status_id}");
     let post = crate::x::fetch_post(api_base, status_id, config.pipeline.fxtwitter_timeout_secs).await?;
-    let super::figures::XPhotos {
+    let super::figures::XMedia {
         images,
         figures,
         degraded,
-    } = super::figures::describe_x_photos(&post, config, ocr, trace_id).await;
+    } = super::figures::describe_x_media(&post, config, ocr, trace_id).await;
     if images.is_empty() && !crate::x::has_text(&post) {
         eyre::bail!("X post {status_id} has no text and no photo could be described");
     }

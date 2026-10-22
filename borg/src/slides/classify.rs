@@ -17,7 +17,7 @@ use eyre::{Result, eyre};
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 
-use crate::config::{ContentFilterConfig, LlmConfig, SlideCategory, SlideClass, VisionConfig};
+use crate::config::{ContentFilterConfig, FigureFilterConfig, LlmConfig, SlideCategory, SlideClass, VisionConfig};
 use crate::ocr;
 use crate::slides::{KeptRun, Run};
 
@@ -94,6 +94,75 @@ without a wired system. When unsure between a diagram and an infographic, prefer
 Respond with EXACTLY two lines and nothing else:
 CATEGORY: <one of the category strings above, lowercase, hyphenated>
 CONFIDENCE: <a number between 0.0 and 1.0>";
+
+/// The taxonomy prompt for a figure on a page: an X Article figure or a
+/// web-article image (`docs/design/2026-10-22-capture-all-diagrams.md`). Same
+/// categories and reply schema as [`TAXONOMY_PROMPT`], so [`parse_classification`]
+/// reads both; the framing is a page figure, not a video frame. The text is
+/// the design doc's measured prompt verbatim, precision 0.909 / recall 0.952 on
+/// 60 hand labels at `min-confidence: 0.6`: re-measure before editing it.
+pub(crate) const FIGURE_TAXONOMY_PROMPT: &str = "\
+You are classifying a single image taken from a web page or a social-media post into exactly ONE category.
+
+Classify by the DOMINANT content - the largest, central thing in the image. The image may be a cropped figure, a screenshot, a photo, or a slide-style graphic embedded in an article. A figure inside a slide-style frame or with a caption is judged by the figure itself.
+
+Categories (choose exactly one):
+- architecture-diagram: components/systems wired together by arrows or lines; data/control flow between boxes, layers, or services.
+- sequence-diagram: UML or interaction sequence (lifelines, ordered messages between actors).
+- flowchart: flow or decision diagram (process steps, decision diamonds, yes/no branches).
+- code: source code shown as an image (an editor, a code block, syntax-highlighted text).
+- terminal: a terminal, TUI, or CLI session / command output.
+- infographic: a framework, maturity-model, quadrant, or marketing-style graphic. NOT a real wired diagram - boxes that are LISTS or LABELS, not connected components.
+- chart: a bar, line, scatter, pie, or plot chart of DATA.
+- app-ui: an application GUI or website screenshot (buttons, menus, panels, a page in a browser).
+- webpage: a browser showing a blog, docs page, or website.
+- talking-head: one or more people on camera or a portrait photo.
+- b-roll: a photograph of physical objects, hardware, products, or scenery; stock or decorative photos; logos, icons, mascots, and memes.
+- title-card: a banner, hero, cover, or title graphic (large title text, little else).
+- other: anything that fits none of the above.
+
+Draw a SHARP line between true diagrams (architecture-diagram / sequence-diagram / flowchart),
+which show connected components with flow, and infographic / chart, which present labels or data
+without a wired system. When unsure between a diagram and an infographic, prefer infographic.
+
+Respond with EXACTLY two lines and nothing else:
+CATEGORY: <one of the category strings above, lowercase, hyphenated>
+CONFIDENCE: <a number between 0.0 and 1.0>";
+
+/// Classify a figure's downloaded bytes with [`FIGURE_TAXONOMY_PROMPT`].
+/// Same fail-closed contract as [`classify_slide`]: an API error or an
+/// off-format reply is an `Err`, and the caller drops the figure.
+pub(crate) async fn classify_figure(
+    bytes: &[u8],
+    mime: &str,
+    filter: &FigureFilterConfig,
+    llm: &LlmConfig,
+) -> std::result::Result<SlideClass, ClassifyError> {
+    log::debug!(
+        "classify_figure: mime={mime} bytes={} model={}",
+        bytes.len(),
+        if filter.model.is_empty() { "<inherit>" } else { filter.model.as_str() },
+    );
+    let vision = VisionConfig {
+        enabled: true,
+        model: filter.model.clone(),
+    };
+    let raw = ocr::vision_classify(bytes, mime, &vision, llm, FIGURE_TAXONOMY_PROMPT)
+        .await
+        .map_err(|e| ClassifyError::Api(eyre!("vision_classify figure: {e:#}")))?;
+    let class = parse_classification(&raw).map_err(|e| {
+        ClassifyError::Parse(eyre!(
+            "parse figure classification (raw reply preview: {:?}): {e}",
+            preview(&raw)
+        ))
+    })?;
+    log::debug!(
+        "classify_figure: category={:?} confidence={:.3}",
+        class.category,
+        class.confidence
+    );
+    Ok(class)
+}
 
 /// Classify a single slide frame on disk. Reads the JPEG bytes, derives its mime
 /// from the extension, calls [`ocr::vision_classify`] with the taxonomy prompt,
@@ -232,6 +301,17 @@ pub fn keep_outcome(
     result: &std::result::Result<SlideClass, ClassifyError>,
     filter: &ContentFilterConfig,
 ) -> KeepOutcome {
+    keep_outcome_for(result, &filter.keep, filter.min_confidence)
+}
+
+/// [`keep_outcome`] against an explicit `keep` list and `min_confidence`, so
+/// the slide filter and the figure filter (`images.content-filter`) share one
+/// keep rule.
+pub fn keep_outcome_for(
+    result: &std::result::Result<SlideClass, ClassifyError>,
+    keep: &[SlideCategory],
+    min_confidence: f32,
+) -> KeepOutcome {
     match result {
         Err(ClassifyError::Parse(_)) => KeepOutcome::DroppedParseError,
         // Read / Api / Join all mean "the classifier could not speak" - they are
@@ -239,9 +319,9 @@ pub fn keep_outcome(
         // legitimately returning off-format text.
         Err(_) => KeepOutcome::DroppedApiError,
         Ok(class) => {
-            if !filter.keep.contains(&class.category) {
+            if !keep.contains(&class.category) {
                 KeepOutcome::DroppedNotInKeep
-            } else if class.confidence < filter.min_confidence {
+            } else if class.confidence < min_confidence {
                 KeepOutcome::DroppedLowConfidence
             } else {
                 KeepOutcome::Keep

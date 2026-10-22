@@ -528,3 +528,5 @@ async fn photo_section_is_capped_at_max_section_bytes() {
         "the distiller sees the capped section"
     );
 }
+
+mod article;

@@ -48,6 +48,7 @@ async fn fetch_fixture(body: &'static str) -> Result<Post> {
 fn photo(owner: Owner, section: &str) -> DescribedImage {
     DescribedImage {
         owner,
+        place: Place::Photo,
         section: section.to_string(),
     }
 }
@@ -127,6 +128,7 @@ fn x_post_article_drops_atomic_and_empty_blocks_and_numbers_lists() {
     let block = |kind: &str, text: &str| Block {
         kind: kind.to_string(),
         text: text.to_string(),
+        entity_ranges: Vec::new(),
     };
     let md = render_blocks(
         &[
@@ -139,6 +141,7 @@ fn x_post_article_drops_atomic_and_empty_blocks_and_numbers_lists() {
             block("ordered-list-item", "restart"),
         ],
         2,
+        &[],
     );
     assert_eq!(md, "before\n\n1. first\n2. second\n\nafter\n\n1. restart\n\n");
 }
@@ -352,4 +355,118 @@ async fn x_post_fetch_sends_descriptive_user_agent() {
 
     let post = fetch_post(&format!("http://127.0.0.1:{port}"), 2112024357551931564, 10).await;
     assert!(post.is_ok(), "fxtwitter 401s without a User-Agent: {post:?}");
+}
+
+// ---------------------------------------------------------------------------
+// X Article figures (docs/design/2026-10-22-capture-all-diagrams.md).
+// `article.json` is trimmed from the live UberEng Article (status
+// 2106071967619322330) with `entityRanges`, `entityMap` and `media_entities`.
+// ---------------------------------------------------------------------------
+
+fn article_post() -> Post {
+    let envelope: Envelope = serde_json::from_str(ARTICLE).expect("fixture parses");
+    envelope.tweet.expect("tweet")
+}
+
+/// Criterion 1: six figures, in block order, each with its caption (Figure
+/// 1-5; the sixth, the Omni MCP diagram, has none in the source).
+#[test]
+fn x_article_ubereng_yields_six_figures_in_block_order_with_captions() {
+    let figures = article_figures(&article_post());
+
+    assert_eq!(figures.len(), 6, "{figures:#?}");
+    let blocks: Vec<usize> = figures.iter().map(|f| f.block).collect();
+    assert_eq!(blocks, vec![5, 20, 41, 42, 46, 84]);
+    let captions: Vec<Option<&str>> = figures.iter().map(|f| f.caption.as_deref()).collect();
+    assert_eq!(
+        captions,
+        vec![
+            Some("Figure 1: MCP Gateway (APIs as tools)."),
+            Some("Figure 2: Auto Crawler."),
+            Some("Figure 3: MCP Registry UI."),
+            Some("Figure 4: MCP tool UI."),
+            Some("Figure 5: MCP Gateway Data Plane."),
+            None,
+        ]
+    );
+    assert_eq!(figures[1].url, "https://pbs.twimg.com/media/HTo9FH8bQAAiYk8.jpg");
+    assert!(
+        figures
+            .iter()
+            .all(|f| f.url.starts_with("https://pbs.twimg.com/media/")),
+        "{figures:#?}"
+    );
+}
+
+/// Criterion 2: an atomic block with no matching entity (and one with no
+/// entity range, and one naming a LINK) is skipped; the others resolve and
+/// the render still succeeds with the skipped block's neighbors intact.
+#[test]
+fn x_article_unresolvable_atomic_block_is_skipped_and_render_succeeds() {
+    let mut post = article_post();
+    let content = post.article.as_mut().and_then(|a| a.content.as_mut()).expect("content");
+    content.blocks[5].entity_ranges[0].key = "999".to_string();
+    content.blocks[20].entity_ranges.clear();
+    content.blocks[41].entity_ranges[0].key = "8".to_string(); // a LINK entity
+
+    let figures = article_figures(&post);
+    let blocks: Vec<usize> = figures.iter().map(|f| f.block).collect();
+    assert_eq!(blocks, vec![42, 46, 84], "{figures:#?}");
+
+    let images: Vec<DescribedImage> = (0..figures.len())
+        .map(|n| DescribedImage {
+            owner: Owner::Post,
+            place: Place::Figure(n),
+            section: format!("#### Description\n\nfigure {n}"),
+        })
+        .collect();
+    let (_, md) = render(&post, &images);
+    assert!(md.contains("We built the MCP Gateway to address this need"), "{md}");
+    assert!(md.contains("In this blog, we review the design"), "{md}");
+    assert!(
+        md.contains("*Figure 4: MCP tool UI.*\n\n#### Description\n\nfigure 0"),
+        "{md}"
+    );
+    assert!(!md.contains("Figure 1: MCP Gateway"), "skipped figure leaked:\n{md}");
+}
+
+/// A described figure renders at its atomic block, between the paragraphs
+/// around it, with its caption; an undescribed one leaves nothing behind.
+#[test]
+fn x_article_figure_renders_at_its_atomic_block() {
+    let post = article_post();
+    let images = [
+        DescribedImage {
+            owner: Owner::Post,
+            place: Place::Figure(1),
+            section: "#### Description\n\nThe crawler.".to_string(),
+        },
+        DescribedImage {
+            owner: Owner::Quote,
+            place: Place::Figure(0),
+            section: "#### Description\n\nnot this post's".to_string(),
+        },
+    ];
+    let (_, md) = render(&post, &images);
+
+    let figure = md
+        .find("### Image 1\n\n*Figure 2: Auto Crawler.*\n\n#### Description\n\nThe crawler.")
+        .unwrap_or_else(|| panic!("figure at its block:\n{md}"));
+    let before = md.find("This shared foundation enables MCP").expect("block 19");
+    let after = md.find("Discovery for IDL-Backed Services").expect("block 21");
+    assert!(before < figure && figure < after, "{md}");
+    assert!(
+        !md.contains("Figure 1:"),
+        "an undescribed figure renders nothing:\n{md}"
+    );
+    assert!(
+        !md.contains("not this post's"),
+        "a quote's figure stays off the post:\n{md}"
+    );
+}
+
+#[test]
+fn x_article_entity_key_rejects_non_scalar() {
+    let err = serde_json::from_str::<EntityRange>(r#"{"key": [1]}"#).expect_err("array key");
+    assert!(err.to_string().contains("string or number"), "{err}");
 }

@@ -223,3 +223,98 @@ fn test_strip_key_matches_case_insensitively() {
     assert_eq!(strip_key("notakey: x", "CATEGORY"), None);
     assert_eq!(strip_key("no-colon-here", "CATEGORY"), None);
 }
+
+// ---------------------------------------------------------------------------
+// Figure classification (docs/design/2026-10-22-capture-all-diagrams.md)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keep_outcome_for_applies_the_figure_keep_list_and_threshold() {
+    let keep = crate::config::FigureFilterConfig::default().keep;
+    assert_eq!(
+        keep_outcome_for(&ok(SlideCategory::Chart, 0.6), &keep, 0.6),
+        KeepOutcome::Keep
+    );
+    assert_eq!(
+        keep_outcome_for(&ok(SlideCategory::Chart, 0.59), &keep, 0.6),
+        KeepOutcome::DroppedLowConfidence
+    );
+    assert_eq!(
+        keep_outcome_for(&ok(SlideCategory::TitleCard, 0.99), &keep, 0.6),
+        KeepOutcome::DroppedNotInKeep
+    );
+    let api: std::result::Result<SlideClass, ClassifyError> = Err(ClassifyError::Api(eyre!("boom")));
+    assert_eq!(keep_outcome_for(&api, &keep, 0.6), KeepOutcome::DroppedApiError);
+}
+
+/// A one-route vision stub answering every `/v1/messages` with `(code, text)`
+/// and recording the prompt it was sent.
+async fn vision_stub(code: u16, text: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::response::IntoResponse;
+    let prompts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = prompts.clone();
+    let app = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post(move |body: String| {
+            let seen = seen.clone();
+            async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("body");
+                let prompt = request["messages"][0]["content"][1]["text"].as_str().unwrap_or("");
+                seen.lock().expect("prompts").push(prompt.to_string());
+                let reply = serde_json::json!({"content": [{"type": "text", "text": text}]});
+                let code = axum::http::StatusCode::from_u16(code).expect("status");
+                (code, [("content-type", "application/json")], reply.to_string()).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    (base, prompts)
+}
+
+fn llm_with_key(dir: &Path) -> LlmConfig {
+    let key = dir.join("anthropic.key");
+    std::fs::write(&key, "stub-key").expect("key");
+    LlmConfig {
+        api_key: key.to_string_lossy().to_string(),
+        ..LlmConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn classify_figure_sends_the_figure_prompt_and_parses_the_reply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (base, prompts) = vision_stub(200, "CATEGORY: flowchart\nCONFIDENCE: 0.8").await;
+    let filter = crate::config::FigureFilterConfig::default();
+
+    let class = crate::ocr::bases::scope(
+        base,
+        classify_figure(b"jpeg", "image/jpeg", &filter, &llm_with_key(dir.path())),
+    )
+    .await
+    .expect("classified");
+
+    assert_eq!(class.category, SlideCategory::Flowchart);
+    assert!((class.confidence - 0.8).abs() < f32::EPSILON);
+    assert_eq!(prompts.lock().expect("prompts").as_slice(), [FIGURE_TAXONOMY_PROMPT]);
+}
+
+#[tokio::test]
+async fn classify_figure_fails_closed_on_api_error_and_off_format_reply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let filter = crate::config::FigureFilterConfig::default();
+    let llm = llm_with_key(dir.path());
+
+    let (base, _) = vision_stub(500, "boom").await;
+    let err = crate::ocr::bases::scope(base, classify_figure(b"jpeg", "image/jpeg", &filter, &llm))
+        .await
+        .expect_err("500 fails");
+    assert!(matches!(err, ClassifyError::Api(_)), "{err}");
+
+    let (base, _) = vision_stub(200, "a lovely diagram").await;
+    let err = crate::ocr::bases::scope(base, classify_figure(b"jpeg", "image/jpeg", &filter, &llm))
+        .await
+        .expect_err("off-format fails");
+    assert!(matches!(err, ClassifyError::Parse(_)), "{err}");
+}
