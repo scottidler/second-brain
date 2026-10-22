@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler
 **Date:** 2026-10-22
-**Status:** Draft
+**Status:** Approved
 **Review Passes Completed:** 5/5
 
 ## Summary
@@ -288,6 +288,7 @@ echo "$emb $fm $ex"
 - 2026-10-22, author + staff engineer: two vision calls per kept classified image, with the cap before describe. Architect dissent recorded: one combined call. Not taken: see Alternative 4.
 - 2026-10-22, round 1 must-fixes folded: size gate sees the full note; trace-id ownership; degraded reingest fails closed; cap before describe; no second vision-pool knob; quality gate on the pre-splice source.
 - 2026-10-22, both seats: no new staging-based reingest selector for the backfill.
+- 2026-10-22, Scott: backfill every article note after a canary (option B over forward-only); steps in the Rollout Plan.
 
 ## Alternatives Considered
 
@@ -344,7 +345,13 @@ echo "$emb $fm $ex"
 
 1. Release, `otto deploy` on ripr and desk.
 2. X notes: `sb borg reingest --type social`, plus the 4 renamed notes by exact `--source` (the 2026-10-19 rollout list); `sb borg wait`.
-3. Web articles: the martinfowler note for Acceptance Criterion 4, then the backfill per Open Question 1.
+3. Web articles, backfilling every article note:
+   - `--source` is a substring match, so every per-note run passes the note's full URL.
+   - The martinfowler note for Acceptance Criterion 4, by `--source`.
+   - `sb borg reingest --type article --dry-run`, and reconcile its count against the vault's article notes. Observed on main 2026-10-22: dry run lists 615; `rg -l '^type: article'` finds 643 notes.
+   - A canary of 3 notes from the 358 with image refs, each by `--source`; `sb borg wait`; run the ownership check on each.
+   - `sb borg reingest --type article`, then the notes missing from the dry run by `--source`, as in the 2026-10-19 social rollout; `sb borg wait`.
+   - A page that no longer fetches fails `fetch-failed` and keeps its old note; `sb borg log --status failed --since 1d` lists them.
 4. Scott commits the new attachments in the vault repo.
 
 ## Risks and Mitigations
@@ -362,7 +369,7 @@ echo "$emb $fm $ex"
 
 ## Open Questions
 
-- [ ] 1. Article backfill (Scott): forward-only, or `sb borg reingest --type article` after a canary (`--dry-run` count reconciled against the 640 article notes; renamed notes by exact `--source`, as the 2026-10-19 social rollout did). A new staging-based selector is rejected by both seats.
+None.
 
 ## References
 
