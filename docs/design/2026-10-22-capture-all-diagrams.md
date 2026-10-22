@@ -58,16 +58,17 @@ Parked, with revisit condition:
 
 ```
   X post photos ─┐
-  X Article figs ├─> figures::collect ─> prefilter ─> classify ─> describe ─> FigureSet
-  article ![](u) ┘    (download, cap)    (cheap)      (vision,    (vision +    │
-                                                       articles    OCR)        │
-                                                       only)                   │
-          distiller input <── description spliced in position ─────────────────┤
-          (claims ground in the diagram; lands in distilled.yml transcript)     │
-                                                                               │
-  after every publish gate:  store_figures ─> images: [paths] ─> ## Images ────┘
-                             (atomic, never overwrite)            ![[file]] + description
-  after durable publish:     orphans of the old images: list -> rkvr
+  X Article figs ├─> figures::collect ─> prefilter ─> classify ──> cap ──> describe ─> FigureSet
+  article ![](u) ┘   (download, byte    (format;     (vision;     (max-   (vision +      │
+                      ceiling)           articles:    X Article    per-    OCR)           │
+                                         heuristics)  + articles)  note)                  │
+          distiller input <── description spliced in position ────────────────────────────┤
+          (claims ground in the diagram; lands in distilled.yml transcript)                │
+                                                                                          │
+  plan paths ─> render full note (images: + ## Images) ─> size gate ─> write assets ─> publish
+                                                                        (no-clobber)     │
+  after durable publish:  old images: minus new images: -> rkvr                         │
+  publish fails:          files THIS run created -> rkvr                                ┘
 ```
 
 ### Architecture
@@ -76,8 +77,9 @@ Parked, with revisit condition:
 
 - `Candidate { url, alt, caption, origin }`: `origin` is `XPost(Owner) | XArticle | Article`.
 - `Figure { candidate, bytes, mime, width, height, category: Option<SlideCategory>, section }`: the kept image, its bytes, and its built Description / Extracted Text section (`image_section`, unchanged).
-- `collect(candidates, cfg) -> FigureSet`: download (cap `max-candidates`), prefilter, classify (articles only), describe, cap `max-per-note`. Each drop is counted by reason in the result so a receipt can say why.
-- `store(vault_root, &FigureSet, now) -> Vec<StoredFigure>`: the only writer. Runs after every publish gate.
+- `collect(candidates, cfg) -> FigureSet`: download (`max-candidates`, each capped at `max-download-bytes`), prefilter, classify, cap at `max-per-note`, **then** describe. The cap runs before describe, so vision calls per note are at most `max-candidates` (classify) + `max-per-note` (describe). Drops are counted by reason and written as one `info` log line per trace (`figures: kept=N dropped={prefilter:a, not-diagram:b, cap:c, error:d}`). Receipts keep their single `degraded` boolean; no schema change.
+- `plan(&FigureSet, trace_id, now) -> Vec<PlannedFigure>`: assigns each kept figure its vault path. Pure, no I/O.
+- `store(vault_root, &[PlannedFigure]) -> Vec<PathBuf>`: the only writer. Runs after the size gate passes on the fully rendered note. Returns only the files it created.
 
 **Candidates per source:**
 
@@ -87,38 +89,56 @@ Parked, with revisit condition:
 
 **Prefilter (deterministic, no network beyond the download):**
 
-- Drop `data:` URIs, `avif`, and any MIME the pipeline cannot decode (`image` here decodes png, jpeg, gif, webp, bmp, tiff).
+Format and safety checks apply to every source:
+
+- Keep only png, jpeg, gif, webp, and svg: the formats the vision API accepts plus svg (rasterized below). `data:` URIs, avif, bmp, tiff, and anything else are dropped with reason `unsupported-format`. bmp/tiff were 0 of 2696 refs; not worth a transcode path.
+- Downloads stop at `max-download-bytes` (default 20 MiB); over it is a drop, reason `too-large`. `download_photo` today reads the whole body with no ceiling (`photos.rs:148`).
+- Exact duplicates within the note by sha256 are dropped. No perceptual-hash near-dup: two charts that differ only in their numbers would collide. Revisit if Phase 0 or a live note shows duplicates.
+
+Content heuristics apply to **web-article images only** (X photos and X Article figures are author-placed; see Classify):
+
 - Drop on URL tokens that only ever name decoration. Match whole tokens of the host and path split on non-alphanumerics, never substrings (`icon` must not hit `silicon`): `avatar`, `avatars`, `gravatar`, `authors`, `logo`, `logos`, `icon`, `icons`, `favicon`, `emoji`, `pixel`, `badge`, `badges`; hosts `yt3.ggpht.com`, `img.shields.io`.
 - Drop under `min-side-px` (default 200) on either axis, read from the decoded header.
-- Drop exact duplicates within the note by sha256 and near-duplicates by perceptual hash (`image_hasher`, already a direct borg dep, `borg/Cargo.toml:39`).
 - **Alt text is not a signal.** martinfowler: 7 of 7 diagrams have empty alt; chroma context-rot: 43 charts, all empty alt.
 
-**SVG:** 151 refs. Many are diagrams (mermaid and draw.io exports), many are icons. The vision API takes jpeg/png/gif/webp only. Rasterize with `resvg` (`cargo add resvg`) at the original viewBox, classify the raster, and store the **original `.svg`** (Obsidian renders it). The prefilter's size and keyword rules apply to the raster.
+**SVG:** 151 refs. Many are diagrams (mermaid and draw.io exports), many are icons. The vision API takes jpeg/png/gif/webp only. Rasterize with `resvg` (`cargo add resvg`), scaled so the longer side is at most `max-side-px` (an SVG's viewBox can be arbitrarily large), classify the raster, and store the **original `.svg`** (Obsidian renders it). The prefilter's size and keyword rules apply to the raster.
 
-**Classify (web articles only):**
+**Classify:**
 
-- `ocr::vision_classify` (`borg/src/ocr.rs:252`) with a new `ARTICLE_TAXONOMY_PROMPT` beside `TAXONOMY_PROMPT` (`borg/src/slides/classify.rs:76`). The slide prompt talks about webcam insets and video frames; an article figure needs its own wording. Same `SlideCategory` enum, same output schema, same fail-closed `ClassifyError`.
+- `ocr::vision_classify` (`borg/src/ocr.rs:252`) with a new `FIGURE_TAXONOMY_PROMPT` beside `TAXONOMY_PROMPT` (`borg/src/slides/classify.rs:76`). The slide prompt talks about webcam insets and video frames; a figure on a page needs its own wording. Same `SlideCategory` enum, same output schema, same fail-closed `ClassifyError`. The prompt is new; Phase 0 is its eval.
 - Keep if the category is in `images.content-filter.keep` and confidence >= `min-confidence`. A classify error drops the image and marks the receipt degraded.
-- **X photos skip classify.** A post has at most 4 photos, each chosen by the author, and they are often the whole content (the vic flowchart is a quoted-post photo). The 2026-10-19 doc already describes every one; this doc only stops discarding them.
-- **X Article figures skip classify.** Same reasoning: the author placed each one in the body with a caption.
+- **Web-article images and X Article figures are classified.** An X Article has no 4-image bound (UberEng carries 6) and its figures can be cover-style art, the same population as a web article.
+- **X post photos skip classify.** A post has at most 4 photos, each chosen by the author, and they are often the whole content (the vic flowchart is a quoted-post photo). The 2026-10-19 doc already describes every one; this doc only stops discarding them.
 
-**Describe:** the existing `describe_photo` path (OCR under `spawn_blocking` joined with `vision_extract`, `image_section` builder). Two vision calls per kept article image (classify, then describe) over one combined call: both prompts are proven, and only kept images pay the second call.
+**Describe:** the existing `describe_photo` path (OCR under `spawn_blocking` joined with `vision_extract`, `image_section` builder), run only on images that survived the cap. Two vision calls per kept classified image (classify, then describe) over one combined call: `vision_extract`'s prompt is proven, the classify prompt is evaluated in Phase 0, and only kept images pay the second call.
 
-**Distiller input:** each kept figure's section is spliced into the source markdown **at the image's position** (X: under its owning post, as `push_images` does today; X Article: at its atomic block; article: replacing its `![alt](url)` line). The distiller grounds claims in the diagram, and the description reaches `distilled.yml` `transcript:`, which cortex embeds from staging (`cortex/src/embed/source.rs:41`).
+- Each figure's section is capped at `max-section-bytes` (default 1500), truncated at a line boundary with a trailing `…`. `image_section` has no cap today, and an OCR dump of a dense chart would otherwise spend the note budget.
 
-**Store:** after the note-size gate (`pipeline.rs:1112`) and right before `archive_then_publish`.
+**Vision concurrency:** all vision calls share the one process-wide `VISION_PERMITS` pool, sized once at startup from `youtube.slides.content-filter.max-vision-concurrency` (`borg/src/startup.rs:41-42`; `init_vision_permits` ignores later calls). The `images:` filter therefore carries no concurrency knob of its own: a second knob over the same pool would be a name that lies.
 
-- Path: `system/attachments/images/YYYY-MM/<slug>-fig-<n>-<sha8>.<ext>`, `YYYY-MM` from the ingest time. Atomic write (temp + rename), never overwrite: an existing path with the same sha is reused, matching `slides/publish.rs` (`pick_filename`, `:119`).
-- Oversize: an image over `max-bytes` (default 2 MiB) is downscaled to `max-side-px` (default 2048) and re-encoded: jpeg -> jpeg q85, everything else -> png (the `image` webp encoder is lossless-only; a gif keeps its first frame). Still over the cap -> dropped, receipt degraded. An SVG is never resized.
-- The filename carries the note slug, so two notes never share a file and one note's cleanup can never remove another's image. A reingest in the same month with the same bytes reuses the path, so it is not an orphan.
-- If publish fails, the files written by this call go through `rkvr::remove`.
+**Distiller input:** each kept figure's section is spliced into the source markdown **at the image's position** (X: under its owning post, as `push_images` does today; X Article: at its atomic block; article: replacing its `![alt](url)` line). The distiller grounds claims in the diagram.
+
+- `gate_article_transcript` (`borg/src/stages/distill.rs:391`) runs `transcript_quality_ok` on the transcript. Short OCR lines from figures could push a good readable article over the short-line ratio and clear its whole transcript. So the quality check runs on the source **before** the splice; the stored transcript is the spliced one.
+- A non-clean article source (fabric, jina, browser) has its transcript cleared by that gate today. The figure descriptions still reach the note body (`## Images`) and so FTS; they do not reach transcript embeddings for those sources. Accepted: same as every other word of those pages.
+
+**Store and publish ordering** (fixes the order the size gate sees):
+
+1. `plan` assigns every kept figure its path before anything is written.
+2. The full note renders with `images:` and `## Images`.
+3. `note_size_gate` (`pipeline.rs:181`, called right before `archive_then_publish`) checks the full rendered note. A fail publishes nothing and writes no asset.
+4. `store` writes each file with `vault::note::write_atomic_new` (`vault/src/note.rs:182`, `persist_noclobber`, returns `Ok(false)` on an existing path).
+5. `archive_then_publish`. If it fails, only the files `store` created in step 4 go through `rkvr::remove`; a reused path is never touched.
+
+- **Path:** `system/attachments/images/YYYY-MM/<trace-id>-<n>-<sha8>.<ext>`, `YYYY-MM` from the ingest time. The trace id is unique per ingest, so two notes never share a file and one note's cleanup can never remove another's image. A note title is not unique (`hygiene::note_filename`, `pipeline.rs:983`; `publish_unique` exists because different sources share titles), so the slug cannot carry ownership.
+- **Oversize:** an image over `max-bytes` (default 2 MiB) is downscaled to `max-side-px` (default 2048) and re-encoded: jpeg -> jpeg q85, everything else -> png (the `image` webp encoder is lossless-only; a gif keeps its first frame). Still over the cap -> dropped, receipt degraded. An SVG is never resized.
+- `rkvr::remove` falls back to a plain delete when `rkvr` is not on PATH (`borg/src/rkvr.rs`), the same as slides today.
 
 **Note shape:** a new `## Images` section at the end of the distilled body, before the `---` / Source footer:
 
 ```markdown
 ## Images
 
-![[vicvijayakumar-on-x-...-fig-1-3fa2c8d1.jpg]]
+![[cl-8c531660-1-3fa2c8d1.jpg]]
 
 *In @boristane's post.*
 
@@ -131,10 +151,13 @@ Agent generates code
 ```
 
 - One sub-block per figure, in source order. The provenance line is the X owner (`In @handle's post`), the X Article caption, or the article alt text when non-empty.
-- The description stays in the body so oracle FTS (`vault/src/search/index.rs:304` indexes the body only) can keyword-match text inside a diagram. Cost: about 0.5-1 KB per figure against the 64 KiB note gate (`MAX_NOTE_BYTES`, `config.rs:384`); `max-per-note: 15` caps it at about 15 KB.
+- The description stays in the body so oracle FTS (`vault/src/search/index.rs:304` indexes the body only) can keyword-match text inside a diagram. Cost: at most `max-per-note` x `max-section-bytes` (20 x 1500 = 30 KB) against the 64 KiB note gate (`MAX_NOTE_BYTES`, `config.rs:384`), and the gate now sees it.
 - The section name is `## Images`, not `## Figures`: an X photo is often a screenshot, and the name has to be true for every source.
+- **Truncation is intended.** A page with more kept diagrams than `max-per-note` keeps the first `max-per-note` in source order; the rest are a `cap` drop in the log line, not degraded. chroma context-rot's 43 charts keep 20.
 
 **Reingest cleanup:** generalize `borg/src/slides/cleanup.rs` (`read_old_slides_frontmatter` -> `compute_orphans` -> `rkvr::remove`) to read both `slides:` and `images:`, captured before replace (`pipeline.rs:684-686`) and run after the new note is durable (`:1182-1195`). Slides keep their own key and behavior.
+
+**A degraded reingest never replaces a note that owns images.** If the old note has a non-empty `images:` and this run's image stage is degraded (a candidate that passed the prefilter failed download, classify, describe, or store), the trace fails `fetch-failed` and the old note and its files stay untouched. A fresh ingest (no old note) publishes degraded as usual. Same rule as the 2026-10-19 doc's image-only post: never publish a worse note over a useful one.
 
 ### Data Model
 
@@ -153,22 +176,24 @@ Config, a new top-level `images:` block in `borg.yml`, documented in `config/tem
 ```yaml
 images:
   enabled: true
-  max-candidates: 40      # images downloaded per note, in source order
-  max-per-note: 15        # images kept per note
-  min-side-px: 200        # either axis under this is decoration
-  max-bytes: 2097152      # over this, downscale to max-side-px
-  max-side-px: 2048
-  content-filter:         # web articles only; X photos and X Article figures are always kept
+  max-candidates: 40          # images downloaded per note, in source order
+  max-download-bytes: 20971520  # one image over this is dropped before decode
+  max-per-note: 20            # images kept per note, cap applied before describe
+  max-section-bytes: 1500     # description + extracted text per image in the note
+  min-side-px: 200            # web articles: either axis under this is decoration
+  max-bytes: 2097152          # stored file over this is downscaled to max-side-px
+  max-side-px: 2048           # also the SVG raster bound
+  content-filter:             # web-article images and X Article figures; X post photos are always kept
     enabled: true
     keep: [architecture-diagram, sequence-diagram, flowchart, chart, infographic]
-    model: ""             # empty = inherit llm.model
-    max-vision-concurrency: 4
+    model: ""                 # empty = inherit llm.model
     min-confidence: 0.6
+  # Vision concurrency is the shared pool, youtube.slides.content-filter.max-vision-concurrency.
 ```
 
-- `content-filter` reuses `ContentFilterConfig` and `SlideCategory` (`borg/src/config.rs:650-788`): one taxonomy, one parser, unknown categories are a load error.
+- `content-filter` is a new `FigureFilterConfig { enabled, keep, model, min-confidence }` that reuses `SlideCategory` and its parser (`borg/src/config.rs:650-700`): one taxonomy, unknown categories are a load error. It does not reuse `ContentFilterConfig`: that struct's defaults are `enabled: false, keep: [architecture-diagram]` (`config.rs:~770`) and it carries the pool knob. `FigureFilterConfig` has its own serde default fns equal to the block above, so an omitted or partial `images:` block yields exactly these values.
 - `keep` default includes `chart` and `infographic`: "all diagrams" covers chroma's 43 data charts and the explanatory one-pagers; `app-ui`, `webpage`, `code`, `terminal`, `talking-head`, `b-roll`, `title-card`, `other` stay out.
-- `enabled: false` restores today's behavior: X photos described but not stored, articles untouched. A reingest under `enabled: false` writes `images: []`, so cleanup removes the old note's images: the frontmatter and the files never disagree.
+- `enabled: false` restores today's behavior: X photos described but not stored, articles untouched. A reingest under `enabled: false` writes `images: []`, so cleanup moves the old note's images to rkvr: the frontmatter and the files never disagree.
 
 ### Implementation Plan
 
@@ -176,73 +201,93 @@ images:
 **Model:** sonnet
 - Zero repo code. Throwaway harness in the session scratchpad.
 - Sample 40 recent `readable` article stages with image refs. Download every ref with `BROWSER_UA`. Record fetch success, MIME mix, dimension distribution, and the bytes the Phase 4 prefilter keeps.
-- Hand-label 60 prefilter survivors as diagram-category or not. Run a draft `ARTICLE_TAXONOMY_PROMPT` through `vision_classify` on them.
+- Add the 8 X Article figures (UberEng 6, 0x_kaize 2) to the sample.
+- Hand-label 60 prefilter survivors as keep-category or not. Run a draft `FIGURE_TAXONOMY_PROMPT` through `vision_classify` on them.
 - Rasterize 10 sampled SVGs with `resvg`'s CLI and classify them.
 - Paste the numbers into this doc under Phase 0 Results. No files under `docs/` besides this one.
-- **Success criteria:** diagram precision >= 0.9 and recall >= 0.8 on the 60 labels with `min-confidence: 0.6`; fetch success, MIME mix, and kept-bytes p50/p90 per note recorded in this doc.
+- **Success criteria:** keep-category precision >= 0.9 and recall >= 0.8 on the 60 labels with `min-confidence: 0.6`; fetch success, MIME mix, and kept-bytes p50/p90 per note recorded in this doc. A miss stops the build: the prompt is revised and re-measured before Phase 5.
 
 #### Phase 1: Config and owned-images plumbing
 **Model:** sonnet
-- The whole `images:` config block (`ImagesConfig`, reusing `ContentFilterConfig`) and its annotated example. Every later phase reads it.
+- The whole `images:` config block (`ImagesConfig`, `FigureFilterConfig` with its own defaults) and its annotated example. Every later phase reads it.
 - `images:` frontmatter on `NoteContent`, `RENDER_NOTE_KEYS`, `render_note`.
 - Generalize `slides::cleanup` to `images:` + `slides:`.
-- `figures::store`: atomic, never overwrite, downscale over `max-bytes`, after all gates; rkvr on publish failure.
-- **Success criteria:** `render_note_keys_matches_the_writer` passes with `images` added; a reingest test that drops one of two images leaves exactly one file and the other went through `rkvr::remove`; a gate-blocked publish leaves 0 new files under `system/attachments`; `images.content-filter.keep: [diagram]` (not a `SlideCategory`) fails config load.
+- `figures::plan` and `figures::store` (`write_atomic_new`, downscale over `max-bytes`); the publish ordering above (plan -> render -> size gate -> store -> publish); rkvr only the files `store` created on publish failure.
+- The degraded-reingest rule: old note owns images + degraded image stage -> `fetch-failed`, nothing replaced.
+- **Success criteria:**
+  - `render_note_keys_matches_the_writer` passes with `images` added; an omitted `images:` block and a block with only `enabled: true` both deserialize to the documented defaults; `keep: [diagram]` fails config load.
+  - Publish-path tests through the note writer, not `process_x_post_from`: a reingest that drops one of two images leaves the kept file and moves the other to rkvr; a note over the size gate because of `## Images` writes 0 files under `system/attachments`; a publish failure removes the created file and leaves a pre-existing reused path in place.
+  - A reingest over a note with `images:` whose image stage is degraded returns `fetch-failed` and the old note's bytes and files are unchanged.
 
 #### Phase 2: X post photos stored and embedded
 **Model:** sonnet
-- Move `photos.rs` into `figures.rs`; `describe_photo` returns the bytes and MIME with the section.
-- `FetchedPost` carries the `FigureSet`; `process_url_inner` stores after the gates and appends `## Images`.
-- **Success criteria:** the vic fixture test asserts one `![[` under `## Images` and `images:` of length 1; a photo-download-error test asserts no `## Images` section and `fetch_degraded == true`.
+- Move `photos.rs` into `figures.rs`; `describe_photo` returns the bytes and MIME with the section; downloads honor `max-download-bytes`.
+- `FetchedPost` carries the `FigureSet`; `process_url_inner` plans, renders `## Images`, gates, stores, publishes.
+- **Success criteria:** a publish-path test on the vic fixture yields a note with exactly one `![[` line under `## Images`, `images:` of length 1, and that file present under `system/attachments/images/`; a photo-download-error test yields no `## Images` section and `fetch_degraded == true`.
 
 #### Phase 3: X Article figures
 **Model:** opus
-- serde for `entityRanges`, `entityMap` (list), `media_entities`; atomic -> media resolution; captions; `render_blocks` emits the figure section at its atomic block.
+- serde for `entityRanges`, `entityMap` (list), `media_entities`; atomic -> media resolution; captions; `render_blocks` emits the figure section at its atomic block; X Article figures go through classify.
 - Fixture trimmed from the live UberEng JSON under `borg/src/x/` (the existing `article.json` lost these fields in its trim).
-- **Success criteria:** the UberEng fixture yields 6 figures in block order, each with its `Figure N` caption; an atomic block with no matching entity is skipped and the render still succeeds.
+- **Success criteria:** the UberEng fixture yields 6 candidates in block order, each with its `Figure N` caption; an atomic block with no matching entity is skipped and the render still succeeds; with stubbed vision labeling one figure `title-card`, that figure is not kept.
 
 #### Phase 4: The deterministic prefilter and article candidates
 **Model:** sonnet
-- Pure `prefilter(url, mime, dims, bytes) -> Keep | Drop(reason)`; sha256 + phash dedupe.
+- Pure `prefilter(source, url, mime, dims, bytes) -> Keep | Drop(reason)`: format checks for every source, content heuristics for web articles only; sha256 dedupe.
 - Candidate parsing from fetched markdown: `![alt](url)`, Substack `src` extraction, relative URL resolution against the page URL.
-- SVG rasterize via `resvg` with the href resolver locked down.
-- **Success criteria:** a table test drops the 90x90 XDA avatar, a 420px `logo` URL, a `data:` URI, and an `.avif`, keeps the martinfowler `platform-teams-stuff-done` diagram, and keeps a URL containing `silicon`; an SVG with `<image href="/etc/hostname">` rasterizes with that image absent.
+- SVG rasterize via `resvg`, raster bounded by `max-side-px`, href resolver locked down.
+- **Success criteria:**
+  - A table test drops the 90x90 XDA avatar, a 420px `logo` URL, a `data:` URI, an `.avif`, and a `.bmp`; keeps the martinfowler `platform-teams-stuff-done` diagram and a URL containing `silicon`; keeps a 150px X post photo (content heuristics do not apply to X).
+  - An SVG embedding a PNG fixture by local path renders that PNG under usvg's default resolver and renders it absent under the locked resolver (the test fails if the lockdown is removed).
+  - An SVG with a 100000-unit viewBox rasterizes at <= `max-side-px` on its longer side.
 
 #### Phase 5: Web-article figures
 **Model:** opus
-- Parse candidates from fetched markdown on the readable, fabric, and jina paths; `ARTICLE_TAXONOMY_PROMPT` (the Phase 0 version); classify -> describe -> splice in position before distill; store and `## Images` after the gates.
+- Parse candidates from fetched markdown on the readable, fabric, and jina paths; `FIGURE_TAXONOMY_PROMPT` (the Phase 0 version); classify -> cap -> describe -> splice in position before distill; `transcript_quality_ok` runs on the pre-splice source.
 - Vision seam stubbed in tests through `ocr::bases`.
-- **Success criteria:** with stubbed vision labeling 3 images `flowchart`, `app-ui`, `chart`, the note keeps exactly the flowchart and the chart; vision calls per note <= `max-candidates` + `max-per-note`; a classify error drops that image and sets `fetch_degraded`.
+- **Success criteria:**
+  - With stubbed vision labeling 3 images `flowchart`, `app-ui`, `chart`, the note keeps exactly the flowchart and the chart.
+  - With 30 candidates all labeled `flowchart` and `max-per-note: 20`, the stub records exactly 30 classify and 20 describe calls.
+  - A classify error drops that image and sets `fetch_degraded`; a readable article fixture whose transcript passes the quality gate still passes it after 20 figure sections are spliced in.
 
 #### Phase 6: Distill patterns treat figures as evidence
 **Model:** sonnet
 - `borg/patterns/distill-article*.md` and `distill-thread*.md`: a figure's Description / Extracted Text is source content; claims may cite it.
 - Add an eval fixture with a diagram (the vic post).
-- **Success criteria:** `rg -i 'figure|diagram' borg/patterns/distill-article.md` returns >= 1 line; `bin/promptfoo-check` passes in `otto ci`.
+- **Success criteria:** `sb borg eval` on the new vic fixture produces at least one claim whose text matches a line from the figure's Extracted Text, recorded in the implementation notes. `bin/promptfoo-check` is report-only by the 2026-10-17 ruling and is not a gate here.
 
 ## Acceptance Criteria
 
 Run on desk from the vault root (`~/repos/scottidler/obsidian`) after the rollout. Each "Observed on main" line was run 2026-10-22 before any phase shipped.
 
-- [ ] 1. The vic note embeds the flowchart and owns exactly one image:
-  `rg -c '^!\[\[' notes/vicvijayakumar-on-x-vic-vijayakumar-argues-that-every-org-is-independently.md` returns `1`.
-  Observed on main: no match (exit 1).
-- [ ] 2. Every X post with a photo has an embed: `rg -l '^type: social$' notes | xargs rg -l '^!\[\[' | wc -l` returns >= 27.
+`owns N` below means all three agree: N `![[` lines, N entries under `images:`, and N files present. The check, for a note `$n`:
+
+```bash
+emb=$(rg -c '^!\[\[' "$n" || echo 0); fm=$(sed -n '/^images:/,/^[a-z]/p' "$n" | rg -c '^  - ' || echo 0)
+ex=$(sed -n '/^images:/,/^[a-z]/p' "$n" | rg -o 'system/attachments/\S+' | while read -r p; do [ -f "$p" ] && echo ok; done | wc -l)
+echo "$emb $fm $ex"
+```
+
+- [ ] 1. The vic note owns exactly one image: the check prints `1 1 1` for `notes/vicvijayakumar-on-x-vic-vijayakumar-argues-that-every-org-is-independently.md`.
+  Observed on main: `0 0 0`.
+- [ ] 2. Every X post with a photo owns its photos: for each of the 27 photo-bearing posts enumerated in the 2026-10-19 Phase 0, the check prints three equal numbers >= 1. Aggregate guard: `rg -l '^type: social$' notes | xargs -r rg -l '^!\[\[' | wc -l` returns >= 27.
   Observed on main: `0`.
-- [ ] 3. The UberEng X Article note embeds its 6 figures: `rg -c '^!\[\[' notes/ubereng-on-x-uber-engineering-describes-the-design-of-its-mcp-gateway-a.md` returns `6`.
-  Observed on main: no match (exit 1).
-- [ ] 4. A web article keeps its diagrams: after `sb borg reingest --source https://martinfowler.com/articles/platform-teams-stuff-done.html`, `rg -c '^!\[\[' notes/how-platform-teams-get-stuff-done.md` returns >= 5 (its staged fetch has 7 image refs, trace `cl-1d3513ff`).
-  Observed on main: no match (exit 1).
-- [ ] 5. No new broken asset embeds: `sb cortex lint --rule broken-links --format json | jq '[.[]|select(.rule=="broken-links.asset")]|length'` returns <= `2`.
-  Observed on main: `2`.
+- [ ] 3. The UberEng X Article note owns every figure the classifier keeps: the check prints three equal numbers >= 1 and <= 6 for `notes/ubereng-on-x-uber-engineering-describes-the-design-of-its-mcp-gateway-a.md`, and `sqlite3 -readonly ~/.local/share/sb/oracle/oracle.db "SELECT count(*) FROM notes_fts WHERE notes_fts MATCH '\"auto crawler\"'"` (text from the Figure 2 caption, nowhere in the note today) returns >= 1 after the oracle reindex.
+  Observed on main: `rg -c` no match (exit 1); FTS count `0`.
+- [ ] 4. A web article owns its diagrams: after `sb borg reingest --source https://martinfowler.com/articles/platform-teams-stuff-done.html`, the check prints three equal numbers >= 1 for `notes/how-platform-teams-get-stuff-done.md` (staged fetch `cl-1d3513ff` has 7 image refs; how many are diagrams is Phase 0's call, not this criterion's).
+  Observed on main: `rg -c` no match (exit 1); no `images:` key.
+- [ ] 5. No new broken asset embeds: `sb cortex lint --rule broken-links --format json | jq -c '[.[]|select(.rule=="broken-links.asset")|.path]|sort'` prints a list that is a subset of the baseline.
+  Observed on main: `["notes/claude-usage-report-2026-02-25-to-2026-03-27.md","notes/claude-usage-report-2026-02-25-to-2026-03-27.md"]`.
 
 ## Resolved Decisions
 
 - 2026-10-22, Scott: scope is X posts plus web articles (option B over X-only).
-- 2026-10-22, author: X post photos and X Article figures skip the diagram classifier; only web-article images are filtered. Basis: author-chosen, at most 4 per post, often the whole content.
+- 2026-10-22, author + staff engineer (round 1): X post photos skip the classifier (author-chosen, at most 4, often the whole content); X Article figures and web-article images are classified. Architect dissent recorded: classify everything (memes, selfies). Not taken: storing X photos is exactly what Scott asked for on the vic post, and the 2026-10-19 doc already describes every one.
 - 2026-10-22, author: one module for all three sources (`figures.rs`), extending the 2026-10-19 shared `image_section` rule.
-- 2026-10-22, author: descriptions stay in the note body under each embed, for FTS reach; the in-note transcript stays eradicated.
-- 2026-10-22, author: two vision calls per kept article image (classify, describe) over one combined prompt.
+- 2026-10-22, author + both seats: descriptions stay in the note body under each embed, for FTS reach, capped by `max-section-bytes`; the in-note transcript stays eradicated.
+- 2026-10-22, author + staff engineer: two vision calls per kept classified image, with the cap before describe. Architect dissent recorded: one combined call. Not taken: see Alternative 4.
+- 2026-10-22, round 1 must-fixes folded: size gate sees the full note; trace-id ownership; degraded reingest fails closed; cap before describe; no second vision-pool knob; quality gate on the pre-splice source.
+- 2026-10-22, both seats: no new staging-based reingest selector for the backfill.
 
 ## Alternatives Considered
 
@@ -266,8 +311,8 @@ Run on desk from the vault root (`~/repos/scottidler/obsidian`) after the rollou
 ### Alternative 4: One combined classify + describe vision call
 - **Description:** one prompt returns category, confidence, description, and text.
 - **Pros:** one call per image instead of two for kept images.
-- **Cons:** a new prompt with no eval; describes images that the classifier then drops.
-- **Why not chosen:** two proven prompts, and only kept images pay the second call. Revisit if vision cost shows up in `sb borg log`.
+- **Cons:** a second new prompt with no eval (the describe half would replace `vision_extract`'s proven one, shared with image ingest); describes images that the classifier then drops.
+- **Why not chosen:** only the classify prompt is new and Phase 0 evaluates it; the describe prompt stays the proven sibling; only kept images pay the second call. Revisit if vision cost shows up in `sb borg log`.
 
 ## Technical Considerations
 
@@ -299,7 +344,7 @@ Run on desk from the vault root (`~/repos/scottidler/obsidian`) after the rollou
 
 1. Release, `otto deploy` on ripr and desk.
 2. X notes: `sb borg reingest --type social`, plus the 4 renamed notes by exact `--source` (the 2026-10-19 rollout list); `sb borg wait`.
-3. Web articles: forward-only from the release, plus the martinfowler note for Acceptance Criterion 4. The 640-note article backfill is Open Question 1.
+3. Web articles: the martinfowler note for Acceptance Criterion 4, then the backfill per Open Question 1.
 4. Scott commits the new attachments in the vault repo.
 
 ## Risks and Mitigations
@@ -311,11 +356,13 @@ Run on desk from the vault root (`~/repos/scottidler/obsidian`) after the rollou
 | Asset written, publish blocked -> orphan | Med | Low | store after every gate; rkvr on publish failure (Phase 1 test) |
 | Reingest in a later month leaves the old copy | High | Low | generalized cleanup diffs `images:` before/after and rkvrs orphans |
 | Image host 403s or rate-limits | Low | Low | per-image drop, receipt degraded; 56 of 56 probed images returned 200 |
-| Note crosses 64 KiB with descriptions | Low | Med | `max-per-note: 15` at about 1 KB each |
+| Note crosses 64 KiB with descriptions | Low | Med | `max-per-note` x `max-section-bytes` = 30 KB worst case; the size gate sees the full note and writes no asset on a fail |
+| Degraded reingest replaces a note that owns images | Med | High | fail `fetch-failed` and leave the old note and files untouched |
+| Two notes share an image file | Low | High | filenames carry the trace id, unique per ingest |
 
 ## Open Questions
 
-- [ ] 1. Article backfill: forward-only, all 640 via `--type article`, or a new reingest selector for notes whose staged fetch has image refs (358 sources)?
+- [ ] 1. Article backfill (Scott): forward-only, or `sb borg reingest --type article` after a canary (`--dry-run` count reconciled against the 640 article notes; renamed notes by exact `--source`, as the 2026-10-19 social rollout did). A new staging-based selector is rejected by both seats.
 
 ## References
 
