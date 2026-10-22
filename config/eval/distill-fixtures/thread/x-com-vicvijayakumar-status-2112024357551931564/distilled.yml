@@ -1,0 +1,88 @@
+summary: Vic Vijayakumar reacts to boris's flowchart depicting an AI-driven code review loop (agent generates code, self-verifies, gets reviewed by a second agent, passes automated checks, and ships unless a novel issue triggers human review) by claiming every organization is currently building this exact pipeline. Vic adds that large companies ('bigco') will be blocked from the final step—shipping without human review—due to regulatory constraints, but can still use the loop to dramatically accelerate most of their software development lifecycle.
+key-ideas: []
+claims:
+- text: Every organization is currently building this AI-driven code review and deployment loop.
+  anchor: null
+  kind: position
+  who: '@VicVijayakumar'
+  quote: every single org is building this loop right now.
+- text: Large companies (bigco) will be unable to fully automate the final shipping step due to regulatory hurdles.
+  anchor: null
+  kind: position
+  who: '@VicVijayakumar'
+  quote: if you're at a bigco, you will not be able to do the last step because of regulatory hurdles
+- text: Despite regulatory limits on full automation, bigcos can still dramatically speed up 90% of their software development lifecycle using this loop.
+  anchor: null
+  kind: position
+  who: '@VicVijayakumar'
+  quote: but you can still dramatically speed up 90% of your sdlc
+- text: The depicted process is presented as the only sane code review loop.
+  anchor: null
+  kind: position
+  who: '@boristane'
+  quote: the only sane code review loop
+- text: The flowchart defines a loop where an agent generates code, self-verifies it, a second agent reviews it, and automated checks run before an 'all clear' decision.
+  anchor: null
+  kind: fact
+  who: '@boristane'
+  quote: null
+- text: If issues are resolvable, the flow returns to code generation; if a novel issue is found, it escalates to human review before looping back to code generation.
+  anchor: null
+  kind: fact
+  who: '@boristane'
+  quote: null
+tags:
+- ai-agents
+- code-review
+- software-development
+- automation
+- sdlc
+- regulation
+- ai-coding
+links: []
+kind-specific:
+  kind: thread
+  author: '@VicVijayakumar'
+  post-count: 2
+  platform: x
+meta:
+  extractor: distill-thread-v1
+  model: default
+  input-tokens: 231
+  output-tokens: 551
+  produced-at: 2026-10-19T17:14:34.899613913+00:00
+  validation:
+    fallback-reason: null
+    bounds-truncations: []
+    anchors-stripped: 0
+    enumeration-shortfall: false
+    raw-output: null
+transcript: |
+  # Post by Vic 📠 (@VicVijayakumar)
+
+  every single org is building this loop right now.
+
+  if you're at a bigco, you will not be able to do the last step because of regulatory hurdles, but you can still dramatically speed up 90% of your sdlc
+
+  ## Quoted post by boris (@boristane)
+
+  the only sane code review loop
+
+  ### Image 1 (in @boristane's post)
+
+  #### Description
+
+  A flowchart depicting a code review and deployment process. It begins with "Agent generates code," flows through self-verification, a second agent review, and automated checks, leading to an "All clear?" decision point. If clear, the code ships; if not, it either returns to code generation (resolvable issues) or goes to human review (novel issues), which then loops back to code generation.
+
+  #### Extracted Text
+
+  Agent generates code
+  Agent self-verifies
+  Second agent reviews
+  Automated checks
+  All clear?
+  Yes
+  No - resolvable
+  No - novel issue
+  Ship
+  Human review

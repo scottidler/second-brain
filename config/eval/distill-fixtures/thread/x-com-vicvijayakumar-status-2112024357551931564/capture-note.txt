@@ -1,0 +1,1 @@
+Saving for the flowchart: agent generates code → self-verify → second agent review → automated checks → ship, with human review only kicked in for novel issues. Good reference for designing an agent-driven code review loop at a bigco where full auto-deploy isn't allowed.
