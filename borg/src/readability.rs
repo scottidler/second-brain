@@ -41,7 +41,13 @@ pub enum ReadableError {
 /// query string or a mislabeled server cannot send it down the HTML path.
 #[derive(Debug)]
 pub enum Fetched {
-    Article(String),
+    /// `page_url` is where the page was served from after redirects; the
+    /// article's relative links and images resolve against it, never against
+    /// the requested URL (a 301 to another host 404s every image otherwise).
+    Article {
+        markdown: String,
+        page_url: String,
+    },
     Pdf(Vec<u8>),
 }
 
@@ -143,6 +149,10 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Fetc
         url: url.to_string(),
         source,
     })?;
+    let page_url = response.url().to_string();
+    if page_url != url {
+        log::debug!("fetch_article_readable: url={url} redirected to {page_url}");
+    }
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(ReadableError::Status {
@@ -176,8 +186,9 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Fetc
     }
     let html = String::from_utf8_lossy(&body).into_owned();
 
-    let url_owned = url.to_string();
-    let markdown = match tokio::task::spawn_blocking(move || extract_markdown(&html, &url_owned)).await {
+    let (url_owned, page_url_owned) = (url.to_string(), page_url.clone());
+    let markdown = match tokio::task::spawn_blocking(move || extract_markdown(&html, &url_owned, &page_url_owned)).await
+    {
         Ok(result) => result?,
         Err(join) => {
             return Err(ReadableError::Extract {
@@ -194,15 +205,17 @@ pub async fn fetch_article_readable(url: &str, timeout_secs: u64) -> Result<Fetc
         "fetch_article_readable: url={url} produced {} chars",
         markdown.chars().count()
     );
-    Ok(Fetched::Article(markdown))
+    Ok(Fetched::Article { markdown, page_url })
 }
 
 /// Sync extraction: `dom_smoothie` (HTML -> clean article HTML) -> `htmd`.
 /// Separated from the async fetch so it is unit-testable over a static HTML
-/// fixture without network.
-fn extract_markdown(html: &str, url: &str) -> Result<String, ReadableError> {
+/// fixture without network. `dom_smoothie` rewrites every relative `href` and
+/// `src` to absolute against `page_url`, so it must be the post-redirect URL;
+/// `url` (the requested one) only names the page in errors.
+fn extract_markdown(html: &str, url: &str, page_url: &str) -> Result<String, ReadableError> {
     let mut readability =
-        dom_smoothie::Readability::new(html, Some(url), None).map_err(|e| ReadableError::Extract {
+        dom_smoothie::Readability::new(html, Some(page_url), None).map_err(|e| ReadableError::Extract {
             url: url.to_string(),
             reason: e.to_string(),
         })?;

@@ -21,7 +21,8 @@ body and discard the surrounding page furniture.</p>
 <footer id="site-footer">Footer chrome and copyright notice.</footer>
 </body></html>"#;
 
-    let md = extract_markdown(html, "https://example.com/post").expect("extraction should succeed");
+    let md = extract_markdown(html, "https://example.com/post", "https://example.com/post")
+        .expect("extraction should succeed");
     assert!(
         md.contains("first substantial paragraph"),
         "the article body must survive extraction:\n{md}"
@@ -48,7 +49,11 @@ body and discard the surrounding page furniture.</p>
 /// Non-HTML / contentless input yields an error (the caller falls through).
 #[test]
 fn extract_markdown_errors_on_contentless_input() {
-    let result = extract_markdown("<html><body></body></html>", "https://example.com/x");
+    let result = extract_markdown(
+        "<html><body></body></html>",
+        "https://example.com/x",
+        "https://example.com/x",
+    );
     // Either an Extract error or empty content is acceptable "fall through"
     // signal; what matters is it does not return a usable article.
     if let Ok(md) = result {
@@ -157,4 +162,105 @@ async fn pdf_served_as_html_is_fetched_as_pdf() {
         Fetched::Pdf(_) => {}
         other => panic!("expected a PDF, got {other:?}"),
     }
+}
+
+/// One canned reply: path, status, an optional extra header, body.
+type Route = (&'static str, u16, Option<(&'static str, String)>, String);
+
+/// Serve `routes` on a loopback port; an unlisted path is a 404. Records every
+/// requested path.
+async fn serve_routes(routes: Vec<Route>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::http::{StatusCode, Uri};
+    use axum::response::IntoResponse;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = hits.clone();
+    let app = axum::Router::new().fallback(move |uri: Uri| {
+        let (routes, hits) = (routes.clone(), recorded.clone());
+        async move {
+            hits.lock().expect("hits").push(uri.path().to_string());
+            match routes.iter().find(|(path, ..)| *path == uri.path()) {
+                Some((_, status, header, body)) => {
+                    let mut response = (
+                        StatusCode::from_u16(*status).expect("status"),
+                        [("content-type", "text/html; charset=utf-8")],
+                        body.clone(),
+                    )
+                        .into_response();
+                    if let Some((name, value)) = header {
+                        response
+                            .headers_mut()
+                            .insert(*name, value.parse().expect("header value"));
+                    }
+                    response
+                }
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    (base, hits)
+}
+
+/// The 2026-10-22 chroma canary (cl-190dffbd): `research.trychroma.com/context-rot`
+/// 301s to `www.trychroma.com/research/context-rot`, and its `/img/...` charts
+/// were made absolute against the REQUESTED host, which 404s. A page reached
+/// through a cross-origin redirect reports the final URL, and its root-relative
+/// and path-relative images resolve against that final page.
+#[tokio::test]
+async fn redirected_page_reports_the_final_url_and_resolves_images_against_it() {
+    let prose = "<p>This is the first substantial paragraph of the real article body. It carries \
+        several complete sentences of genuine prose so the readability heuristics lock onto \
+        this block as the main content rather than navigation or boilerplate.</p>";
+    let page = format!(
+        "<!doctype html><html><head><title>Context Rot</title></head><body><article>\
+         <h1>Context Rot</h1>{prose}<p><img src=\"/img/root.png\" alt=\"root\"></p>{prose}\
+         <p><img src=\"rel.png\" alt=\"rel\"></p>{prose}</article></body></html>"
+    );
+    let (final_host, _) = serve_routes(vec![("/research/context-rot", 200, None, page)]).await;
+    let final_url = format!("{final_host}/research/context-rot");
+    let (requested_host, requested_hits) = serve_routes(vec![(
+        "/context-rot",
+        301,
+        Some(("location", final_url.clone())),
+        String::new(),
+    )])
+    .await;
+    let requested = format!("{requested_host}/context-rot");
+
+    let Fetched::Article { markdown, page_url } = fetch_article_readable(&requested, 5).await.expect("fetch") else {
+        panic!("expected an article");
+    };
+
+    assert_eq!(page_url, final_url, "the post-redirect URL, not the requested one");
+    assert!(
+        markdown.contains(&format!("({final_host}/img/root.png")),
+        "root-relative image resolves against the final host:\n{markdown}"
+    );
+    assert!(
+        markdown.contains(&format!("({final_host}/research/rel.png")),
+        "path-relative image resolves against the final page:\n{markdown}"
+    );
+    assert!(
+        !markdown.contains(&requested_host),
+        "nothing resolves against the requested host:\n{markdown}"
+    );
+    assert_eq!(*requested_hits.lock().expect("hits"), vec!["/context-rot".to_string()]);
+}
+
+/// An unredirected fetch reports the requested URL as the page URL.
+#[tokio::test]
+async fn unredirected_page_reports_the_requested_url() {
+    let page = "<!doctype html><html><head><title>T</title></head><body><article><h1>T</h1>\
+        <p>This is the first substantial paragraph of the real article body. It carries several \
+        complete sentences of genuine prose so the readability heuristics lock onto it.</p>\
+        </article></body></html>"
+        .to_string();
+    let (host, _) = serve_routes(vec![("/post", 200, None, page)]).await;
+    let url = format!("{host}/post");
+    let Fetched::Article { page_url, .. } = fetch_article_readable(&url, 5).await.expect("fetch") else {
+        panic!("expected an article");
+    };
+    assert_eq!(page_url, url);
 }

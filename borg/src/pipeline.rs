@@ -777,9 +777,9 @@ async fn process_url_inner(
         // Preferred: in-process readability extraction (clean article markdown),
         // plain articles only. On Err / too-thin / block-page it logs the reason
         // and falls through to fabric-u -> Jina -> browser-UA.
-        let readable_triple = if is_plain_article {
+        let readable = if is_plain_article {
             match process_article_readable(&url_match.url, config, trace_id).await {
-                Ok(triple) => Some(triple),
+                Ok(article) => Some(article),
                 Err(e) => {
                     log::warn!(
                         "[{trace_id}] readable extraction fell through for {}: {e:#}",
@@ -797,7 +797,14 @@ async fn process_url_inner(
         // markdown that must NOT be stored as a transcript - the coarse ratio gate
         // alone keeps chrome-heavy-but-mixed-line fallback pages (measured on the
         // tg-1a0305 trainwreck: 0.61 short-line ratio, below the 0.90 threshold).
-        let transcript_clean_source = readable_triple.is_some();
+        let transcript_clean_source = readable.is_some();
+        // The article's images resolve against the page URL after redirects.
+        // Only the readable fetcher sees it; fabric and Jina keep the requested
+        // URL. The note's `source:`, dedup, and staging stay on the requested URL.
+        let image_base = readable
+            .as_ref()
+            .map_or_else(|| url_match.url.clone(), |article| article.page_url.clone());
+        let readable_triple = readable.map(|article| (article.title, article.markdown, None));
         // An HN discussion is read from the items API, not the rendered page:
         // the page fetch below carried vote arrows, `[–]` toggles and nav links
         // into the thread transcript. On an API failure the page chain still runs.
@@ -903,6 +910,7 @@ async fn process_url_inner(
             // non-clean fetch never reaches staging or embeddings.
             let stage = article::distill_article(
                 &url_match.url,
+                &image_base,
                 &article_md,
                 transcript_clean_source,
                 capture_note,

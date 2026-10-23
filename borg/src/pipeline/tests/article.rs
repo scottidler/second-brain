@@ -178,13 +178,22 @@ const TRACE: &str = "cl-art00001";
 /// Fetch `{base}/article` through the readable handler, then the article stage.
 async fn readable(base: &str, config: &Config) -> (String, ArticleStage) {
     let url = format!("{base}/article");
-    let (_, markdown, _) = process_article_readable(&url, config, TRACE).await.expect("readable");
+    let article = process_article_readable(&url, config, TRACE).await.expect("readable");
     let stage = crate::ocr::bases::scope(
         base.to_string(),
-        distill_article(&url, &markdown, true, None, config, ocr_ok, TRACE),
+        distill_article(
+            &url,
+            &article.page_url,
+            &article.markdown,
+            true,
+            None,
+            config,
+            ocr_ok,
+            TRACE,
+        ),
     )
     .await;
-    (markdown, stage)
+    (article.markdown, stage)
 }
 
 fn transcript(stage: &ArticleStage) -> &str {
@@ -371,7 +380,7 @@ async fn jina_markdown_images_become_figures_and_the_transcript_is_still_cleared
         let (_, markdown, _) = process_article_jina(&url, &config, TRACE).await.expect("jina");
         crate::ocr::bases::scope(
             base.clone(),
-            distill_article(&url, &markdown, false, None, &config, ocr_ok, TRACE),
+            distill_article(&url, &url, &markdown, false, None, &config, ocr_ok, TRACE),
         )
         .await
     })
@@ -401,4 +410,105 @@ async fn images_disabled_leaves_the_article_untouched() {
     assert_eq!(calls.of("classify") + calls.of("describe"), 0);
     assert!(stage.figures.figures.is_empty() && !stage.figures.degraded);
     assert_eq!(transcript(&stage), markdown);
+}
+
+/// A host that answers `/old/post` with a 301 to `location` and 404s every
+/// other path, recording each request; the requested host of a redirect.
+async fn redirect_host(location: String) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().expect("addr").port());
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let recorded = hits.clone();
+    let app = Router::new().fallback(move |uri: Uri| {
+        let (location, hits) = (location.clone(), recorded.clone());
+        async move {
+            hits.lock().expect("hits").push(uri.path().to_string());
+            if uri.path() == "/old/post" {
+                (StatusCode::MOVED_PERMANENTLY, [("location", location)]).into_response()
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            }
+        }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    (base, hits)
+}
+
+/// The 2026-10-22 chroma canary (cl-190dffbd): the requested article 301s to
+/// another host, and every chart was resolved against the requested host and
+/// 404'd. A root-relative and a path-relative image on the final page are
+/// both downloaded from the final host and kept; the requested host sees only
+/// the article request.
+#[tokio::test]
+async fn redirected_article_images_resolve_against_the_final_page() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let page = format!(
+        "<!doctype html><html><head><title>How the gateway works</title></head><body><article>\
+         <h1>How the gateway works</h1><p>{PROSE} Section 1.</p>\
+         <p><img src=\"/img/1.png\" alt=\"Figure 1\"></p><p>{PROSE} Section 2.</p>\
+         <p><img src=\"img/2.png\" alt=\"Figure 2\"></p><p>{PROSE} The end.</p></article></body></html>"
+    );
+    let (final_host, calls) = serve(stub(page, &[])).await;
+    let (requested_host, requested_hits) = redirect_host(format!("{final_host}/article")).await;
+    let config = config(dir.path());
+    let url = format!("{requested_host}/old/post");
+
+    let article = process_article_readable(&url, &config, TRACE).await.expect("readable");
+    assert_eq!(article.page_url, format!("{final_host}/article"));
+    let stage = crate::ocr::bases::scope(
+        final_host.clone(),
+        distill_article(
+            &url,
+            &article.page_url,
+            &article.markdown,
+            true,
+            None,
+            &config,
+            ocr_ok,
+            TRACE,
+        ),
+    )
+    .await;
+
+    let kept: Vec<u8> = stage.figures.figures.iter().map(|f| image_id(&f.bytes)).collect();
+    assert_eq!(kept, vec![1, 2], "both images download from the final host");
+    assert!(!stage.figures.degraded, "no image failed to download");
+    assert_eq!(calls.of("classify"), 2);
+    assert_eq!(*requested_hits.lock().expect("hits"), vec!["/old/post".to_string()]);
+}
+
+/// `distill_article` resolves relative images against `page_url`, not `url`:
+/// markdown still carrying a relative image (as a fetcher that does not
+/// absolutize leaves it) downloads it from the page's host even when `url`
+/// names a host that 404s it.
+#[tokio::test]
+async fn distill_article_resolves_relative_images_against_page_url_not_url() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (page_host, calls) = serve(stub(String::new(), &[])).await;
+    let (requested_host, requested_hits) = redirect_host(format!("{page_host}/article")).await;
+    let config = config(dir.path());
+    let markdown = format!("# How the gateway works\n\n{PROSE}\n\n![Figure 1](/img/1.png)\n\n{PROSE}\n");
+
+    let stage = crate::ocr::bases::scope(
+        page_host.clone(),
+        distill_article(
+            &format!("{requested_host}/old/post"),
+            &format!("{page_host}/article"),
+            &markdown,
+            false,
+            None,
+            &config,
+            ocr_ok,
+            TRACE,
+        ),
+    )
+    .await;
+
+    let kept: Vec<u8> = stage.figures.figures.iter().map(|f| image_id(&f.bytes)).collect();
+    assert_eq!(kept, vec![1]);
+    assert_eq!(calls.of("classify"), 1);
+    assert!(
+        requested_hits.lock().expect("hits").is_empty(),
+        "the requested host is never asked for the image"
+    );
 }

@@ -19,8 +19,12 @@ pub(crate) struct ArticleStage {
 /// its image, and distill the spliced markdown. The transcript quality gate
 /// judges `article_md` as fetched, before the splice; the transcript kept is
 /// the spliced one. `clean_source` is true only for readable output.
+/// `url` is the requested URL the distiller and staging key on; `page_url` is
+/// the page after redirects, the base every relative image resolves against.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn distill_article(
     url: &str,
+    page_url: &str,
     article_md: &str,
     clean_source: bool,
     capture_note: Option<&str>,
@@ -29,10 +33,10 @@ pub(crate) async fn distill_article(
     trace_id: &str,
 ) -> ArticleStage {
     log::debug!(
-        "distill_article[{trace_id}]: url={url} clean_source={clean_source} bytes={}",
+        "distill_article[{trace_id}]: url={url} page_url={page_url} clean_source={clean_source} bytes={}",
         article_md.len()
     );
-    let media = figures::describe_article_media(article_md, url, config, ocr, trace_id).await;
+    let media = figures::describe_article_media(article_md, page_url, config, ocr, trace_id).await;
     let distilled = distill_for_publish_article(
         &config.fabric,
         &config.staging,

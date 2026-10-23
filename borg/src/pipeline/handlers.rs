@@ -504,10 +504,17 @@ pub(crate) async fn process_article_fabric(
 /// caller falls through to the fabric-u -> Jina chain. Tunable on fixtures.
 const READABLE_MIN_CHARS: usize = 200;
 
-/// Returns `(title, article_md, byline)` - same shape as
-/// `process_article_fabric` so `process_url_inner` can pipe either source
-/// uniformly. The in-process readability extractor exposes no author, so the
-/// byline is always `None`.
+/// What the readable fetcher produced. Unlike the fabric/Jina triple it knows
+/// `page_url`, the URL the page was served from after redirects, which the
+/// article's images resolve against. It carries no byline: the in-process
+/// readability extractor exposes no author.
+pub(crate) struct ReadableArticle {
+    pub title: String,
+    pub markdown: String,
+    pub page_url: String,
+}
+
+/// Fetch `url` through the in-process readability extractor.
 ///
 /// Any `ReadableError` (fetch / status / extraction / empty), too-thin output
 /// (`< READABLE_MIN_CHARS`), or a detected block page is surfaced as `Err` so the
@@ -515,20 +522,18 @@ const READABLE_MIN_CHARS: usize = 200;
 /// success the clean markdown is persisted through the shared staging seam
 /// (`<trace>/fetched.html` + `fetched.yml` with `extractor: readable`),
 /// byte-symmetric with how fabric-u/jina persist.
-pub(crate) async fn process_article_readable(
-    url: &str,
-    config: &Config,
-    trace_id: &str,
-) -> Result<(String, String, Option<String>)> {
+pub(crate) async fn process_article_readable(url: &str, config: &Config, trace_id: &str) -> Result<ReadableArticle> {
     log::debug!("process_article_readable[{trace_id}]: url={url}");
     // Reuse the Jina HTTP-scrape timeout class: this is the same shape of fetch,
     // now done in-process instead of via a remote API or a shelled binary.
-    let (article_md, extractor) =
+    let (article_md, page_url, extractor) =
         match crate::readability::fetch_article_readable(url, config.pipeline.jina_timeout_secs).await? {
-            crate::readability::Fetched::Article(md) => (md, "readable"),
-            crate::readability::Fetched::Pdf(bytes) => {
-                (extract_pdf_markdown(url, bytes, config, trace_id).await?, "pdf")
-            }
+            crate::readability::Fetched::Article { markdown, page_url } => (markdown, page_url, "readable"),
+            crate::readability::Fetched::Pdf(bytes) => (
+                extract_pdf_markdown(url, bytes, config, trace_id).await?,
+                url.to_string(),
+                "pdf",
+            ),
         };
 
     // Reject too-thin output or a block page (caller falls through to the
@@ -551,10 +556,14 @@ pub(crate) async fn process_article_readable(
 
     let title = extract_article_title(&article_md, url);
     log::debug!(
-        "process_article_readable[{trace_id}]: accepted {} chars",
+        "process_article_readable[{trace_id}]: accepted {} chars page_url={page_url}",
         article_md.chars().count()
     );
-    Ok((title, article_md, None))
+    Ok(ReadableArticle {
+        title,
+        markdown: article_md,
+        page_url,
+    })
 }
 
 /// A PDF found at a URL goes to markitdown, the same extractor an uploaded PDF
