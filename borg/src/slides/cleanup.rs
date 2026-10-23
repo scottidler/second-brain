@@ -30,32 +30,34 @@ pub struct Owned {
 }
 
 /// Pull the `slides:` and `images:` lists out of a vault note's YAML
-/// frontmatter. Both are empty if the note has no frontmatter, lacks the
-/// fields, or does not exist (a fresh slug has no prior state). A note that
-/// exists but cannot be read is an error: guessing "owns nothing" would
-/// orphan its files.
+/// frontmatter. Both are empty if the note does not exist (a fresh slug has
+/// no prior state), has no frontmatter block at all (it does not open with a
+/// `---` line), or lacks the fields. CRLF line endings are read as LF. A note
+/// that exists but cannot be read, or whose frontmatter block is unterminated
+/// or not YAML, is an error: guessing "owns nothing" would orphan its files
+/// and let a degraded reingest replace a note that owns images.
 pub fn read_old_owned(note_path: &Path) -> Result<Owned> {
     if !note_path.exists() {
         return Ok(Owned::default());
     }
     let content = std::fs::read_to_string(note_path)
         .with_context(|| format!("read note for owned-files frontmatter: {}", note_path.display()))?;
+    let content = content.replace("\r\n", "\n");
     let trimmed = content.trim_start_matches('\n');
     let Some(rest) = trimmed.strip_prefix("---\n") else {
+        log::debug!("read_old_owned: {} has no frontmatter block", note_path.display());
         return Ok(Owned::default());
     };
-    let Some(end_idx) = rest.find("\n---") else {
-        return Ok(Owned::default());
+    let yaml = if rest.starts_with("---") {
+        ""
+    } else {
+        let end_idx = rest
+            .find("\n---")
+            .ok_or_else(|| eyre::eyre!("unterminated frontmatter in {}", note_path.display()))?;
+        &rest[..end_idx]
     };
-    let yaml = &rest[..end_idx];
-    // Parse loosely - if frontmatter is malformed don't crash the pipeline.
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("failed to parse frontmatter at {}: {e:#}", note_path.display());
-            return Ok(Owned::default());
-        }
-    };
+    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)
+        .with_context(|| format!("parse frontmatter for owned files: {}", note_path.display()))?;
     Ok(Owned {
         slides: string_list(&parsed, "slides"),
         images: string_list(&parsed, "images"),

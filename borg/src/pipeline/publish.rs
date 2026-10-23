@@ -372,12 +372,13 @@ pub enum UrlPublishError {
     /// The composed note is over `pipeline.max-note-bytes`; nothing was written.
     #[error("{0}")]
     SizeGate(String),
-    /// The old note owns images and this run's image stage degraded: the old
-    /// note and its files stay untouched rather than be replaced by a worse one.
+    /// This run's image stage degraded and it keeps fewer images than the old
+    /// note owns: the old note and its files stay untouched rather than be
+    /// replaced by one with fewer figures.
     #[error(
-        "image stage degraded and the existing note owns {owned} image(s); keeping the existing note and its files"
+        "image stage degraded and keeps {keeps} image(s), fewer than the {owned} the existing note owns; keeping the existing note and its files"
     )]
-    DegradedReingest { owned: usize },
+    DegradedReingest { owned: usize, keeps: usize },
     /// A figure file could not be written; the ones this run created are removed.
     #[error("failed to store figures: {0:#}")]
     Store(eyre::Report),
@@ -398,7 +399,9 @@ impl UrlPublishError {
 
 /// The URL note writer. The order is the contract:
 ///
-/// 1. refuse a degraded reingest over a note that owns images;
+/// 1. refuse a degraded reingest that would keep fewer images than the old
+///    note owns (a degraded run that keeps at least as many publishes, its
+///    receipt still degraded);
 /// 2. size-gate the fully rendered note, so a fail writes no asset;
 /// 3. [`figures::store`] the figure files (no-clobber);
 /// 4. [`archive_then_publish`]; if it fails, only the files step 3 created
@@ -415,10 +418,10 @@ pub(crate) fn publish_url_note(spec: &UrlPublish<'_>) -> std::result::Result<(Pa
         spec.old_owned.images.len(),
         spec.image_stage_degraded
     );
-    if spec.image_stage_degraded && !spec.old_owned.images.is_empty() {
-        return Err(UrlPublishError::DegradedReingest {
-            owned: spec.old_owned.images.len(),
-        });
+    let owned = spec.old_owned.images.len();
+    let keeps = spec.figures.len();
+    if spec.image_stage_degraded && owned > 0 && keeps < owned {
+        return Err(UrlPublishError::DegradedReingest { owned, keeps });
     }
     if let Some(reason) = note_size_gate(spec.note_bytes.len(), spec.max_note_bytes) {
         return Err(UrlPublishError::SizeGate(reason));

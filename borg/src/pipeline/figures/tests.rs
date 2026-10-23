@@ -334,3 +334,56 @@ fn with_images_section_appends_after_the_body_with_one_blank_line() {
 }
 
 mod collect;
+
+#[test]
+fn vision_image_leaves_an_in_bound_image_alone() {
+    let small = encode(&noisy(50, 40), image::ImageFormat::Png);
+    assert!(
+        vision_image(&small, FigureMime::Png, 100, small.len())
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A smooth gradient: compresses far better as jpeg than as png.
+fn gradient(width: u32, height: u32) -> image::DynamicImage {
+    let buf = ImageBuffer::from_fn(width, height, |x, y| {
+        Rgb([(x % 256) as u8, (y % 256) as u8, ((x * y) % 251) as u8])
+    });
+    image::DynamicImage::ImageRgb8(buf)
+}
+
+#[test]
+fn vision_image_falls_back_to_jpeg_when_the_png_stays_over_the_bound() {
+    let img = gradient(300, 300);
+    let png = encode(&img, image::ImageFormat::Png);
+    let jpeg_len = encode_jpeg(&img).unwrap().len();
+    assert!(jpeg_len < png.len(), "fixture: jpeg {jpeg_len} < png {}", png.len());
+    let (bytes, mime) = vision_image(&png, FigureMime::Png, 400, jpeg_len)
+        .unwrap()
+        .expect("re-encoded");
+    assert_eq!(mime, FigureMime::Jpeg);
+    assert!(bytes.len() <= jpeg_len);
+    assert_eq!(
+        dims(&bytes),
+        (300, 300),
+        "within max-side and the jpeg fits, so not resized"
+    );
+}
+
+#[test]
+fn vision_image_shrinks_until_the_jpeg_fits() {
+    let png = encode(&noisy(400, 400), image::ImageFormat::Png);
+    let bound = png.len() / 8;
+    let (bytes, mime) = vision_image(&png, FigureMime::Png, 400, bound)
+        .unwrap()
+        .expect("re-encoded");
+    assert_eq!(mime, FigureMime::Jpeg);
+    assert!(bytes.len() <= bound, "{} > {bound}", bytes.len());
+    assert!(dims(&bytes).0 < 400);
+}
+
+#[test]
+fn vision_image_refuses_undecodable_bytes_over_the_bound() {
+    assert!(vision_image(&[0xAB; 64], FigureMime::Png, 100, 10).is_err());
+}

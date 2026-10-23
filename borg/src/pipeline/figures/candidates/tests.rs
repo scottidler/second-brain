@@ -83,3 +83,51 @@ fn link_wrapped_image_is_found() {
     let md = "[![chart](https://a.example/c.png)](https://a.example/full)";
     assert_eq!(urls(md), vec!["https://a.example/c.png"]);
 }
+
+#[test]
+fn htmd_escaped_parens_are_part_of_the_destination_and_unescaped() {
+    let md = r"![diagram](https://example.org/diagram\(v2\).png)";
+    let got = parse_markdown_images(md, PAGE);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].url, "https://example.org/diagram(v2).png");
+    assert_eq!(&md[got[0].span.clone()], md, "the span ends at the closing paren");
+}
+
+#[test]
+fn bare_balanced_parens_are_part_of_the_destination() {
+    let md = "see ![foo](https://upload.wikimedia.org/wiki/File:Foo_(bar).png \"t\") here";
+    let got = parse_markdown_images(md, PAGE);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].url, "https://upload.wikimedia.org/wiki/File:Foo_(bar).png");
+    assert_eq!(
+        &md[got[0].span.clone()],
+        "![foo](https://upload.wikimedia.org/wiki/File:Foo_(bar).png \"t\")"
+    );
+}
+
+#[test]
+fn escaped_parens_inside_angle_brackets_are_unescaped() {
+    let md = r"![a](<https://example.org/my diagram\(1\).png>)";
+    assert_eq!(urls(md), vec!["https://example.org/my%20diagram(1).png"]);
+}
+
+#[test]
+fn an_image_in_an_inline_code_span_is_not_a_candidate() {
+    let md = "write `![x](https://a.example/code.png)` or ``![y](https://a.example/code2.png)`` then ![real](https://a.example/r.png)";
+    assert_eq!(urls(md), vec!["https://a.example/r.png"]);
+}
+
+#[test]
+fn an_image_in_a_fenced_block_is_not_a_candidate() {
+    let md = "intro\n\n```markdown\n![x](https://a.example/code.png)\n```\n\n~~~~\n![y](https://a.example/tilde.png)\n~~~~\n\n![real](https://a.example/r.png)\n";
+    assert_eq!(urls(md), vec!["https://a.example/r.png"]);
+}
+
+#[test]
+fn an_unclosed_fence_runs_to_the_end_and_a_lone_backtick_is_literal() {
+    assert!(urls("```\n![x](https://a.example/code.png)\n").is_empty());
+    assert_eq!(
+        urls("it`s ![real](https://a.example/r.png)"),
+        vec!["https://a.example/r.png"]
+    );
+}

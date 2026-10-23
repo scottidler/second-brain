@@ -72,3 +72,15 @@ fn nothing_placed_returns_the_markdown_unchanged() {
     let md = "![a](https://example.com/a.png)\n";
     assert_eq!(splice(md, &[]), md);
 }
+
+#[test]
+fn an_escaped_paren_url_is_spliced_whole_with_no_residue() {
+    let md = "before\n\n![diagram](https://example.org/diagram\\(v2\\).png)\n\nafter ![w](https://upload.wikimedia.org/File:Foo_(bar).png) end\n";
+    let images = parse_markdown_images(md, PAGE);
+    assert_eq!(images.len(), 2);
+    let placed = [(&images[0], "BLOCK-1".to_string()), (&images[1], "BLOCK-2".to_string())];
+    let out = splice(md, &placed);
+    assert!(!out.contains(".png)"), "{out}");
+    assert!(!out.contains("v2"), "{out}");
+    assert_eq!(out, "before\n\nBLOCK-1\n\nafter \n\nBLOCK-2\n\n end\n");
+}

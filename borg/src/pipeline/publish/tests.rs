@@ -540,8 +540,8 @@ fn publish_failure_removes_the_created_file_and_leaves_a_reused_path() {
 }
 
 #[test]
-fn degraded_reingest_over_a_note_that_owns_images_fails_fetch_failed_and_changes_nothing() {
-    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png"]);
+fn degraded_reingest_that_keeps_fewer_images_than_the_old_note_fails_fetch_failed_and_changes_nothing() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"]);
     let old_bytes = std::fs::read(fx.old_note()).unwrap();
     let err = fx
         .publish(
@@ -553,7 +553,7 @@ fn degraded_reingest_over_a_note_that_owns_images_fails_fetch_failed_and_changes
         )
         .unwrap_err();
     assert!(
-        matches!(err, UrlPublishError::DegradedReingest { owned: 1 }),
+        matches!(err, UrlPublishError::DegradedReingest { owned: 2, keeps: 1 }),
         "got {err:?}"
     );
     assert_eq!(err.failure_stage(), FailureStage::FetchFailed);
@@ -562,15 +562,68 @@ fn degraded_reingest_over_a_note_that_owns_images_fails_fetch_failed_and_changes
         old_bytes,
         "old note bytes unchanged"
     );
-    assert!(
-        fx.vault.path().join(rel("tr-old-1-aaaaaaaa.png")).exists(),
-        "old file unchanged"
-    );
+    for name in ["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"] {
+        assert_eq!(
+            std::fs::read_to_string(fx.vault.path().join(rel(name))).unwrap(),
+            format!("old {name}"),
+            "old file unchanged"
+        );
+    }
     assert!(
         !fx.vault.path().join(rel("tr-new-1-dddddddd.png")).exists(),
         "no new file written"
     );
     assert!(!crate::archive::is_durable(fx.archive_root.path(), "tr-new"));
+}
+
+/// Scott's 2026-10-22 ruling (option B): a degraded run that keeps at least
+/// as many images as the old note owns publishes; one dead candidate no
+/// longer strands the note. The receipt's degraded flag is the caller's.
+#[test]
+fn degraded_reingest_that_keeps_as_many_images_as_the_old_note_publishes() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"]);
+    let (path, orphans) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\nNEW\n",
+            &[
+                planned("tr-new-1-dddddddd.png", b"one"),
+                planned("tr-new-2-eeeeeeee.png", b"two"),
+            ],
+            true,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert_eq!(path, fx.old_note());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "---\ntitle: new\n---\nNEW\n");
+    assert_eq!(
+        orphans,
+        vec![rel("tr-old-1-aaaaaaaa.png"), rel("tr-old-2-bbbbbbbb.png")]
+    );
+    assert!(fx.vault.path().join(rel("tr-new-1-dddddddd.png")).exists());
+    assert!(fx.vault.path().join(rel("tr-new-2-eeeeeeee.png")).exists());
+}
+
+/// A non-degraded reingest that keeps fewer images than the old note still
+/// publishes, and cleanup removes the orphan (unchanged by option B).
+#[test]
+fn clean_reingest_that_keeps_fewer_images_publishes_and_removes_the_orphan() {
+    let fx = Fixture::new(&["tr-old-1-aaaaaaaa.png", "tr-old-2-bbbbbbbb.png"]);
+    let (_, orphans) = fx
+        .publish(
+            fx.archive_root.path(),
+            b"---\ntitle: new\n---\n",
+            &[planned("tr-new-1-dddddddd.png", b"one")],
+            false,
+            NOTE_CEILING,
+        )
+        .unwrap();
+    assert_eq!(
+        orphans,
+        vec![rel("tr-old-1-aaaaaaaa.png"), rel("tr-old-2-bbbbbbbb.png")]
+    );
+    assert!(!fx.vault.path().join(rel("tr-old-2-bbbbbbbb.png")).exists());
+    assert!(fx.vault.path().join(rel("tr-new-1-dddddddd.png")).exists());
 }
 
 #[test]
@@ -622,4 +675,51 @@ fn images_disabled_reingest_writes_empty_images_and_removes_the_old_files() {
     assert_eq!(orphans.len(), 2);
     assert!(!fx.vault.path().join(rel("tr-old-1-aaaaaaaa.png")).exists());
     assert!(!fx.vault.path().join(rel("tr-old-2-bbbbbbbb.png")).exists());
+}
+
+fn files_under(dir: &Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .map(|p| if p.is_dir() { files_under(&p) } else { 1 })
+        .sum()
+}
+
+/// The size gate judges the composed note: a body that passes on its own is
+/// refused once `## Images` is appended, and no figure file is written.
+#[test]
+fn images_section_that_pushes_a_passing_note_over_the_gate_writes_no_asset() {
+    use crate::pipeline::figures::{self, Figure, FigureMime, FigureSet};
+    let body = "---\ntitle: new\n---\n## Summary\n\nA passing note.\n";
+    let set = FigureSet {
+        figures: vec![Figure {
+            bytes: b"png bytes".to_vec(),
+            mime: FigureMime::Png,
+            section: format!("#### Description\n\n{}", "a long figure description ".repeat(20)),
+            provenance: "In @poster's post".to_string(),
+        }],
+        degraded: false,
+    };
+    let now = chrono::Utc::now();
+    let plan = figures::plan(&set, "tr-new", &now, &crate::config::ImagesConfig::default());
+    let composed = figures::with_images_section(body, &plan);
+    let limit = body.len() + 64;
+    assert!(composed.len() > limit, "fixture: ## Images is what crosses the gate");
+
+    let passing = Fixture::new(&[]);
+    passing
+        .publish(passing.archive_root.path(), body.as_bytes(), &[], false, limit)
+        .expect("the body alone passes the gate");
+
+    let fx = Fixture::new(&[]);
+    let err = fx
+        .publish(fx.archive_root.path(), composed.as_bytes(), &plan.planned, false, limit)
+        .unwrap_err();
+    assert!(matches!(err, UrlPublishError::SizeGate(_)), "got {err:?}");
+    assert_eq!(err.failure_stage(), FailureStage::QualityBlocked);
+    assert_eq!(files_under(&fx.vault.path().join("system/attachments")), 0);
+    assert!(!fx.old_note().exists());
 }

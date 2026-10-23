@@ -60,17 +60,49 @@ fn test_read_old_owned_no_frontmatter_block() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Inverted by the implementation-audit fold-in: malformed frontmatter used
+/// to read as "owns nothing", which let a degraded reingest replace a note
+/// that owns images and orphaned its files. It now fails closed.
 #[test]
-fn test_read_old_owned_malformed_yaml() {
-    let tmp = std::env::temp_dir().join("borg-test-cleanup-malformed");
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    let note = tmp.join("note.md");
-    write_note(&note, "!! not yaml ::?\n", "# body\n");
-    // We tolerate malformed frontmatter; cleanup is best-effort.
-    let slides = read_old_owned(&note).unwrap().slides;
-    assert!(slides.is_empty());
-    let _ = std::fs::remove_dir_all(&tmp);
+fn test_read_old_owned_malformed_yaml_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let note = tmp.path().join("note.md");
+    write_note(&note, "images: [unclosed\n", "# body\n");
+    let err = read_old_owned(&note).unwrap_err();
+    assert!(format!("{err:#}").contains("parse frontmatter"), "{err:#}");
+}
+
+#[test]
+fn test_read_old_owned_unterminated_frontmatter_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let note = tmp.path().join("note.md");
+    std::fs::write(
+        &note,
+        "---\nimages:\n  - system/attachments/images/2026-10/t-1-a.png\n# body\n",
+    )
+    .unwrap();
+    assert!(read_old_owned(&note).is_err());
+}
+
+#[test]
+fn test_read_old_owned_reads_crlf_frontmatter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let note = tmp.path().join("note.md");
+    std::fs::write(
+        &note,
+        "---\r\ntitle: Hello\r\nimages:\r\n  - system/attachments/images/2026-10/t-1-aaaaaaaa.png\r\n---\r\n# body\r\n",
+    )
+    .unwrap();
+    let owned = read_old_owned(&note).unwrap();
+    assert_eq!(owned.images, vec!["system/attachments/images/2026-10/t-1-aaaaaaaa.png"]);
+}
+
+#[test]
+fn test_read_old_owned_empty_frontmatter_owns_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let note = tmp.path().join("note.md");
+    std::fs::write(&note, "---\n---\n# body\n").unwrap();
+    assert_eq!(read_old_owned(&note).unwrap(), Owned::default());
 }
 
 #[test]

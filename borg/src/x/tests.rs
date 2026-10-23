@@ -405,9 +405,9 @@ fn x_article_ubereng_yields_six_figures_in_block_order_with_captions() {
 fn x_article_unresolvable_atomic_block_is_skipped_and_render_succeeds() {
     let mut post = article_post();
     let content = post.article.as_mut().and_then(|a| a.content.as_mut()).expect("content");
-    content.blocks[5].entity_ranges[0].key = "999".to_string();
+    content.blocks[5].entity_ranges[0].key = Some("999".to_string());
     content.blocks[20].entity_ranges.clear();
-    content.blocks[41].entity_ranges[0].key = "8".to_string(); // a LINK entity
+    content.blocks[41].entity_ranges[0].key = Some("8".to_string()); // a LINK entity
 
     let figures = article_figures(&post);
     let blocks: Vec<usize> = figures.iter().map(|f| f.block).collect();
@@ -465,8 +465,42 @@ fn x_article_figure_renders_at_its_atomic_block() {
     );
 }
 
+/// A key that is neither a string nor a number reads as no key: the block
+/// it names is skipped by `article_figures`, never a parse error (this test
+/// pinned a parse error before the implementation-audit fold-in).
 #[test]
-fn x_article_entity_key_rejects_non_scalar() {
-    let err = serde_json::from_str::<EntityRange>(r#"{"key": [1]}"#).expect_err("array key");
-    assert!(err.to_string().contains("string or number"), "{err}");
+fn x_article_entity_key_non_scalar_reads_as_no_key() {
+    let range = serde_json::from_str::<EntityRange>(r#"{"key": [1]}"#).expect("array key parses");
+    assert_eq!(range.key, None);
+    let range = serde_json::from_str::<EntityRange>(r#"{"key": 7}"#).expect("number key parses");
+    assert_eq!(range.key.as_deref(), Some("7"));
+}
+
+/// A malformed entity in the raw fxtwitter JSON (an empty entity range, an
+/// entity whose value is not an object, a media item and a media entity with
+/// no id) parses, skips only the blocks it breaks, and the rest resolve.
+#[test]
+fn x_article_malformed_entities_in_raw_json_skip_their_block_not_the_post() {
+    let mut raw: serde_json::Value = serde_json::from_str(ARTICLE).expect("fixture json");
+    let article = &mut raw["tweet"]["article"];
+    let blocks = article["content"]["blocks"].as_array_mut().expect("blocks");
+    blocks[5]["entityRanges"] = serde_json::json!([{}]);
+    // Block 20's entity: key 1 in the fixture's numbering, located by search.
+    let key20 = blocks[20]["entityRanges"][0]["key"].clone();
+    let map = article["content"]["entityMap"].as_array_mut().expect("entityMap");
+    let at = map
+        .iter()
+        .position(|e| e["key"].to_string().trim_matches('"') == key20.to_string().trim_matches('"'))
+        .expect("block 20's entity");
+    map[at]["value"] = serde_json::json!("not an object");
+    map.push(serde_json::json!({"key": {"nested": true}, "value": {"type": "MEDIA", "data": {"mediaItems": [{}]}}}));
+    let media = article["media_entities"].as_array_mut().expect("media_entities");
+    media.push(serde_json::json!({"media_info": {"original_img_url": "https://pbs.twimg.com/media/orphan.jpg"}}));
+
+    let envelope: Envelope = serde_json::from_value(raw).expect("a malformed entity never fails the post");
+    let post = envelope.tweet.expect("tweet");
+    let figures = article_figures(&post);
+    let blocks: Vec<usize> = figures.iter().map(|f| f.block).collect();
+    assert_eq!(blocks, vec![41, 42, 46, 84], "{figures:#?}");
+    assert!(figures.iter().all(|f| !f.url.contains("orphan")), "{figures:#?}");
 }

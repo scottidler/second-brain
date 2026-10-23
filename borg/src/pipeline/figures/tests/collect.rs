@@ -17,6 +17,8 @@ const DIAGRAM_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="300"
 struct Seen {
     paths: Arc<Mutex<Vec<String>>>,
     vision: Arc<Mutex<Vec<String>>>,
+    /// `(bytes, longer side px)` of the image each vision call carried.
+    sent: Arc<Mutex<Vec<(usize, u32)>>>,
 }
 
 impl Seen {
@@ -34,6 +36,10 @@ impl Seen {
         self.vision.lock().unwrap().clone()
     }
 
+    fn sent(&self) -> Vec<(usize, u32)> {
+        self.sent.lock().unwrap().clone()
+    }
+
     fn calls(&self, kind: &str) -> usize {
         self.vision().iter().filter(|c| c.starts_with(kind)).count()
     }
@@ -47,8 +53,25 @@ fn png(width: u32, height: u32, shade: u8) -> Vec<u8> {
     out.into_inner()
 }
 
+/// Incompressible noise, 1400x1400: a PNG well over [`VISION_MAX_BYTES`] whose
+/// longer side is still under the default `max-side-px`, so only the byte
+/// bound can bring it under.
+fn huge_png() -> Vec<u8> {
+    let mut state: u32 = 0x9e37_79b9;
+    let buf = image::RgbImage::from_fn(1400, 1400, |_, _| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let [a, b, c, _] = state.to_be_bytes();
+        image::Rgb([a, b, c])
+    });
+    let mut out = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
 /// `/img/<name>`: `big*` a 400px PNG (shade from the name's last byte), `small*`
-/// a 90px PNG, `a.svg` the diagram, `x.avif` avif-typed bytes; `/vision`
+/// a 90px PNG, `huge.png` a 1400px noise PNG over [`VISION_MAX_BYTES`], `a.svg` the diagram, `x.avif` avif-typed bytes; `/vision`
 /// records the call and answers flowchart / a description.
 async fn serve() -> (String, Seen) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -73,9 +96,11 @@ async fn serve() -> (String, Seen) {
                     "describe"
                 };
                 seen.vision.lock().unwrap().push(format!("{kind}:{media}"));
-                let _ = base64::engine::general_purpose::STANDARD
+                let image = base64::engine::general_purpose::STANDARD
                     .decode(content[0]["source"]["data"].as_str().unwrap_or(""))
                     .expect("image is base64");
+                let side = image::load_from_memory(&image).map_or(0, |i| i.width().max(i.height()));
+                seen.sent.lock().unwrap().push((image.len(), side));
                 if kind == "classify" {
                     let text = "CATEGORY: flowchart\nCONFIDENCE: 0.9";
                     let body = serde_json::json!({"content": [{"type": "text", "text": text}]});
@@ -87,6 +112,7 @@ async fn serve() -> (String, Seen) {
             match name {
                 n if n.starts_with("big") => reply("image/png", png(400, 400, n.bytes().last().unwrap())),
                 n if n.starts_with("small") => reply("image/png", png(90, 90, n.bytes().last().unwrap())),
+                "huge.png" => reply("image/png", huge_png()),
                 "broken.svg" => reply("image/svg+xml", b"<svg".to_vec()),
                 "a.svg" => reply("image/svg+xml", DIAGRAM_SVG.as_bytes().to_vec()),
                 "x.avif" => reply("image/avif", b"avif bytes".to_vec()),
@@ -94,6 +120,8 @@ async fn serve() -> (String, Seen) {
             }
         }
     });
+    // A bounded vision image is still megabytes of base64: lift axum's 2 MB cap.
+    let app = app.layer(axum::extract::DefaultBodyLimit::disable());
     tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
     (base, seen)
 }
@@ -250,4 +278,40 @@ async fn identical_bytes_within_a_note_keep_the_first_only() {
     let kept: Vec<bool> = out.figures.iter().map(Option::is_some).collect();
     assert_eq!(kept, vec![true, false, true]);
     assert_eq!(seen.calls("describe"), 2);
+}
+
+#[tokio::test]
+async fn an_image_over_the_vision_limit_is_bounded_before_classify_and_describe_but_stored_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, seen) = serve().await;
+    let original = huge_png();
+    assert!(original.len() > VISION_MAX_BYTES, "fixture is over the bound");
+    let config = config(dir.path());
+
+    let out = run(&base, &config, &[candidate(&base, "huge.png", Source::WebArticle)]).await;
+
+    assert_eq!(seen.calls("classify"), 1);
+    assert_eq!(seen.calls("describe"), 1);
+    for (bytes, side) in seen.sent() {
+        assert!(bytes <= VISION_MAX_BYTES, "vision was sent {bytes} bytes");
+        assert!(side <= config.images.max_side_px, "vision was sent {side}px");
+    }
+    let figure = out.figures[0].as_ref().expect("bounded figure kept");
+    assert_eq!(figure.bytes, original, "the stored bytes are the original download");
+    assert!(!out.degraded);
+}
+
+#[tokio::test]
+async fn an_image_over_max_side_px_reaches_vision_at_max_side_px() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, seen) = serve().await;
+    let mut config = config(dir.path());
+    config.images.max_side_px = 100;
+
+    let out = run(&base, &config, &[candidate(&base, "big7", Source::XArticle)]).await;
+
+    assert!(out.figures[0].is_some());
+    let sent = seen.sent();
+    assert_eq!(sent.len(), 2, "classify and describe");
+    assert!(sent.iter().all(|&(_, side)| side == 100), "{sent:?}");
 }

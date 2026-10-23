@@ -85,7 +85,7 @@ Parked, with revisit condition:
 
 - **X post photos**: `x::photos()` (`x.rs:163`) as today, `origin: XPost(owner)`.
 - **X Article figures**: deserialize `blocks[].entityRanges`, `entityMap` (in fxtwitter a **list** of `{key, value}`, not a Draft.js dict), and `media_entities`. Resolve each `atomic` block: `entityRanges[0].key` -> `entityMap` entry with the same key (as a string) -> `value.type == "MEDIA"` -> `value.data.mediaItems[].mediaId` -> `media_entities[].media_id` -> `media_info.original_img_url`, caption from `value.data.caption`. Proven 8 of 8 on the two live Articles. An unresolvable atomic block is skipped and logged, never an error.
-- **Web articles**: parse `![alt](url)` from the fetched markdown (readable, fabric, jina all emit it). Substack's lazy-image markup comes through as `![alt](<https://host/p/{"src":"https://substack-post-media...",...}>)` (19 refs over 4 traces): extract the inner `src`. Relative URLs resolve against the page URL. HN (`hn-api`) carries no images.
+- **Web articles**: parse `![alt](url)` from the fetched markdown (readable, fabric, jina all emit it). Substack's lazy-image markup comes through as `![alt](<https://host/p/{"src":"https://substack-post-media...",...}>)` (19 refs over 4 traces): extract the inner `src`. Relative URLs resolve against the page URL. A destination takes backslash escapes and one level of balanced parens, and is unescaped as CommonMark does: htmd escapes every `(`/`)` in an image link (`diagram\(v2\).png`) and wiki URLs carry bare ones (`File:Foo_(bar).png`). An image inside a fenced code block or an inline code span is code, not a candidate. HN (`hn-api`) carries no images.
 
 **Prefilter (deterministic, no network beyond the download):**
 
@@ -101,7 +101,7 @@ Content heuristics apply to **web-article images only** (X photos and X Article 
 - Drop under `min-side-px` (default 200) on either axis, read from the decoded header.
 - **Alt text is not a signal.** martinfowler: 7 of 7 diagrams have empty alt; chroma context-rot: 43 charts, all empty alt.
 
-**SVG:** 151 refs. Many are diagrams (mermaid and draw.io exports), many are icons. The vision API takes jpeg/png/gif/webp only. Rasterize with `resvg` (`cargo add resvg`), scaled so the longer side is at most `max-side-px` (an SVG's viewBox can be arbitrarily large), classify the raster, and store the **original `.svg`** (Obsidian renders it). The prefilter's size and keyword rules apply to the raster.
+**SVG:** 151 refs. Many are diagrams (mermaid and draw.io exports), many are icons. The vision API takes jpeg/png/gif/webp only. Rasterize with `resvg` (`cargo add resvg`), scaled so the longer side is at most `max-side-px` (an SVG's viewBox can be arbitrarily large), classify the raster, and store the **original `.svg`** (Obsidian renders it). The size rule reads the SVG's intrinsic size, not the raster's: the raster is raised to a 1024 px legibility floor, which would launder an icon past `min-side-px`. The keyword rules apply to the URL.
 
 **Classify:**
 
@@ -131,6 +131,7 @@ Content heuristics apply to **web-article images only** (X photos and X Article 
 
 - **Path:** `system/attachments/images/YYYY-MM/<trace-id>-<n>-<sha8>.<ext>`, `YYYY-MM` from the ingest time. The trace id is unique per ingest, so two notes never share a file and one note's cleanup can never remove another's image. A note title is not unique (`hygiene::note_filename`, `pipeline.rs:983`; `publish_unique` exists because different sources share titles), so the slug cannot carry ownership.
 - **Oversize:** an image over `max-bytes` (default 2 MiB) is downscaled to `max-side-px` (default 2048) and re-encoded: jpeg -> jpeg q85, everything else -> png (the `image` webp encoder is lossless-only; a gif keeps its first frame). Still over the cap -> dropped, receipt degraded. An SVG is never resized.
+- **Vision input is bounded before classify:** the API refuses an image over 5 MB, and a download may be up to `max-download-bytes`. So before the first vision call each figure gets one bounded image (longer side at most `max-side-px`, at most 3.75 MiB so its base64 is under 5 MiB; an SVG's raster stands in for the SVG): a png still over goes as jpeg, a jpeg still over is shrunk again. Classify, describe, and OCR all read that one image; the stored bytes still follow the oversize rule above. An image that cannot be brought under the bound is dropped, receipt degraded.
 - `rkvr::remove` falls back to a plain delete when `rkvr` is not on PATH (`borg/src/rkvr.rs`), the same as slides today.
 
 **Note shape:** a new `## Images` section at the end of the distilled body, before the `---` / Source footer:
@@ -157,7 +158,7 @@ Agent generates code
 
 **Reingest cleanup:** generalize `borg/src/slides/cleanup.rs` (`read_old_slides_frontmatter` -> `compute_orphans` -> `rkvr::remove`) to read both `slides:` and `images:`, captured before replace (`pipeline.rs:684-686`) and run after the new note is durable (`:1182-1195`). Slides keep their own key and behavior.
 
-**A degraded reingest never replaces a note that owns images.** If the old note has a non-empty `images:` and this run's image stage is degraded (a candidate that passed the prefilter failed download, classify, describe, or store), the trace fails `fetch-failed` and the old note and its files stay untouched. A fresh ingest (no old note) publishes degraded as usual. Same rule as the 2026-10-19 doc's image-only post: never publish a worse note over a useful one.
+**A degraded reingest never replaces a note with one that keeps fewer images.** If the old note has a non-empty `images:`, this run's image stage is degraded (a candidate that passed the prefilter failed download, classify, or describe, or `plan` dropped one), and this run keeps fewer images than the old note's `images:` list, the trace fails `fetch-failed` and the old note and its files stay untouched. A degraded run that keeps at least as many images publishes, its receipt still degraded: one dead candidate, even one the classifier would have discarded, must not strand the note forever. A non-degraded run publishes whatever it keeps, and cleanup moves the old note's orphans to rkvr. A fresh ingest (no old note) publishes degraded as usual. Same intent as the 2026-10-19 doc's image-only post: never publish a worse note over a useful one.
 
 ### Data Model
 
@@ -167,7 +168,7 @@ Agent generates code
   - Not `asset:`: that key is single-valued and means "this note IS the asset."
 - **`NoteContent`** (`borg/src/markdown.rs:9-48`) gains `images: Vec<String>`.
 - **`FetchedPost`** (`handlers.rs:649-653`) carries `figures: FigureSet` instead of pre-rendered sections only.
-- **Receipt:** `fetch_degraded` (`pipeline.rs:744`) is set when any candidate that passed the prefilter fails download, classify, describe, or store. Prefilter drops and classifier "not a diagram" verdicts are expected and do not degrade.
+- **Receipt:** `fetch_degraded` (`pipeline.rs:744`) is set when any candidate that passed the prefilter fails download, classify, or describe. Prefilter drops and classifier "not a diagram" verdicts are expected and do not degrade. A store failure is not a degrade cause: it fails the publish (`publish-failed`), and the files that run created are removed first, so no note ever embeds a file that is not there.
 
 ### API Design
 
@@ -193,7 +194,7 @@ images:
 
 - `content-filter` is a new `FigureFilterConfig { enabled, keep, model, min-confidence }` that reuses `SlideCategory` and its parser (`borg/src/config.rs:650-700`): one taxonomy, unknown categories are a load error. It does not reuse `ContentFilterConfig`: that struct's defaults are `enabled: false, keep: [architecture-diagram]` (`config.rs:~770`) and it carries the pool knob. `FigureFilterConfig` has its own serde default fns equal to the block above, so an omitted or partial `images:` block yields exactly these values.
 - `keep` default includes `chart` and `infographic`: "all diagrams" covers chroma's 43 data charts and the explanatory one-pagers; `app-ui`, `webpage`, `code`, `terminal`, `talking-head`, `b-roll`, `title-card`, `other` stay out.
-- `enabled: false` restores today's behavior: X photos described but not stored, articles untouched. A reingest under `enabled: false` writes `images: []`, so cleanup moves the old note's images to rkvr: the frontmatter and the files never disagree.
+- `enabled: false` stores nothing and leaves articles untouched. X photos are still described, and still pass through the one figure path: the format prefilter (avif/bmp/tiff dropped), sha256 dedupe within the note, and the `max-section-bytes` cap on each section, so it is not byte-for-byte today's behavior. A reingest under `enabled: false` writes `images: []`, so cleanup moves the old note's images to rkvr: the frontmatter and the files never disagree.
 
 ### Implementation Plan
 
@@ -296,11 +297,11 @@ CONFIDENCE: <a number between 0.0 and 1.0>
 - `images:` frontmatter on `NoteContent`, `RENDER_NOTE_KEYS`, `render_note`.
 - Generalize `slides::cleanup` to `images:` + `slides:`.
 - `figures::plan` and `figures::store` (`write_atomic_new`, downscale over `max-bytes`); the publish ordering above (plan -> render -> size gate -> store -> publish); rkvr only the files `store` created on publish failure.
-- The degraded-reingest rule: old note owns images + degraded image stage -> `fetch-failed`, nothing replaced.
+- The degraded-reingest rule: old note owns images + degraded image stage + this run keeps fewer images than the old note owns -> `fetch-failed`, nothing replaced.
 - **Success criteria:**
   - `render_note_keys_matches_the_writer` passes with `images` added; an omitted `images:` block and a block with only `enabled: true` both deserialize to the documented defaults; `keep: [diagram]` fails config load.
   - Publish-path tests through the note writer, not `process_x_post_from`: a reingest that drops one of two images leaves the kept file and moves the other to rkvr; a note over the size gate because of `## Images` writes 0 files under `system/attachments`; a publish failure removes the created file and leaves a pre-existing reused path in place.
-  - A reingest over a note with `images:` whose image stage is degraded returns `fetch-failed` and the old note's bytes and files are unchanged.
+  - A reingest over a note with 2 `images:` whose image stage is degraded and keeps 1 returns `fetch-failed` and the old note's bytes and files are unchanged; the same degraded run keeping 2 publishes; a non-degraded run keeping 1 publishes and cleanup removes the orphan.
 
 #### Phase 2: X post photos stored and embedded
 **Model:** sonnet
@@ -372,6 +373,7 @@ echo "$emb $fm $ex"
 - 2026-10-22, round 1 must-fixes folded: size gate sees the full note; trace-id ownership; degraded reingest fails closed; cap before describe; no second vision-pool knob; quality gate on the pre-splice source.
 - 2026-10-22, both seats: no new staging-based reingest selector for the backfill.
 - 2026-10-22, Scott: backfill every article note after a canary (option B over forward-only); steps in the Rollout Plan.
+- 2026-10-22, Scott: a degraded reingest is refused only when it would keep fewer images than the old note owns (option B over refuse-on-any-degrade); one dead candidate no longer strands a note.
 
 ## Alternatives Considered
 
@@ -447,7 +449,7 @@ echo "$emb $fm $ex"
 | Reingest in a later month leaves the old copy | High | Low | generalized cleanup diffs `images:` before/after and rkvrs orphans |
 | Image host 403s or rate-limits | Low | Low | per-image drop, receipt degraded; 56 of 56 probed images returned 200 |
 | Note crosses 64 KiB with descriptions | Low | Med | `max-per-note` x `max-section-bytes` = 30 KB worst case; the size gate sees the full note and writes no asset on a fail |
-| Degraded reingest replaces a note that owns images | Med | High | fail `fetch-failed` and leave the old note and files untouched |
+| Degraded reingest replaces a note with one that keeps fewer images | Med | High | fail `fetch-failed` and leave the old note and files untouched when the degraded run keeps fewer images than the old note owns; a degraded run keeping at least as many publishes, so one dead candidate cannot strand the note |
 | Two notes share an image file | Low | High | filenames carry the trace id, unique per ingest |
 
 ## Open Questions

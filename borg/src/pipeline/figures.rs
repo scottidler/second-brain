@@ -202,27 +202,7 @@ fn bound(figure: &Figure, cfg: &ImagesConfig) -> Result<(Vec<u8>, FigureMime)> {
     if figure.mime == FigureMime::Svg || figure.bytes.len() as u64 <= cfg.max_bytes {
         return Ok((figure.bytes.clone(), figure.mime));
     }
-    let decoded = image::load_from_memory(&figure.bytes).context("decode oversize figure")?;
-    let resized = if decoded.width().max(decoded.height()) > cfg.max_side_px {
-        decoded.resize(cfg.max_side_px, cfg.max_side_px, image::imageops::FilterType::Lanczos3)
-    } else {
-        decoded
-    };
-    let mut out = Cursor::new(Vec::new());
-    let mime = if figure.mime == FigureMime::Jpeg {
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, DOWNSCALE_JPEG_QUALITY);
-        resized
-            .to_rgb8()
-            .write_with_encoder(encoder)
-            .context("re-encode figure as jpeg")?;
-        FigureMime::Jpeg
-    } else {
-        resized
-            .write_to(&mut out, image::ImageFormat::Png)
-            .context("re-encode figure as png")?;
-        FigureMime::Png
-    };
-    let bytes = out.into_inner();
+    let (bytes, mime) = downscale(&figure.bytes, figure.mime, cfg.max_side_px)?;
     if bytes.len() as u64 > cfg.max_bytes {
         eyre::bail!(
             "still {} bytes after downscale to {}px, over max-bytes {}",
@@ -233,6 +213,111 @@ fn bound(figure: &Figure, cfg: &ImagesConfig) -> Result<(Vec<u8>, FigureMime)> {
     }
     Ok((bytes, mime))
 }
+
+/// Decode `bytes`, shrink the longer side to `max_side_px` when it is over,
+/// and re-encode: jpeg -> jpeg q85, everything else -> png (the `image` webp
+/// encoder is lossless-only; a gif keeps its first frame).
+fn downscale(bytes: &[u8], mime: FigureMime, max_side_px: u32) -> Result<(Vec<u8>, FigureMime)> {
+    let decoded = image::load_from_memory(bytes).context("decode figure for downscale")?;
+    let resized = fit(decoded, max_side_px);
+    if mime == FigureMime::Jpeg {
+        Ok((encode_jpeg(&resized)?, FigureMime::Jpeg))
+    } else {
+        Ok((encode_png(&resized)?, FigureMime::Png))
+    }
+}
+
+fn fit(decoded: image::DynamicImage, max_side_px: u32) -> image::DynamicImage {
+    if decoded.width().max(decoded.height()) > max_side_px {
+        decoded.resize(max_side_px, max_side_px, image::imageops::FilterType::Lanczos3)
+    } else {
+        decoded
+    }
+}
+
+fn encode_jpeg(img: &image::DynamicImage) -> Result<Vec<u8>> {
+    let mut out = Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, DOWNSCALE_JPEG_QUALITY);
+    img.to_rgb8()
+        .write_with_encoder(encoder)
+        .context("re-encode figure as jpeg")?;
+    Ok(out.into_inner())
+}
+
+fn encode_png(img: &image::DynamicImage) -> Result<Vec<u8>> {
+    let mut out = Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png)
+        .context("re-encode figure as png")?;
+    Ok(out.into_inner())
+}
+
+/// The vision API refuses an image over 5 MiB. The bound is set so the
+/// base64 payload the request carries (4 bytes per 3) is also under 5 MiB,
+/// which holds whichever of the two the API measures.
+pub(crate) const VISION_MAX_BYTES: usize = 5 * 1024 * 1024 / 4 * 3;
+
+/// The one image classify and describe both see, bounded before either call:
+/// `None` when `bytes` already has its longer side within `max_side_px` and
+/// is at most `max_bytes` (sent as is); otherwise the image downscaled to
+/// `max_side_px` and re-encoded as [`downscale`] does. A png still over
+/// `max_bytes` goes as a jpeg (vision reads the pixels, not the format), and
+/// a jpeg still over it is shrunk again in proportion to the overshoot, at
+/// most [`VISION_SHRINK_ATTEMPTS`] times. Undecodable over the bound, or
+/// still over it after that, is an `Err`: the figure drops and degrades. The
+/// stored bytes are not this; they follow [`bound`].
+pub(crate) fn vision_image(
+    bytes: &[u8],
+    mime: FigureMime,
+    max_side_px: u32,
+    max_bytes: usize,
+) -> Result<Option<(Vec<u8>, FigureMime)>> {
+    let within_side = sniff_dims(bytes).is_none_or(|(w, h)| w.max(h) <= max_side_px);
+    if within_side && bytes.len() <= max_bytes {
+        return Ok(None);
+    }
+    let decoded = image::load_from_memory(bytes).context("decode figure for vision")?;
+    let mut resized = fit(decoded, max_side_px);
+    let (mut out, mut out_mime) = if mime == FigureMime::Jpeg {
+        (encode_jpeg(&resized)?, FigureMime::Jpeg)
+    } else {
+        (encode_png(&resized)?, FigureMime::Png)
+    };
+    if out.len() > max_bytes && out_mime == FigureMime::Png {
+        out = encode_jpeg(&resized)?;
+        out_mime = FigureMime::Jpeg;
+    }
+    for _ in 0..VISION_SHRINK_ATTEMPTS {
+        if out.len() <= max_bytes {
+            break;
+        }
+        // Encoded size tracks pixel count, so the side scales by the root.
+        let ratio = (max_bytes as f64 / out.len() as f64).sqrt() * 0.9;
+        let side = ((resized.width().max(resized.height()) as f64) * ratio)
+            .floor()
+            .max(1.0) as u32;
+        resized = fit(resized, side);
+        out = encode_jpeg(&resized)?;
+    }
+    if out.len() > max_bytes {
+        eyre::bail!(
+            "still {} bytes for vision after downscale to {}px, over {max_bytes}",
+            out.len(),
+            resized.width().max(resized.height())
+        );
+    }
+    log::debug!(
+        "vision_image: {} -> {} bytes, {}x{} as {}",
+        bytes.len(),
+        out.len(),
+        resized.width(),
+        resized.height(),
+        out_mime.content_type()
+    );
+    Ok(Some((out, out_mime)))
+}
+
+/// How many times [`vision_image`] shrinks a jpeg that is still over the bound.
+const VISION_SHRINK_ATTEMPTS: usize = 3;
 
 fn sha8(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -488,26 +573,24 @@ pub(crate) struct Drops {
     pub error: usize,
 }
 
-/// A downloaded image that passed the prefilter. `raster` is the PNG an SVG
-/// was rendered to for the vision API; `bytes` stays the original that is stored.
+/// A downloaded image that passed the prefilter. `bytes` is the original that
+/// is stored; `vision` is the bounded image classify and describe are sent
+/// ([`vision_image`]: an SVG's raster, or a downscale of an image over the
+/// vision bound), `None` when the original is sent as is.
 struct Fetched {
     index: usize,
     bytes: Vec<u8>,
     mime: FigureMime,
-    raster: Option<Vec<u8>>,
+    vision: Option<(Vec<u8>, FigureMime)>,
 }
 
 impl Fetched {
     fn vision_bytes(&self) -> &[u8] {
-        self.raster.as_deref().unwrap_or(&self.bytes)
+        self.vision.as_ref().map_or(&self.bytes, |(bytes, _)| bytes)
     }
 
     fn vision_mime(&self) -> &'static str {
-        if self.raster.is_some() {
-            FigureMime::Png.content_type()
-        } else {
-            self.mime.content_type()
-        }
+        self.vision.as_ref().map_or(self.mime, |(_, mime)| *mime).content_type()
     }
 }
 
@@ -606,11 +689,19 @@ pub(crate) async fn collect(candidates: &[Candidate], config: &Config, ocr: OcrF
         }
         // The prefilter has already refused a MIME borg does not store.
         let Some(mime) = mime else { continue };
+        let vision = match bound_for_vision(&bytes, mime, raster, cfg.max_side_px).await {
+            Ok(vision) => vision,
+            Err(e) => {
+                log::warn!("[{trace_id}] figure {} dropped: {e:#}", candidate.url);
+                drops.error += 1;
+                continue;
+            }
+        };
         fetched.push(Fetched {
             index,
             bytes,
             mime,
-            raster,
+            vision,
         });
     }
 
@@ -699,6 +790,32 @@ fn sniff_dims(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?
         .into_dimensions()
         .ok()
+}
+
+/// [`vision_image`] for a fetched figure (an SVG's raster stands in for the
+/// SVG, and goes as is when within the bound). Decode and resize are
+/// CPU-bound; keep them off the async workers.
+async fn bound_for_vision(
+    bytes: &[u8],
+    mime: FigureMime,
+    raster: Option<Vec<u8>>,
+    max_side_px: u32,
+) -> Result<Option<(Vec<u8>, FigureMime)>> {
+    let (source, source_mime) = match raster {
+        Some(png) => (png, FigureMime::Png),
+        None => (bytes.to_vec(), mime),
+    };
+    let is_raster = mime == FigureMime::Svg;
+    tokio::task::spawn_blocking(move || {
+        let bounded = vision_image(&source, source_mime, max_side_px, VISION_MAX_BYTES)?;
+        Ok(match bounded {
+            Some(bounded) => Some(bounded),
+            None if is_raster => Some((source, FigureMime::Png)),
+            None => None,
+        })
+    })
+    .await
+    .context("vision bound task")?
 }
 
 /// SVG rasterization is CPU-bound; keep it off the async workers.

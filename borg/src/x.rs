@@ -97,18 +97,23 @@ pub struct Block {
 
 /// A span of a block bound to an entity. An `atomic` block's first range
 /// names the media entity it embeds.
+///
+/// The entity fields borg reads are all tolerant (`None` when missing or
+/// malformed): a bad entity skips its `atomic` block in [`article_figures`],
+/// it never fails the post.
 #[derive(Debug, Deserialize)]
 pub struct EntityRange {
     /// A number in the block, a string in the entity map: read as a string.
-    #[serde(deserialize_with = "key_as_string")]
-    pub key: String,
+    #[serde(default, deserialize_with = "key_as_string")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Entity {
-    #[serde(deserialize_with = "key_as_string")]
-    pub key: String,
-    pub value: EntityValue,
+    #[serde(default, deserialize_with = "key_as_string")]
+    pub key: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub value: Option<EntityValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,15 +134,16 @@ pub struct EntityData {
 
 #[derive(Debug, Deserialize)]
 pub struct MediaItem {
-    #[serde(rename = "mediaId", deserialize_with = "key_as_string")]
-    pub media_id: String,
+    #[serde(rename = "mediaId", default, deserialize_with = "key_as_string")]
+    pub media_id: Option<String>,
 }
 
 /// One image an Article carries, keyed by the id a `MediaItem` names.
 #[derive(Debug, Deserialize)]
 pub struct MediaEntity {
-    #[serde(deserialize_with = "key_as_string")]
-    pub media_id: String,
+    #[serde(default, deserialize_with = "key_as_string")]
+    pub media_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
     pub media_info: Option<MediaInfo>,
 }
 
@@ -165,14 +171,27 @@ pub enum Place {
     Figure(usize),
 }
 
-fn key_as_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
-    match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::String(s) => Ok(s),
-        serde_json::Value::Number(n) => Ok(n.to_string()),
-        other => Err(serde::de::Error::custom(format!(
-            "entity key must be a string or number, got {other}"
-        ))),
-    }
+/// An entity key or media id: a string, or a number read as a string. Any
+/// other shape is `None`, never an error.
+fn key_as_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        other => {
+            log::debug!("x: entity key {other} is not a string or number; ignored");
+            None
+        }
+    })
+}
+
+/// `T` when the value parses as one, else `None`, never an error.
+fn lenient<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value)
+        .inspect_err(|e| log::debug!("x: malformed entity field ignored: {e}"))
+        .ok())
 }
 
 /// Which post of a thread a photo belongs to.
@@ -296,17 +315,26 @@ fn resolve_atomic(
     content: &ArticleContent,
     media: &[MediaEntity],
 ) -> std::result::Result<Vec<(String, Option<String>)>, String> {
-    let key = &block.entity_ranges.first().ok_or("no entity range")?.key;
+    let key = block
+        .entity_ranges
+        .first()
+        .ok_or("no entity range")?
+        .key
+        .as_deref()
+        .ok_or("entity range has no usable key")?;
     let entity = content
         .entity_map
         .iter()
-        .find(|e| &e.key == key)
+        .find(|e| e.key.as_deref() == Some(key))
         .ok_or_else(|| format!("no entity {key}"))?;
-    if entity.value.kind != "MEDIA" {
-        return Err(format!("entity {key} is {:?}, not MEDIA", entity.value.kind));
-    }
-    let caption = entity
+    let value = entity
         .value
+        .as_ref()
+        .ok_or_else(|| format!("entity {key} has no usable value"))?;
+    if value.kind != "MEDIA" {
+        return Err(format!("entity {key} is {:?}, not MEDIA", value.kind));
+    }
+    let caption = value
         .data
         .caption
         .as_deref()
@@ -314,18 +342,19 @@ fn resolve_atomic(
         .filter(|c| !c.is_empty())
         .map(str::to_string);
     let mut found = Vec::new();
-    for item in &entity.value.data.media_items {
+    for item in &value.data.media_items {
+        let Some(media_id) = item.media_id.as_deref() else {
+            log::info!("x::article_figures: entity {key} has a media item with no usable id");
+            continue;
+        };
         let url = media
             .iter()
-            .find(|m| m.media_id == item.media_id)
+            .find(|m| m.media_id.as_deref() == Some(media_id))
             .and_then(|m| m.media_info.as_ref())
             .and_then(|i| i.original_img_url.clone());
         match url {
             Some(url) => found.push((url, caption.clone())),
-            None => log::info!(
-                "x::article_figures: entity {key} media {} has no image url",
-                item.media_id
-            ),
+            None => log::info!("x::article_figures: entity {key} media {media_id} has no image url"),
         }
     }
     if found.is_empty() {
