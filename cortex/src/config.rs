@@ -750,7 +750,9 @@ impl Default for IntelConfig {
             // None = fall back to the shared `llm.model`. A hardcoded pin here
             // silently overrode `llm.model` for the digest call.
             model: None,
-            max_output_tokens: 1024,
+            // Adaptive thinking spends this budget before the answer; 1024 left
+            // nothing for the text on a full day's notes (stop_reason=max_tokens).
+            max_output_tokens: 16000,
             llm_timeout_secs: 120,
         }
     }

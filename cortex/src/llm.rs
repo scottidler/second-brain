@@ -69,13 +69,42 @@ pub fn complete(
     let parsed: serde_json::Value =
         serde_json::from_str(&response_text).context("failed to parse API response JSON")?;
 
-    // Extract text from content[0].text
-    parsed["content"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|block| block["text"].as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| eyre::eyre!("unexpected API response structure: no content[0].text"))
+    extract_text(&parsed)
+}
+
+/// Pull the answer text out of a Messages API response.
+///
+/// Models with adaptive thinking on by default (claude-sonnet-5 and later)
+/// put a `thinking` block before the `text` block, so `content[0]` is not the
+/// answer. Thinking also spends `max_tokens`: a response that stops on
+/// `max_tokens` is either missing its text or truncated, and is an error
+/// rather than a half-written digest.
+fn extract_text(parsed: &serde_json::Value) -> Result<String> {
+    let stop_reason = parsed["stop_reason"].as_str().unwrap_or("<none>");
+    let blocks = parsed["content"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let block_types: Vec<&str> = blocks
+        .iter()
+        .map(|b| b["type"].as_str().unwrap_or("<untyped>"))
+        .collect();
+    log::debug!("llm::extract_text: stop_reason={stop_reason} content types={block_types:?}");
+
+    if stop_reason != "end_turn" {
+        return Err(eyre::eyre!(
+            "API response did not finish (stop_reason={stop_reason}, content types={block_types:?}); raise intel.max-output-tokens if this is max_tokens"
+        ));
+    }
+
+    let text: String = blocks
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    if text.trim().is_empty() {
+        return Err(eyre::eyre!(
+            "API response has no text (stop_reason={stop_reason}, content types={block_types:?})"
+        ));
+    }
+    Ok(text)
 }
 
 /// Truncate input text to approximately max_tokens (estimated at ~4 chars per token).
