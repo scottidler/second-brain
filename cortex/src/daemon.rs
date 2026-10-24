@@ -805,6 +805,18 @@ where
                     Err(e) => log::error!("intel action failed: {e}"),
                 }
             }
+            "journal" => {
+                if daemon_config.is_enabled("journal") {
+                    match crate::journal::ensure(vault_root, chrono::Local::now().date_naive()) {
+                        Ok(crate::journal::Ensured::Created(path)) => {
+                            log::info!("[daemon] journal: created {}", path.display());
+                            dirty = true;
+                        }
+                        Ok(crate::journal::Ensured::Exists(_)) => {}
+                        Err(e) => log::error!("journal action failed: {e:#}"),
+                    }
+                }
+            }
             "state" => {
                 // Never touches vault notes (writes only its own manifest cache
                 // under `config.state.cache_dir`) - never dirties the shared cache.

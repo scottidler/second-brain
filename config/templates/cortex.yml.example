@@ -179,8 +179,14 @@ daemon:
   # startup or every debounced watcher event) - enabling it here only turns on
   # the separate periodic tick cadenced by `actions.association.interval-secs`
   # above (default hourly). OFF by default.
+  # `journal` creates today's daily note from the vault's own Obsidian
+  # daily-notes settings (.obsidian/daily-notes.json: folder, format, template)
+  # when it does not exist yet, so collectors that write into it have a note
+  # on days nobody opened Obsidian. An existing note is never touched.
   # actions:
   #   association:
+  #     enable: true
+  #   journal:
   #     enable: true
   # Rayon thread-pool cap emitted into the installed systemd unit as
   # Environment="RAYON_NUM_THREADS=N" (candle's gemm degree reads the same

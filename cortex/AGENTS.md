@@ -19,6 +19,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 - `lib::lint` / `lib::link` — dispatch enabled lint/linking rules.
 - `lib::unlink` — retract stoplisted wikilink markup the linker already landed.
 - `intel::run` — weekly/daily summary generation.
+- `journal::ensure`: create today's daily note from `.obsidian/daily-notes.json` (folder, format, template) when absent; daemon action `journal`.
 
 ## Contracts & Invariants
 
@@ -57,7 +58,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 ## Module Map
 
 - **Root/orchestration:** `lib.rs` (`lint`/`link` dispatch), `daemon.rs` (event loop, watcher, systemd, tick scheduling, cycle detection), `shutdown.rs` (`Shutdown`: SIGTERM/SIGINT listeners built ONCE before the daemon loop and polled by `&mut` in each `select!`; a per-iteration listener loses a signal delivered mid-tick, proven by the `tests/shutdown.rs` subprocess harness; `StopHandle`: `StopHandle::listen()` moves the one `Shutdown` into a spawned task that sets a flag, created first thing in the daemon run, so blocking tick work can stop at `is_stopped()` check points and the loop's stop arm awaits `stopped()`; `StopHandle::never()` for non-daemon callers).
-- **Classification & linking:** `classify.rs`, `scope.rs`, `naming.rs`, `tags.rs`; `linking.rs`, `links.rs`, `unlink.rs`, `stopwords.rs`, `intel.rs`.
+- **Classification & linking:** `classify.rs`, `scope.rs`, `naming.rs`, `tags.rs`; `linking.rs`, `links.rs`, `unlink.rs`, `stopwords.rs`, `intel.rs`, `journal.rs` (+`journal/`: today's daily note from Obsidian's own daily-notes settings; `create_new`, never rewrites an existing note; unknown template tokens are an error).
 - **Quality:** `quality.rs`, `duplicates.rs`, `frontmatter.rs`.
 - **Embeddings:** `embed.rs` (+`embed/`).
 - **Knowledge graph (graph-augmented-memory):** `graph.rs` (builds the materialized `edges` table oracle's graph retrieval reads), `entities.rs` (`sb cortex entities --discover`: proposes new glossary entries into `entity-proposals.yml`), `hub.rs` (+`hub/`: `sb cortex hub` stubs/refreshes `entities/*.md` hub notes; `hub/render.rs` is the deterministic claims-by-vector body assembly, `hub/asymmetry.rs` is the read-vs-applied classifier), `association.rs` (`cortex associate`: groups+merges harvest session notes by slug/similarity), `bridge.rs` (`sb cortex bridge-backfill`/`bridge-apply`: one-time historical multi-repo hub backfill), `memgraph.rs` (typed `fact` edges + consolidation agents, MemGraphRAG).

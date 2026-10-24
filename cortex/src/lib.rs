@@ -17,6 +17,7 @@ pub mod frontmatter;
 pub mod graph;
 pub mod hub;
 pub mod intel;
+pub mod journal;
 pub mod linking;
 pub mod links;
 pub mod llm;
