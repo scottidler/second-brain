@@ -314,7 +314,7 @@ harvest:
   # long-running daemon's captured environment. Omit this whole block on a
   # host with no secrets to bootstrap - the generated unit is still valid.
   # env-bootstrap:
-  #   command: manifest age decrypt ~/repos/scottidler/keep/.secrets -f env
+  #   command: manifest -C ~/repos/scottidler/keep/manifest.yml secrets env -f env
   #   env-file: /run/user/1000/sb-harvest.env
 
 # Daily eval (sb-eval.timer): `sb borg eval --unscored` scores every successful

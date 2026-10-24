@@ -7,7 +7,7 @@
 # The distiller talks to Claude via fabric, which needs ESCOTE_ANTHROPIC_API_KEY
 # (borg aliases it to ANTHROPIC_API_KEY on the fabric child). If that var is
 # already in the environment it is used as-is; otherwise it is decrypted on the
-# spot from keep/.secrets via `manifest age decrypt` (never printed, never
+# spot from keep/.env via `manifest age decrypt` (never printed, never
 # persisted). --since overrides the stored watermark cursor and re-scans the
 # whole window; already-published sessions are skipped (idempotent) unless
 # --force is passed.
@@ -45,11 +45,11 @@ command -v sb >/dev/null || die "sb not found (cargo install / otto deploy first
 
 # Fabric's Claude key. Prefer the ambient value (interactive shell eval'd it at
 # startup); otherwise decrypt just this one secret via manifest.
-secret=~/repos/scottidler/keep/.secrets/escote-anthropic-api-key.age
+secret=~/repos/scottidler/keep/.env/escote-anthropic-api-key.age
 if [[ -z "${ESCOTE_ANTHROPIC_API_KEY:-}" ]]; then
   command -v manifest >/dev/null || die "manifest not found; cannot decrypt the Claude key"
   [[ -f "$secret" ]] || die "secret not found: $secret"
-  log "ESCOTE_ANTHROPIC_API_KEY not set; decrypting from keep/.secrets"
+  log "ESCOTE_ANTHROPIC_API_KEY not set; decrypting from keep/.env"
   eval "$(manifest age decrypt "$secret")"
 fi
 [[ -n "${ESCOTE_ANTHROPIC_API_KEY:-}" ]] || die "ESCOTE_ANTHROPIC_API_KEY still empty after decrypt"
