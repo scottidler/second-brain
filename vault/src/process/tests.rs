@@ -337,3 +337,44 @@ fn spawn_failure_is_an_error_naming_the_label() {
     .expect_err("spawning a missing binary must fail");
     assert!(format!("{err:#}").contains("missing-binary"), "error: {err:#}");
 }
+
+/// Write an executable stub and return it with its write handle still open,
+/// which is exactly the state a fork-inherited fd leaves it in.
+fn busy_stub(dir: &Path) -> (std::path::PathBuf, std::fs::File) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join("stub");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(&path)
+        .expect("create stub");
+    file.write_all(b"#!/bin/sh\necho ran\n").expect("write stub");
+    file.flush().expect("flush stub");
+    (path, file)
+}
+
+#[test]
+#[serial(process)]
+fn a_briefly_busy_executable_is_retried_until_it_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, writer) = busy_stub(dir.path());
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        drop(writer);
+    });
+    let outcome = run(Command::new(&path), None, GENEROUS, "busy-stub").expect("run after the writer closes");
+    releaser.join().expect("releaser");
+    let (status, stdout, _) = exited(outcome);
+    assert!(status.success());
+    assert_eq!(stdout, b"ran\n");
+}
+
+#[test]
+#[serial(process)]
+fn an_executable_busy_past_the_retry_bound_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, _writer) = busy_stub(dir.path());
+    let err = run(Command::new(&path), None, GENEROUS, "stuck-stub").expect_err("held for writing throughout");
+    assert!(format!("{err:#}").contains("stuck-stub"), "error: {err:#}");
+}

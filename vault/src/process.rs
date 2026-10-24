@@ -43,6 +43,31 @@ static LIVE_GROUPS: [AtomicI32; MAX_LIVE_GROUPS] = [const { AtomicI32::new(0) };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Spawn attempts before an ETXTBSY is reported as a failure.
+const BUSY_SPAWN_ATTEMPTS: u32 = 10;
+
+/// Spawn `cmd`, retrying while the executable is "text file busy" (ETXTBSY).
+///
+/// A freshly written executable can be briefly held open for writing by a
+/// child that another thread forked before the writer's fd closed (the fd is
+/// CLOEXEC but survives until that child's exec; rust-lang/rust#114554).
+/// Exec'ing it in that window fails with ETXTBSY even though the file is
+/// complete. The holder execs within milliseconds, so a short bounded retry
+/// clears it; any other spawn error returns at once.
+fn spawn_retrying_busy(cmd: &mut Command) -> std::io::Result<Child> {
+    let mut attempt = 1;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == ErrorKind::ExecutableFileBusy && attempt < BUSY_SPAWN_ATTEMPTS => {
+                log::debug!("process::spawn_retrying_busy: ETXTBSY on attempt {attempt}, retrying");
+                attempt += 1;
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Run `cmd` to completion with a wall-clock `timeout`.
 ///
 /// `run` owns the child's stdio: stdin is a pipe fed `stdin` (or `/dev/null`
@@ -64,7 +89,7 @@ pub fn run(mut cmd: Command, stdin: Option<Vec<u8>>, timeout: Duration, label: &
         .process_group(0);
 
     let start = Instant::now();
-    let mut child = cmd.spawn().with_context(|| format!("{label}: failed to spawn"))?;
+    let mut child = spawn_retrying_busy(&mut cmd).with_context(|| format!("{label}: failed to spawn"))?;
     // process_group(0) makes the child its own group leader: pgid == pid.
     let pgid = i32::try_from(child.id()).map_err(|e| eyre!("{label}: child pid out of range: {e}"))?;
     let registration = match Registration::new(pgid) {
