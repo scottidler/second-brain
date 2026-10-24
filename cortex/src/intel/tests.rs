@@ -567,3 +567,73 @@ fn weekly_review_unlinks_model_refs_that_name_no_week_note() {
         "{review}"
     );
 }
+
+/// A fallback digest must not record its input hash, or the unchanged-input
+/// skip keeps the fallback for the rest of the day (2026-10 digests).
+#[test]
+fn a_fallback_daily_digest_is_retried_on_the_next_run() {
+    let v = TestVault::new();
+    let yesterday = Local::now().date_naive() - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    v.add_note(
+        "yesterday-note.md",
+        &format!(
+            "---\ntitle: Yesterday Note\ndate: {yesterday_str}\ntype: note\norigin: authored\ntags: [rust]\n---\nSome content from yesterday.\n"
+        ),
+    );
+    let notes = v.scan();
+    let config = v.config().actions.intel;
+    let llm_config = v.config().llm;
+    let fabric = FabricConfig::default();
+    let opts = IntelOpts {
+        mode: IntelMode::Daily,
+        output: None,
+        as_of: None,
+    };
+    let stop = crate::shutdown::StopHandle::never();
+
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &FailingLlm { stop: None },
+        &stop,
+    )
+    .expect("fallback run");
+    let fallback = std::fs::read_to_string(
+        v.root()
+            .join("notes/ai/daily")
+            .join(format!("{}.md", Local::now().format("%Y-%m-%d"))),
+    )
+    .expect("read fallback");
+    assert!(fallback.contains("LLM synthesis unavailable"));
+    assert!(
+        !fallback.contains(INTEL_INPUT_HASH_KEY),
+        "fallback must not record the input hash"
+    );
+
+    let llm = CountingLlm::new();
+    generate(
+        v.root(),
+        &notes,
+        &config,
+        &llm_config,
+        &ShellFabric(&fabric),
+        &opts,
+        &llm,
+        &stop,
+    )
+    .expect("retry run");
+    assert_eq!(llm.count(), 1, "same inputs after a fallback must call the LLM again");
+    let retried = std::fs::read_to_string(
+        v.root()
+            .join("notes/ai/daily")
+            .join(format!("{}.md", Local::now().format("%Y-%m-%d"))),
+    )
+    .expect("read retried");
+    assert!(retried.contains("Synthetic reply."));
+    assert!(retried.contains(INTEL_INPUT_HASH_KEY));
+}

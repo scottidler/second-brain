@@ -426,16 +426,14 @@ fn generate_daily_digest<L: IntelLlm>(
     // `NoteType` variant, not a canonical tag; stamping it into `tags:` was a
     // category error that `sweep::migrate` stripped every cycle (the
     // intel<->sweep two-writer fight). The input-hash rides frontmatter so the
-    // next run can detect unchanged inputs.
-    let mut digest = String::new();
-    digest.push_str(&format!(
-        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: {}\n{INTEL_INPUT_HASH_KEY}: {input_hash}\n---\n\n",
-        NoteType::Digest.as_str()
-    ));
-    digest.push_str(&format!("# Daily Digest - {today}\n\n"));
+    // next run can detect unchanged inputs; a fallback digest omits it, so the
+    // next run retries the synthesis instead of keeping the fallback forever.
+    let mut body = String::new();
+    let mut synthesized = true;
+    body.push_str(&format!("# Daily Digest - {today}\n\n"));
 
     if recent_notes.is_empty() {
-        digest.push_str(&format!("No notes ingested on {yesterday_str}.\n"));
+        body.push_str(&format!("No notes ingested on {yesterday_str}.\n"));
     } else {
         // Try LLM synthesis
         let user_prompt = build_daily_prompt(&recent_notes, config.max_input_tokens);
@@ -451,18 +449,29 @@ fn generate_daily_digest<L: IntelLlm>(
             Ok(synthesis) => {
                 // Strip any accidental frontmatter or title from LLM output
                 let cleaned = unlink_unknown_refs(synthesis.trim(), &link_refs(&recent_notes));
-                digest.push_str(&cleaned);
-                digest.push_str("\n\n");
+                body.push_str(&cleaned);
+                body.push_str("\n\n");
             }
             Err(e) => {
-                log::warn!("LLM daily synthesis failed, using fallback: {e}");
-                digest.push_str("*LLM synthesis unavailable.*\n\n");
+                log::warn!("LLM daily synthesis failed, using fallback (will retry next run): {e}");
+                body.push_str("*LLM synthesis unavailable.*\n\n");
+                synthesized = false;
             }
         }
 
         // Always append collapsed note list
-        digest.push_str(&build_note_callout(&recent_notes));
+        body.push_str(&build_note_callout(&recent_notes));
     }
+
+    let hash_line = if synthesized {
+        format!("{INTEL_INPUT_HASH_KEY}: {input_hash}\n")
+    } else {
+        String::new()
+    };
+    let digest = format!(
+        "---\ntitle: Daily Digest {today}\ndate: {today}\ntype: {}\n{hash_line}---\n\n{body}",
+        NoteType::Digest.as_str()
+    );
 
     write_intel_output(&output_path, &digest)?;
 
