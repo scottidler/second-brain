@@ -665,3 +665,40 @@ async fn an_applied_remediation_lands_lineage_on_the_daemons_receipts_row() {
     })
     .await;
 }
+
+/// A scratch run that succeeded, is staged and scores as failing would be a
+/// candidate (and a POST to `/ingest`) if the plan read it; it is not.
+#[test]
+fn a_scratch_succeeded_failing_trace_is_never_a_candidate() {
+    let env = env(DETERMINISTIC_FAILURE);
+    let conn = receipts::open_at(&env.receipts_path).unwrap();
+    let baseline = env.plan(&conn, &[]);
+    assert_eq!(baseline.candidates.len(), 1);
+
+    let scratch_trace = "tr-scratch";
+    stage(&env.root, scratch_trace);
+    receipts::record_received_scratch(
+        &conn,
+        scratch_trace,
+        Method::Cli,
+        ReceiptKind::Url,
+        "https://example.com/s",
+    )
+    .unwrap();
+    receipts::mark_succeeded(&conn, scratch_trace, "n.md", false).unwrap();
+    score(
+        &ScoreStore::open(&env.cache_path).unwrap(),
+        &env.root,
+        scratch_trace,
+        DETERMINISTIC_FAILURE,
+    );
+
+    let plan = env.plan(&conn, &[]);
+    assert_eq!(plan.candidates.len(), 1, "{plan:?}");
+    assert_eq!(plan.candidates[0].trace, TRACE);
+    assert_eq!(
+        plan.no_receipt,
+        baseline.no_receipt + 1,
+        "the scratch trace reads as no receipt"
+    );
+}

@@ -1326,3 +1326,35 @@ async fn channel_search_rejects_unknown_arguments_and_missing_fields() {
             .is_err()
     );
 }
+
+/// `failure_history` reports vault ingest failures; a failed scratch run
+/// (`sb borg distill`) published no note and must not appear.
+#[test]
+fn failure_history_excludes_scratch_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipts.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE receipts (
+           trace_id TEXT, received_at TEXT, method TEXT, kind TEXT, raw_input TEXT,
+           status TEXT, terminal_at TEXT, note_path TEXT, failure_stage TEXT,
+           failure_reason TEXT, replay_of TEXT, scratch INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status, failure_stage, scratch)
+           VALUES ('tr-ingest', '2026-10-25T00:00:00Z', 'cli', 'url', 'u', 'failed', 'fetch-failed', 0),
+                  ('tr-scratch', '2026-10-25T00:01:00Z', 'cli', 'url', 'u', 'failed', 'fetch-failed', 1);",
+    )
+    .unwrap();
+    drop(conn);
+    let req = crate::tools::FailureHistoryRequest {
+        stage: None,
+        method: None,
+        source: None,
+        since: None,
+        limit: None,
+    };
+    let result = OracleMcpServer::failure_history_at(&path, &req).unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(text.contains("tr-ingest"), "{text}");
+    assert!(!text.contains("tr-scratch"), "{text}");
+}

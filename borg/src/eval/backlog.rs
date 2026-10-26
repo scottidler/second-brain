@@ -21,12 +21,13 @@ use super::report::EvalReport;
 use super::scores::{RequiredCheck, ScoreStore, rows_from_record};
 use super::{ClaimJudge, DistillationJudge, EvalOpts, EvalOutcome, cache, evaluate, judged_input, load_staged_trace};
 
-/// Traces of `succeeded` receipts, oldest terminal first (a receipt with no
+/// Traces of `succeeded` ingest receipts (scratch distill runs published no
+/// note, so they have nothing to grade), oldest terminal first (a receipt with no
 /// terminal time sorts by when it was received).
 pub fn succeeded_traces(receipts: &Connection) -> Result<Vec<String>> {
     let mut stmt = receipts
         .prepare(
-            "SELECT trace_id FROM receipts WHERE status = 'succeeded'
+            "SELECT trace_id FROM receipts WHERE status = 'succeeded' AND scratch = 0
              ORDER BY COALESCE(terminal_at, received_at) ASC, trace_id ASC",
         )
         .context("preparing succeeded-receipts read")?;

@@ -199,7 +199,8 @@ pub fn plan(
         ..Plan::default()
     };
     for trace in traces {
-        let Some(receipt) = crate::receipts::get(receipts, &trace)?.filter(|r| r.status == "succeeded") else {
+        let Some(receipt) = crate::receipts::get(receipts, &trace)?.filter(|r| r.status == "succeeded" && !r.scratch)
+        else {
             out.no_receipt += 1;
             continue;
         };

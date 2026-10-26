@@ -367,3 +367,54 @@ fn failed_trace_reason_carries_the_failure_text() {
     assert_eq!(failed_trace_reason(None, Some("boom".into())), "boom");
     assert_eq!(failed_trace_reason(None, None), "failed");
 }
+
+/// A scratch (`sb borg distill`) trace is refused by name before any daemon
+/// call. The control trace has identical staging but an ingest receipt, and it
+/// does reach `POST /ingest`, so the zero below is the refusal's doing.
+#[tokio::test]
+async fn replay_one_refuses_a_scratch_trace_and_posts_nothing() {
+    use crate::stub::{Behavior, serve};
+    let home = TempDir::new().unwrap();
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let staging_dir = TempDir::new().unwrap();
+        let (port, seen) = serve(Behavior::Unauthorized).await;
+        let mut config = Config::default();
+        config.staging.enabled = true;
+        config.staging.root = staging_dir.path().to_path_buf();
+        config.hotkey.host = "127.0.0.1".to_string();
+        config.hotkey.port = port;
+        config.hotkey.request_timeout = std::time::Duration::from_millis(400);
+        let vault_dir = TempDir::new().unwrap();
+        config.vault.root_path = Some(vault_dir.path().display().to_string());
+
+        let store = FsArtifactStore::from_config(&config.staging);
+        let conn = crate::receipts::open_default().unwrap();
+        for trace in ["tr-scratch", "tr-ingest"] {
+            store
+                .write_envelope(trace, &new_envelope(trace, IngestKind::ArticleUrl, IngestMethod::Cli))
+                .unwrap();
+            store.write_body(trace, b"https://example.com/article").unwrap();
+        }
+        let url = vault::receipts::ReceiptKind::Url;
+        crate::receipts::record_received_scratch(&conn, "tr-scratch", vault::schema::Method::Cli, url, "u").unwrap();
+        crate::receipts::record_received(&conn, "tr-ingest", vault::schema::Method::Cli, url, "u").unwrap();
+
+        let posts = |seen: &std::sync::Mutex<Vec<String>>| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.starts_with("POST /ingest"))
+                .count()
+        };
+
+        let err = replay_one(&config, "tr-scratch", 0, false, false, &mut |_| {})
+            .await
+            .expect_err("a scratch trace must not replay");
+        assert!(format!("{err:#}").contains("tr-scratch"), "{err:#}");
+        assert_eq!(posts(&seen), 0, "refused before any POST /ingest");
+
+        let _ = replay_one(&config, "tr-ingest", 0, false, false, &mut |_| {}).await;
+        assert_eq!(posts(&seen), 1, "control: an ingest trace reaches POST /ingest");
+    })
+    .await;
+}

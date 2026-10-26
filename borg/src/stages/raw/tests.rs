@@ -385,14 +385,17 @@ fn gate_0_rejection_is_recoverable_by_replay() {
         ..Default::default()
     };
     let mut sources = Vec::new();
-    let report = tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(crate::replay::run(config, opts, |ev| {
-            if let crate::replay::ReplayEvent::TraceHeader { source, .. } = ev {
-                sources.push(source.clone());
-            }
-        }))
-        .expect("replay finds the rejected trace in staging");
+    // Replay checks the receipts DB for a scratch trace, so it runs sandboxed.
+    let report = with_xdg(tmp.path(), || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(crate::replay::run(config, opts, |ev| {
+                if let crate::replay::ReplayEvent::TraceHeader { source, .. } = ev {
+                    sources.push(source.clone());
+                }
+            }))
+            .expect("replay finds the rejected trace in staging")
+    });
     assert_eq!(sources, vec![url.to_string()], "replay re-POSTs the original URL");
     assert_eq!(report.attempted, 1);
 }

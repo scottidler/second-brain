@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -75,6 +75,8 @@ pub struct Receipt {
     pub replay_origin: Option<String>,
     /// True when the note was published from a distill fallback (degraded).
     pub degraded: bool,
+    /// True for a `sb borg distill` run: no note was published.
+    pub scratch: bool,
 }
 
 /// A replay's lineage, written onto its receipts row at the door.
@@ -371,6 +373,14 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )
         .context("add remediations.trigger_metrics_json column")?;
     }
+    // v8: `scratch` marks a `sb borg distill` run: a receipts row for work that
+    // publishes no note, so every ingest-health reader excludes it. Old rows
+    // default to 0 (they were all ingests). Same placement rule as v4.
+    if !has_column(conn, "receipts", "scratch")? {
+        log::debug!("receipts::run_migrations: adding scratch column (v8)");
+        conn.execute("ALTER TABLE receipts ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0", [])
+            .context("add scratch column")?;
+    }
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
     // it cleanly.
@@ -478,7 +488,20 @@ pub fn record_received_with_lineage(
     raw_input: &str,
     lineage: Option<&Lineage>,
 ) -> Result<()> {
-    record_received_row(conn, trace_id, method, kind, raw_input, lineage, false)
+    record_received_row(conn, trace_id, method, kind, raw_input, lineage, false, false)
+}
+
+/// Like [`record_received`] for a `sb borg distill` run: the one INSERT that
+/// creates the row sets `scratch = 1`, so a crash can never leave a scratch run
+/// counted as an ingest.
+pub fn record_received_scratch(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+) -> Result<()> {
+    record_received_row(conn, trace_id, method, kind, raw_input, None, false, true)
 }
 
 fn record_received_flagged(
@@ -489,7 +512,7 @@ fn record_received_flagged(
     raw_input: &str,
     expected_existing: bool,
 ) -> Result<()> {
-    record_received_row(conn, trace_id, method, kind, raw_input, None, expected_existing)
+    record_received_row(conn, trace_id, method, kind, raw_input, None, expected_existing, false)
 }
 
 fn record_received_row(
@@ -500,23 +523,25 @@ fn record_received_row(
     raw_input: &str,
     lineage: Option<&Lineage>,
     expected_existing: bool,
+    scratch: bool,
 ) -> Result<()> {
     log::debug!(
-        "receipts::record_received: trace={} method={} kind={} raw_len={} lineage={:?} expected_existing={}",
+        "receipts::record_received: trace={} method={} kind={} raw_len={} lineage={:?} expected_existing={} scratch={}",
         trace_id,
         method,
         kind,
         raw_input.len(),
         lineage,
-        expected_existing
+        expected_existing,
+        scratch
     );
     let replay_of = lineage.map(|l| l.replay_of.as_str());
     let replay_origin = lineage.and_then(|l| l.origin).map(|o| o.as_str());
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO receipts \
-             (trace_id, received_at, method, kind, raw_input, status, replay_of, replay_origin) \
-             VALUES (?, ?, ?, ?, ?, 'received', ?, ?)",
+             (trace_id, received_at, method, kind, raw_input, status, replay_of, replay_origin, scratch) \
+             VALUES (?, ?, ?, ?, ?, 'received', ?, ?, ?)",
             params![
                 trace_id,
                 now_iso8601(),
@@ -524,7 +549,8 @@ fn record_received_row(
                 kind.as_str(),
                 raw_input,
                 replay_of,
-                replay_origin
+                replay_origin,
+                scratch
             ],
         )
         .with_context(|| format!("Failed to record received trace_id={trace_id}"))?;
@@ -807,7 +833,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
     let mut stmt = conn
         .prepare(
             "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                    terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin \
+                    terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin, scratch \
              FROM receipts WHERE trace_id=?",
         )
         .context("prepare get")?;
@@ -823,7 +849,7 @@ pub fn get(conn: &Connection, trace_id: &str) -> Result<Option<Receipt>> {
 pub fn query(conn: &Connection, filter: &Filter) -> Result<Vec<Receipt>> {
     let mut sql = String::from(
         "SELECT trace_id, received_at, method, kind, raw_input, status, \
-                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin \
+                terminal_at, note_path, failure_stage, failure_reason, replay_of, degraded, replay_origin, scratch \
          FROM receipts WHERE 1=1",
     );
     let mut bound: Vec<rusqlite::types::Value> = Vec::new();
@@ -882,6 +908,7 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<Receipt> {
         replay_of: row.get(10)?,
         degraded: row.get::<_, i64>(11)? != 0,
         replay_origin: row.get(12)?,
+        scratch: row.get::<_, i64>(13)? != 0,
     })
 }
 
@@ -961,7 +988,7 @@ pub fn row_count(conn: &Connection) -> Result<i64> {
 /// row lands.
 pub fn count_by_status(conn: &Connection) -> Result<(i64, i64, i64, i64)> {
     let mut stmt = conn
-        .prepare("SELECT status, COUNT(*) FROM receipts GROUP BY status")
+        .prepare("SELECT status, COUNT(*) FROM receipts WHERE scratch = 0 GROUP BY status")
         .context("prepare count_by_status")?;
     let mut received = 0_i64;
     let mut succeeded = 0_i64;
@@ -989,7 +1016,7 @@ pub fn count_failed_by_stage(conn: &Connection) -> Result<Vec<(FailureStage, i64
     let mut stmt = conn
         .prepare(
             "SELECT failure_stage, COUNT(*) FROM receipts \
-             WHERE status='failed' AND failure_stage IS NOT NULL \
+             WHERE scratch = 0 AND status='failed' AND failure_stage IS NOT NULL \
              GROUP BY failure_stage",
         )
         .context("prepare count_failed_by_stage")?;
@@ -1015,7 +1042,7 @@ pub fn count_failed_by_stage(conn: &Connection) -> Result<Vec<(FailureStage, i64
 pub fn count_failed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
     log::debug!("receipts::count_failed_since: since={since_iso}");
     conn.query_row(
-        "SELECT COUNT(*) FROM receipts WHERE status='failed' AND terminal_at >= ?",
+        "SELECT COUNT(*) FROM receipts WHERE scratch = 0 AND status='failed' AND terminal_at >= ?",
         params![since_iso],
         |row| row.get(0),
     )
@@ -1028,7 +1055,7 @@ pub fn count_failed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
 pub fn count_crashed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
     log::debug!("receipts::count_crashed_since: since={since_iso}");
     conn.query_row(
-        "SELECT COUNT(*) FROM receipts WHERE status='failed' AND failure_stage='crashed' AND terminal_at >= ?",
+        "SELECT COUNT(*) FROM receipts WHERE scratch = 0 AND status='failed' AND failure_stage='crashed' AND terminal_at >= ?",
         params![since_iso],
         |row| row.get(0),
     )
@@ -1044,7 +1071,7 @@ pub fn count_crashed_since(conn: &Connection, since_iso: &str) -> Result<i64> {
 pub fn count_degraded_since(conn: &Connection, since_iso: &str) -> Result<i64> {
     log::debug!("receipts::count_degraded_since: since={since_iso}");
     conn.query_row(
-        "SELECT COUNT(*) FROM receipts WHERE status='succeeded' AND degraded=1 AND terminal_at >= ?",
+        "SELECT COUNT(*) FROM receipts WHERE scratch = 0 AND status='succeeded' AND degraded=1 AND terminal_at >= ?",
         params![since_iso],
         |row| row.get(0),
     )
@@ -1085,6 +1112,9 @@ pub fn hours_ago_iso(hours: i64) -> String {
 /// openers panic without one.
 #[cfg(test)]
 pub(crate) mod sandbox;
+
+#[cfg(test)]
+mod scratch;
 
 #[cfg(test)]
 mod tests;

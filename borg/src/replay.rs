@@ -427,6 +427,16 @@ async fn replay_trace_top(
 
 /// Replay a single trace and stream events. Returns (succeeded, failed)
 /// counts (1/0, 0/1, or 0/0 for dry-run/queued).
+/// A scratch (`sb borg distill`) trace published no note; replaying it would
+/// re-POST its URL to `/ingest` and publish one. Refuse before any daemon call.
+fn refuse_scratch(trace_id: &str) -> Result<()> {
+    let conn = crate::receipts::open_default().context("open receipts DB to check for a scratch trace")?;
+    if crate::receipts::get(&conn, trace_id)?.is_some_and(|r| r.scratch) {
+        bail!("replay: trace {trace_id} is a scratch distill run; it has no note to replay (re-run `sb borg distill`)");
+    }
+    Ok(())
+}
+
 async fn replay_one(
     config: &Config,
     trace_id: &str,
@@ -435,6 +445,7 @@ async fn replay_one(
     fork: bool,
     progress: &mut (impl FnMut(&ReplayEvent) + ?Sized),
 ) -> Result<(usize, usize)> {
+    refuse_scratch(trace_id)?;
     if !config.staging.enabled {
         bail!("replay: staging.enabled must be true");
     }

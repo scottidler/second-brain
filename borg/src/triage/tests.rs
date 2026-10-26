@@ -108,3 +108,43 @@ fn harvest_drift_warns_when_timer_has_run_but_zero_recent_session_receipts() {
         "timer has run but zero recent session receipts -> WARN"
     );
 }
+
+/// `/health/audit` and `sb doctor` measure ingest health: a scratch run that
+/// would otherwise count in every field changes none of them.
+#[test]
+fn audit_health_stats_conn_ignores_scratch_rows() {
+    let conn = receipts::open_memory().unwrap();
+    receipts::record_received(&conn, "s1", Method::Http, ReceiptKind::Url, "u").unwrap();
+    receipts::mark_succeeded(&conn, "s1", "n.md", false).unwrap();
+    receipts::record_received(&conn, "f1", Method::Http, ReceiptKind::Url, "u").unwrap();
+    receipts::mark_failed(&conn, "f1", FailureStage::FetchFailed, "x").unwrap();
+    let before = audit_health_stats_conn(&conn).unwrap();
+
+    receipts::record_received_scratch(&conn, "ds", Method::Cli, ReceiptKind::Url, "u").unwrap();
+    receipts::mark_succeeded(&conn, "ds", "n.md", true).unwrap();
+    receipts::record_received_scratch(&conn, "df", Method::Cli, ReceiptKind::Url, "u").unwrap();
+    receipts::mark_failed(&conn, "df", FailureStage::Crashed, "x").unwrap();
+    receipts::record_received_scratch(&conn, "dr", Method::Cli, ReceiptKind::Url, "u").unwrap();
+
+    let after = audit_health_stats_conn(&conn).unwrap();
+    let fields = |h: &crate::routes::AuditHealth| {
+        (
+            h.received,
+            h.succeeded,
+            h.failed,
+            h.crashed,
+            h.failed_24h,
+            h.crashed_24h,
+            h.degraded_24h,
+        )
+    };
+    assert_eq!(
+        fields(&after),
+        fields(&before),
+        "scratch rows must not move any health count"
+    );
+    assert_eq!(
+        (after.received, after.succeeded, after.failed, after.crashed),
+        (0, 1, 1, 0)
+    );
+}

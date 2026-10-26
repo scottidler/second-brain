@@ -618,8 +618,14 @@ impl OracleMcpServer {
         description = "Query the borg receipts log for failed ingests. Filter by failure_stage, method, source pattern, since timestamp."
     )]
     async fn failure_history(&self, params: Parameters<FailureHistoryRequest>) -> Result<CallToolResult, McpError> {
-        let req = params.0;
         let path = vault::receipts::receipts_db_path().map_err(Self::err)?;
+        Self::failure_history_at(&path, &params.0)
+    }
+
+    /// Path-injectable core of [`Self::failure_history`]. Scratch rows (a
+    /// `sb borg distill` run publishes no note) are not ingest failures and
+    /// never appear here.
+    fn failure_history_at(path: &std::path::Path, req: &FailureHistoryRequest) -> Result<CallToolResult, McpError> {
         if !path.exists() {
             return Ok(CallToolResult::success(vec![
                 Content::json(json!({
@@ -631,7 +637,7 @@ impl OracleMcpServer {
             ]));
         }
         let conn = rusqlite::Connection::open_with_flags(
-            &path,
+            path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(|e| Self::err(eyre::eyre!("open receipts DB: {e}")))?;
@@ -639,7 +645,7 @@ impl OracleMcpServer {
         let mut sql = String::from(
             "SELECT trace_id, received_at, method, kind, raw_input, status, \
                     terminal_at, note_path, failure_stage, failure_reason, replay_of \
-             FROM receipts WHERE status='failed'",
+             FROM receipts WHERE status='failed' AND scratch = 0",
         );
         let mut bound: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(stage) = &req.stage {

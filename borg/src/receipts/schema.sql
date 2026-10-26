@@ -53,7 +53,10 @@ CREATE TABLE IF NOT EXISTS receipts (
   -- Why a replay was sent (`borg::types::ReplayOrigin`, e.g.
   -- 'auto-remediation'); NULL for a first ingest or a replay sent without
   -- one. Written with `replay_of` in the INSERT that creates the row.
-  replay_origin   TEXT DEFAULT NULL
+  replay_origin   TEXT DEFAULT NULL,
+  -- 1 for a `sb borg distill` run (no note is published); set in the INSERT
+  -- that creates the row. Ingest-health readers filter `scratch = 0`.
+  scratch         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);

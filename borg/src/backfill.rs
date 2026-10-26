@@ -373,8 +373,14 @@ pub(crate) fn backfill_on(
 /// Only `succeeded` rows (the ones that produced a note) are considered.
 fn load_received_at_map(tz: Tz) -> Result<HashMap<String, String>> {
     let conn = receipts::open_default().context("open receipts.db for backfill")?;
+    received_at_map_from(&conn, tz)
+}
+
+/// Connection-injectable core of [`load_received_at_map`]. Scratch rows
+/// (`sb borg distill`) published no note, so they never stamp one.
+fn received_at_map_from(conn: &rusqlite::Connection, tz: Tz) -> Result<HashMap<String, String>> {
     let mut stmt = conn
-        .prepare("SELECT trace_id, received_at FROM receipts WHERE status = 'succeeded'")
+        .prepare("SELECT trace_id, received_at FROM receipts WHERE status = 'succeeded' AND scratch = 0")
         .context("prepare receipts query")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))

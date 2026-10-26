@@ -489,3 +489,25 @@ fn preflight_passes_when_a_named_var_is_a_readable_file() {
     let keys = vault::fabric::ApiKeys::default().with(vault::fabric::Vendor::Gemini, file.display().to_string());
     assert!(preflight_keys(&keys).is_ok());
 }
+
+#[test]
+fn a_scratch_succeeded_receipt_is_never_owed_a_score() {
+    let env = env();
+    stage(&env.root, "tr-ingest", "a claim");
+    succeed(&env.receipts, "tr-ingest", "2026-10-17T10:00:00Z");
+    // A distill run that succeeded and is staged, so it would qualify as owed.
+    stage(&env.root, "tr-scratch", "a claim");
+    receipts::record_received_scratch(&env.receipts, "tr-scratch", Method::Cli, ReceiptKind::Url, "u").unwrap();
+    receipts::mark_succeeded(&env.receipts, "tr-scratch", "n.md", false).unwrap();
+    let backlog = find_backlog(
+        &env.receipts,
+        &env.store,
+        &env.root,
+        &required_checks(&models()),
+        None,
+        DEFAULT_CLAIMS_SOURCE_MAX_CHARS,
+    )
+    .unwrap();
+    assert_eq!(backlog.traces, vec!["tr-ingest"]);
+    assert_eq!(backlog.not_staged, 0, "the scratch row is not even counted");
+}

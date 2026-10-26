@@ -381,3 +381,16 @@ fn backfill_trace_expires_is_idempotent_across_runs() {
     assert_eq!(second.backfilled, 0, "second run is a no-op");
     assert_eq!(second.skipped_already_had, 1);
 }
+
+#[test]
+fn received_at_map_skips_scratch_rows() {
+    use vault::receipts::ReceiptKind;
+    use vault::schema::Method;
+    let conn = crate::receipts::open_memory().unwrap();
+    crate::receipts::record_received(&conn, "tr-ingest", Method::Cli, ReceiptKind::Url, "u").unwrap();
+    crate::receipts::mark_succeeded(&conn, "tr-ingest", "n.md", false).unwrap();
+    crate::receipts::record_received_scratch(&conn, "tr-scratch", Method::Cli, ReceiptKind::Url, "u").unwrap();
+    crate::receipts::mark_succeeded(&conn, "tr-scratch", "n.md", false).unwrap();
+    let map = received_at_map_from(&conn, Los_Angeles).unwrap();
+    assert_eq!(map.keys().collect::<Vec<_>>(), vec!["tr-ingest"]);
+}

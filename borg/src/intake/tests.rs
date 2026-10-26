@@ -20,6 +20,7 @@ fn capture_writes_sidecar_and_received_row() {
         url.as_bytes(),
         "tr-cap",
         None,
+        false,
     )
     .unwrap();
 
@@ -55,6 +56,7 @@ fn capture_writes_the_replay_lineage_onto_the_received_row() {
         url.as_bytes(),
         "tr-remediation",
         Some(&lineage),
+        false,
     )
     .unwrap();
     let r = receipts::get(&conn, "tr-remediation").unwrap().expect("receipts row");
@@ -82,6 +84,7 @@ fn capture_maps_session_kind_to_receipt_kind_session() {
         body.as_bytes(),
         "tr-session",
         None,
+        false,
     )
     .unwrap();
 
@@ -108,6 +111,7 @@ fn capture_propagates_sidecar_write_failure() {
         b"https://x.com",
         "tr-fail",
         None,
+        false,
     );
     assert!(err.is_err(), "sidecar write failure must propagate");
 }
@@ -193,5 +197,42 @@ fn failure_preserves_fetch_failed_stage() {
         r.failure_stage.as_deref(),
         Some("fetch-failed"),
         "FetchFailed must survive"
+    );
+}
+
+/// The scratch capture sets `scratch = 1` in the INSERT and writes the sidecar
+/// under the scratch root, not the vault.
+#[tokio::test]
+async fn scratch_capture_flags_the_row_and_writes_the_sidecar_under_the_scratch_root() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch_root = tempfile::tempdir().unwrap();
+    let vault_dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.vault.root_path = Some(vault_dir.path().display().to_string());
+    let url = "https://example.com/video";
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        record_scratch_with_sidecar(
+            &config,
+            scratch_root.path(),
+            IngestMethod::Cli,
+            IntakeKind::Url,
+            url,
+            url.as_bytes(),
+            "tr-scratch",
+        )
+        .unwrap();
+        let conn = receipts::open_default().unwrap();
+        let row = receipts::get(&conn, "tr-scratch").unwrap().expect("receipts row");
+        assert!(row.scratch);
+        assert_eq!(row.status, "received");
+        assert_eq!(row.raw_input, url);
+    })
+    .await;
+    let sidecar = intake::raw_input_path(scratch_root.path(), "tr-scratch");
+    assert_eq!(std::fs::read(&sidecar).unwrap(), url.as_bytes());
+    assert!(sidecar.starts_with(scratch_root.path().join("system/intake")));
+    assert!(
+        !intake::raw_input_path(vault_dir.path(), "tr-scratch").exists(),
+        "nothing lands in the vault"
     );
 }
