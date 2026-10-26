@@ -190,6 +190,16 @@ pub(crate) fn note_size_gate(note_bytes: usize, max_bytes: usize) -> Option<Stri
     }
 }
 
+/// Where a pipeline run publishes. One enum rather than booleans: the ledger,
+/// lookup, archive, cleanup and vault-write switches always move together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishPolicy {
+    /// Today's behavior: inbox, ledger, archive, vault attachments, vault sidecar.
+    Vault,
+    /// Everything under `root`; no vault, ledger, lookup, or archive.
+    Scratch { root: PathBuf },
+}
+
 /// Top-level pipeline entry point. Dispatches to type-specific handlers based on content kind.
 /// If `trace_id` is provided, it is used as-is; otherwise one is generated internally.
 pub async fn process_content(
@@ -198,6 +208,7 @@ pub async fn process_content(
     method: IngestMethod,
     force: bool,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: Option<String>,
     // Operator capture note for the non-URL kinds (Signal attachment captions).
     // URL captures carry their note inside `ContentKind::Url { note }`; this
@@ -277,7 +288,9 @@ pub async fn process_content(
         }
     } else {
         match content {
-            ContentKind::Url { url, note } => process_url(&url, note, tags, method, force, config, &trace_id).await,
+            ContentKind::Url { url, note } => {
+                process_url(&url, note, tags, method, force, config, policy, &trace_id).await
+            }
             ContentKind::Image { data, filename } => {
                 with_hard_timeout(
                     process_image(
@@ -338,7 +351,7 @@ pub async fn process_content(
             }
             ContentKind::Text(text) => {
                 with_hard_timeout(
-                    process_text(&text, tags, method, force, config, &trace_id),
+                    process_text(&text, tags, method, force, config, policy, &trace_id),
                     config,
                     &trace_id,
                     method,
@@ -515,6 +528,7 @@ pub async fn process_url(
     method: IngestMethod,
     force: bool,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: &str,
 ) -> IngestResult {
     // Fail closed on a scheme no fetcher can read. A `clyde://` session
@@ -535,7 +549,7 @@ pub async fn process_url(
     let hard_timeout = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs);
     let outcome = tokio::time::timeout(
         hard_timeout,
-        process_url_inner(url, note, tags, method, force, config, trace_id),
+        process_url_inner(url, note, tags, method, force, config, policy, trace_id),
     )
     .await;
 
@@ -597,6 +611,7 @@ async fn process_url_inner(
     method: IngestMethod,
     force: bool,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: &str,
 ) -> Result<IngestResult> {
     log::debug!("Processing URL: {url} capture_note={}", note.is_some());
@@ -749,7 +764,7 @@ async fn process_url_inner(
     let mut fetch_degraded = false;
     let mut figure_set = figures::FigureSet::default();
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
-        let yt_result = process_youtube(&url_match.url, config, trace_id, capture_note).await?;
+        let yt_result = process_youtube(&url_match.url, config, policy, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
         fetch_degraded = yt_result.fell_back;
         let yt_title = yt_result.title;

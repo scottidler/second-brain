@@ -52,6 +52,7 @@ pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Re
         types::IngestMethod::Cli,
         false,
         &config,
+        &pipeline::PublishPolicy::Vault,
         Some(trace_id),
         None,
     )
@@ -138,6 +139,7 @@ pub async fn ingest_file(
         types::IngestMethod::Cli,
         force,
         &config,
+        &pipeline::PublishPolicy::Vault,
         Some(trace_id),
         None,
     )

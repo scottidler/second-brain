@@ -136,11 +136,12 @@ async fn fetch_yt_dlp(url: &str, config: &Config) -> Result<VideoFetch> {
 
 /// The last link of the yt-dlp transcript chain: extract audio, send it to Groq.
 async fn whisper_transcript(url: &str, config: &Config) -> Result<String> {
-    let temp_dir = std::env::temp_dir().join("obsidian-borg");
-    std::fs::create_dir_all(&temp_dir)?;
+    // One directory per call, removed on drop, so concurrent runs of one video
+    // never share an audio path.
+    let temp_dir = tempfile::Builder::new().prefix("borg-whisper-").tempdir()?;
     let audio_path = super::extract_audio(
         url,
-        &temp_dir.to_string_lossy(),
+        &temp_dir.path().to_string_lossy(),
         config.youtube.yt_dlp_postprocessor_threads(),
         config.pipeline.yt_dlp_timeout_secs,
     )

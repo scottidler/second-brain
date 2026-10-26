@@ -1261,6 +1261,7 @@ async fn corrupt_blocklist_fails_the_capture_as_intake_rejected_in_receipts() {
         IngestMethod::Http,
         false,
         &config,
+        &PublishPolicy::Vault,
         Some(trace.clone()),
         None,
     )
@@ -1452,6 +1453,7 @@ async fn process_url_rejects_a_session_source_at_the_door() {
         IngestMethod::Cli,
         true,
         &config,
+        &PublishPolicy::Vault,
         "cl-test",
     )
     .await;

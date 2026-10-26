@@ -78,6 +78,8 @@ pub(crate) fn extract_article_title(article_md: &str, url: &str) -> String {
 pub(crate) async fn process_youtube(
     url: &str,
     config: &Config,
+    // Read once a run can publish somewhere other than the vault.
+    _policy: &PublishPolicy,
     trace_id: &str,
     capture_note: Option<&str>,
 ) -> Result<YouTubeResult> {
@@ -94,7 +96,7 @@ pub(crate) async fn process_youtube(
     // the slide-aware Fabric pattern instead of the flat summarizer.
     let mut slide_payload: Option<SlidePayload> = None;
     if config.youtube.slides.enabled {
-        match try_extract_slides(url, &video.segments, video.metadata.duration_secs, config).await {
+        match try_extract_slides(url, &video.segments, video.metadata.duration_secs, config, trace_id).await {
             Ok(Some((manifest, summary, slides_source_root))) => {
                 slide_payload = Some(SlidePayload {
                     manifest,
@@ -196,7 +198,7 @@ pub(crate) async fn fetch_video(url: &str, config: &Config, trace_id: &str) -> R
 /// LLM output. Returns `Ok(None)` for text-only proposals (the caller
 /// should use the existing summary path).
 ///
-/// All heavy work happens in tempdir under `borg/youtube-frames/<video_id>/`
+/// All heavy work happens in tempdir under `borg-youtube-frames/<trace_id>/`
 /// for replay-friendly debug; the directory survives the function so the
 /// caller can copy slides out of it.
 /// Removes a YouTube frames work dir (the <=720p mp4 plus every extracted
@@ -235,6 +237,7 @@ pub(crate) async fn try_extract_slides(
     transcript_pairs: &[(f64, String)],
     duration_secs: f64,
     config: &Config,
+    trace_id: &str,
 ) -> Result<Option<(crate::slides::SlideManifest, crate::slides::SummaryOutput, PathBuf)>> {
     use crate::slides::{self, NoteShape};
     use crate::youtube;
@@ -242,7 +245,7 @@ pub(crate) async fn try_extract_slides(
     let video_id = youtube::extract_video_id(url)
         .ok_or_else(|| eyre::eyre!("could not extract YouTube video id from url: {url}"))?;
 
-    let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(&video_id);
+    let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(trace_id);
     let _ = std::fs::remove_dir_all(&work_dir);
     std::fs::create_dir_all(&work_dir).context("create youtube-frames work dir")?;
     let guard = WorkDirGuard::new(work_dir.clone());

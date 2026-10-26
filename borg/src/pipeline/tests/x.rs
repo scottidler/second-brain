@@ -302,7 +302,16 @@ async fn x_post_fetch_error_fails_closed() {
             format!("{base}/jina"),
             crate::ocr::bases::scope(
                 base.clone(),
-                process_url(url, None, vec![], IngestMethod::Cli, true, &config, "xp-closed"),
+                process_url(
+                    url,
+                    None,
+                    vec![],
+                    IngestMethod::Cli,
+                    true,
+                    &config,
+                    &PublishPolicy::Vault,
+                    "xp-closed",
+                ),
             ),
         ),
     )

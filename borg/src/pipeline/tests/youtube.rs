@@ -38,7 +38,10 @@ async fn gemini_engine_slides_off_spawns_zero_yt_dlp() {
 
     let (result, spawns) = spawn::scope(
         stub::yt_dlp(dir.path()),
-        api::scope(bases, process_youtube(stub::URL, &config, "yt-gemini-off", None)),
+        api::scope(
+            bases,
+            process_youtube(stub::URL, &config, &PublishPolicy::Vault, "yt-gemini-off", None),
+        ),
     )
     .await;
 
@@ -72,7 +75,10 @@ async fn gemini_engine_slides_on_spawns_only_the_mp4_download() {
 
     let (result, spawns) = spawn::scope(
         stub::yt_dlp(dir.path()),
-        api::scope(bases, process_youtube(stub::URL, &config, "yt-gemini-on", None)),
+        api::scope(
+            bases,
+            process_youtube(stub::URL, &config, &PublishPolicy::Vault, "yt-gemini-on", None),
+        ),
     )
     .await;
 
@@ -122,7 +128,10 @@ async fn gemini_5xx_twice_falls_back_to_yt_dlp() {
 
     let (result, spawns) = spawn::scope(
         stub::yt_dlp(dir.path()),
-        api::scope(bases, process_youtube(stub::URL, &config, "yt-fallback", None)),
+        api::scope(
+            bases,
+            process_youtube(stub::URL, &config, &PublishPolicy::Vault, "yt-fallback", None),
+        ),
     )
     .await;
 
@@ -245,6 +254,7 @@ async fn run_pipeline(
                 IngestMethod::Http,
                 true,
                 &config,
+                &PublishPolicy::Vault,
                 Some(trace.to_string()),
                 None,
             ),

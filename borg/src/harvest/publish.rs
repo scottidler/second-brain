@@ -209,6 +209,7 @@ async fn publish_thread_inner<R: ExportReader>(
         IngestMethod::Harvest,
         false,
         config,
+        &pipeline::PublishPolicy::Vault,
         Some(thread.trace_id.clone()),
         None,
     )

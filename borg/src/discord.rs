@@ -237,6 +237,7 @@ impl EventHandler for Handler {
                             IngestMethod::Discord,
                             false,
                             &config,
+                            &pipeline::PublishPolicy::Vault,
                             Some(trace_id.clone()),
                             None,
                         )
@@ -317,6 +318,7 @@ impl EventHandler for Handler {
                 IngestMethod::Discord,
                 false,
                 &config,
+                &pipeline::PublishPolicy::Vault,
                 Some(trace_id.clone()),
                 None,
             )

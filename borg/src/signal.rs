@@ -599,6 +599,7 @@ async fn dispatch_envelope(env: Envelope, ctx: DispatchEnv) -> Result<()> {
             IngestMethod::Signal,
             false,
             &config,
+            &pipeline::PublishPolicy::Vault,
             Some(trace_for_pipeline.clone()),
             attachment_note,
         )

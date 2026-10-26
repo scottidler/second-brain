@@ -46,7 +46,17 @@ pub(crate) async fn dispatch_ingest(
     // dispatch_ingest serves telegram/ntfy/http, where the URL capture note
     // rides inside `ContentKind::Url { note }` and attachments carry no caption
     // migration (that is Signal-only, which calls `process_content` directly).
-    let result = pipeline::process_content(content, tags, method, force, config, Some(trace_id), None).await;
+    let result = pipeline::process_content(
+        content,
+        tags,
+        method,
+        force,
+        config,
+        &pipeline::PublishPolicy::Vault,
+        Some(trace_id),
+        None,
+    )
+    .await;
 
     if let Some(t) = telegram {
         t.result(&result, display_source, chat_id_override).await;

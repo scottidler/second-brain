@@ -53,10 +53,11 @@ pub(crate) async fn process_text(
     method: IngestMethod,
     force: bool,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: &str,
 ) -> IngestResult {
     let start = Instant::now();
-    match process_text_inner(text, tags, method, force, config, trace_id).await {
+    match process_text_inner(text, tags, method, force, config, policy, trace_id).await {
         Ok(mut result) => {
             let elapsed = start.elapsed();
             log::info!("[{trace_id}] Text pipeline completed in {elapsed:.2?}");
@@ -87,6 +88,7 @@ pub(crate) async fn process_text_inner(
     method: IngestMethod,
     force: bool,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: &str,
 ) -> Result<IngestResult> {
     let pattern = detect_text_pattern(text);
@@ -95,7 +97,7 @@ pub(crate) async fn process_text_inner(
     match pattern {
         TextPattern::ContainsUrl { url, note } => {
             // Redirect to URL pipeline, carrying the capture note.
-            return Ok(process_url(&url, note, tags, method, force, config, trace_id).await);
+            return Ok(process_url(&url, note, tags, method, force, config, policy, trace_id).await);
         }
         TextPattern::Define { .. } | TextPattern::Clarify { .. } => {
             return process_vocab(text, &pattern, tags, method, force, config, trace_id).await;

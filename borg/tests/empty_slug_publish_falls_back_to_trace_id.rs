@@ -39,6 +39,7 @@ async fn box_drawing_title_lands_a_note_stemmed_untitled() {
         IngestMethod::Manual,
         false,
         &config,
+        &pipeline::PublishPolicy::Vault,
         None,
         None,
     )
