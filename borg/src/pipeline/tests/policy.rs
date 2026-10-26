@@ -1,5 +1,5 @@
 //! `PublishPolicy`'s per-run answers: the effective config, the refusal,
-//! and the inflight key.
+//! the inflight key, and where frames are preserved.
 
 use super::*;
 
@@ -54,4 +54,13 @@ fn inflight_key_splits_scratch_into_its_own_namespace() {
     };
     assert_eq!(PublishPolicy::Vault.inflight_key(canonical), canonical);
     assert_eq!(scratch.inflight_key(canonical), "distill:https://example.com/a");
+}
+
+#[test]
+fn frames_dest_is_under_the_scratch_root_and_absent_for_vault() {
+    let scratch = PublishPolicy::Scratch {
+        root: PathBuf::from("/distill/cl-1"),
+    };
+    assert_eq!(PublishPolicy::Vault.frames_dest(), None);
+    assert_eq!(scratch.frames_dest(), Some(PathBuf::from("/distill/cl-1/frames")));
 }

@@ -345,5 +345,17 @@ pub fn mime_from_extension(filename: &str) -> String {
 #[cfg(test)]
 pub(crate) mod bases;
 
+/// A vision call about to run on a spawned task. In tests it carries the
+/// caller's [`bases::scope`] across the spawn; in production it is `fut`.
+#[cfg(test)]
+pub(crate) fn carry_vision_base<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+    bases::carry(fut)
+}
+
+#[cfg(not(test))]
+pub(crate) fn carry_vision_base<F: std::future::Future>(fut: F) -> F {
+    fut
+}
+
 #[cfg(test)]
 mod tests;

@@ -15,3 +15,15 @@ pub(super) fn current() -> eyre::Result<String> {
     BASE.try_with(String::clone)
         .map_err(|_| eyre::eyre!("vision API used outside ocr::bases::scope in a test"))
 }
+
+/// Carry the calling task's stub base into `fut`, which is about to run on a
+/// spawned task (task-locals do not cross `spawn`). Captured now, at the call.
+pub(crate) fn carry<F: Future>(fut: F) -> impl Future<Output = F::Output> {
+    let base = BASE.try_with(String::clone).ok();
+    async move {
+        match base {
+            Some(base) => BASE.scope(base, fut).await,
+            None => fut.await,
+        }
+    }
+}

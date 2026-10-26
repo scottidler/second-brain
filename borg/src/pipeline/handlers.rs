@@ -78,8 +78,7 @@ pub(crate) fn extract_article_title(article_md: &str, url: &str) -> String {
 pub(crate) async fn process_youtube(
     url: &str,
     config: &Config,
-    // Read once a run can publish somewhere other than the vault.
-    _policy: &PublishPolicy,
+    policy: &PublishPolicy,
     trace_id: &str,
     capture_note: Option<&str>,
 ) -> Result<YouTubeResult> {
@@ -96,7 +95,16 @@ pub(crate) async fn process_youtube(
     // the slide-aware Fabric pattern instead of the flat summarizer.
     let mut slide_payload: Option<SlidePayload> = None;
     if config.youtube.slides.enabled {
-        match try_extract_slides(url, &video.segments, video.metadata.duration_secs, config, trace_id).await {
+        match try_extract_slides(
+            url,
+            &video.segments,
+            video.metadata.duration_secs,
+            config,
+            policy,
+            trace_id,
+        )
+        .await
+        {
             Ok(Some((manifest, summary, slides_source_root))) => {
                 slide_payload = Some(SlidePayload {
                     manifest,
@@ -195,50 +203,27 @@ pub(crate) async fn fetch_video(url: &str, config: &Config, trace_id: &str) -> R
 /// Frame-aware ingestion path. Downloads the video, extracts frames, runs
 /// slide segmentation, and - when the proposed shape is non-text-only -
 /// runs the slide-aware Fabric pattern. Returns the manifest + parsed
-/// LLM output. Returns `Ok(None)` for text-only proposals (the caller
-/// should use the existing summary path).
+/// LLM output + the guard owning the work dir. Returns `Ok(None)` for
+/// text-only proposals (the caller should use the existing summary path).
 ///
-/// All heavy work happens in tempdir under `borg-youtube-frames/<trace_id>/`
-/// for replay-friendly debug; the directory survives the function so the
+/// All heavy work happens in tempdir under `borg-youtube-frames/<trace_id>/`.
+/// The [`frames::WorkDirGuard`] retires it on every exit, preserving it under
+/// `policy.frames_dest()` first; on success it travels in the result so the
 /// caller can copy slides out of it.
-/// Removes a YouTube frames work dir (the <=720p mp4 plus every extracted
-/// frame) when dropped, unless [`WorkDirGuard::keep`] hands it on. Every early
-/// return of [`try_extract_slides`] used to leave it behind: content filtering
-/// makes most videos text-only, so nearly every ingest leaked one, 40G of
-/// /tmp in a day, until the per-user tmpfs quota failed downloads and writes.
-pub(crate) struct WorkDirGuard {
-    path: Option<PathBuf>,
-}
-
-impl WorkDirGuard {
-    pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    /// Hand the dir to a caller that removes it itself (slide publish).
-    pub(crate) fn keep(mut self) -> PathBuf {
-        self.path.take().expect("guard holds its path until kept")
-    }
-}
-
-impl Drop for WorkDirGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.path.take()
-            && let Err(e) = std::fs::remove_dir_all(&path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            log::warn!("could not remove frames work dir {}: {e}", path.display());
-        }
-    }
-}
-
 pub(crate) async fn try_extract_slides(
     url: &str,
     transcript_pairs: &[(f64, String)],
     duration_secs: f64,
     config: &Config,
+    policy: &PublishPolicy,
     trace_id: &str,
-) -> Result<Option<(crate::slides::SlideManifest, crate::slides::SummaryOutput, PathBuf)>> {
+) -> Result<
+    Option<(
+        crate::slides::SlideManifest,
+        crate::slides::SummaryOutput,
+        frames::WorkDirGuard,
+    )>,
+> {
     use crate::slides::{self, NoteShape};
     use crate::youtube;
 
@@ -248,7 +233,11 @@ pub(crate) async fn try_extract_slides(
     let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(trace_id);
     let _ = std::fs::remove_dir_all(&work_dir);
     std::fs::create_dir_all(&work_dir).context("create youtube-frames work dir")?;
-    let guard = WorkDirGuard::new(work_dir.clone());
+    let preserve_to = policy.frames_dest();
+    // runs.yml exists for the preserved tree only; under `Vault` it would be
+    // OCR work that dies with the work dir.
+    let record_runs = preserve_to.is_some();
+    let guard = frames::WorkDirGuard::new(work_dir.clone(), preserve_to);
 
     // 1. Download the video. yt-dlp `-f` picks the best mp4 under 720p so
     //    frames are reasonable and disk usage stays small.
@@ -337,6 +326,7 @@ pub(crate) async fn try_extract_slides(
             transcript_pairs,
             &work_dir,
             config,
+            record_runs,
         )
         .await?
     } else {
@@ -373,7 +363,7 @@ pub(crate) async fn try_extract_slides(
     let pattern_input = slides::render_pattern_input(&manifest);
     let raw = fabric::run_pattern("obsidian-youtube-slides.md", &pattern_input, &config.fabric).await?;
     let summary = slides::parse_summary_output(&raw)?;
-    Ok(Some((manifest, summary, guard.keep())))
+    Ok(Some((manifest, summary, guard)))
 }
 
 /// Content-filter Stage-1 path (vision-gated). Runs the pure prefix
@@ -391,6 +381,11 @@ pub(crate) async fn try_extract_slides(
 ///
 /// Fail-closed: any per-run classification failure drops that run; the note still
 /// publishes its surviving (or text-only) shape.
+///
+/// With `record_runs` (a preserved `Scratch` work dir) every classified run's
+/// best frame is also OCR'd and recorded in `work_dir/runs.yml`, kept or not.
+/// The manifest, and so the note, still comes from the kept runs only.
+#[allow(clippy::too_many_arguments)]
 async fn classify_and_filter_slides(
     trace_id: &str,
     url: &str,
@@ -399,6 +394,7 @@ async fn classify_and_filter_slides(
     transcript_pairs: &[(f64, String)],
     work_dir: &Path,
     config: &Config,
+    record_runs: bool,
 ) -> Result<crate::slides::SlideManifest> {
     use crate::slides;
     use crate::slides::classify;
@@ -444,6 +440,20 @@ async fn classify_and_filter_slides(
         tally.dropped_api_error,
         tally.dropped_parse_error,
     );
+
+    if record_runs {
+        let records = frames::run_records(
+            &windows,
+            &best_frames,
+            &classes,
+            work_dir,
+            ocr::ocr_extract,
+            config.pipeline.ocr_timeout_secs,
+        );
+        if let Err(e) = frames::write_runs(&records, work_dir) {
+            log::warn!("[{trace_id}] runs.yml write failed in {}: {e:#}", work_dir.display());
+        }
+    }
 
     slides::segment_filtered(
         trace_id,

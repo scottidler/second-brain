@@ -33,6 +33,7 @@ use inflight::InflightGuard;
 
 mod article;
 mod figures;
+mod frames;
 mod handlers;
 mod publish;
 pub(crate) mod session;
@@ -76,9 +77,11 @@ pub(crate) struct YouTubeResult {
 pub(crate) struct SlidePayload {
     manifest: crate::slides::SlideManifest,
     summary: crate::slides::SummaryOutput,
-    /// Directory the slide JPEGs were materialized into; resolves the
-    /// manifest's relative `frame_path` for the publish step.
-    slides_source_root: PathBuf,
+    /// The frames work dir the slide JPEGs were materialized into; resolves
+    /// the manifest's relative `frame_path` for the publish step. The guard
+    /// retires it (preserving it under `Scratch`) once publish is done, or on
+    /// any return before that.
+    slides_source_root: frames::WorkDirGuard,
 }
 
 /// Splice the distilled sections BELOW a slide-published body (fixes a
@@ -242,6 +245,15 @@ impl PublishPolicy {
         match self {
             Self::Vault => canonical.to_string(),
             Self::Scratch { .. } => format!("distill:{canonical}"),
+        }
+    }
+
+    /// Where a YouTube frames work dir is preserved before it is removed:
+    /// `root/frames` under `Scratch`, `None` (removed outright) under `Vault`.
+    pub fn frames_dest(&self) -> Option<PathBuf> {
+        match self {
+            Self::Vault => None,
+            Self::Scratch { root } => Some(root.join("frames")),
         }
     }
 }
@@ -1129,13 +1141,13 @@ async fn process_url_inner(
     // staged `distilled.yml` and embed it from there. The choice is a typed policy keyed on the
     // `KindPayload` seam, not on any extractor string.
     let rendered_distilled = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
-    let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
+    let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.take() {
         let published = match crate::slides::publish::publish_slides(
             &publish_root,
             &filename_stub,
             &payload.manifest,
             &payload.summary,
-            &payload.slides_source_root,
+            payload.slides_source_root.path(),
             &chrono::Utc::now(),
         ) {
             Ok(result) => {
@@ -1151,16 +1163,11 @@ async fn process_url_inner(
                 (rendered_distilled.body_markdown.clone(), Vec::new())
             }
         };
-        // publish_slides has copied the JPEGs it needs into the vault (or
-        // failed); the temp frames work dir (≤720p mp4 + every extracted
-        // frame, under /tmp/borg-youtube-frames/<id>) is now dead weight and
-        // was never cleaned up. Remove it so it can't accumulate unbounded.
-        if let Err(e) = std::fs::remove_dir_all(&payload.slides_source_root) {
-            log::debug!(
-                "[{trace_id}] could not remove slide work dir {}: {e}",
-                payload.slides_source_root.display()
-            );
-        }
+        // publish_slides has copied the JPEGs it needs (or failed); the
+        // frames work dir (<=720p mp4 + every extracted frame) is now dead
+        // weight. Retire it through the guard: preserved under `Scratch`,
+        // then removed so it can't accumulate unbounded in /tmp.
+        payload.slides_source_root.retire();
         published
     } else {
         (rendered_distilled.body_markdown.clone(), Vec::new())

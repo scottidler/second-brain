@@ -237,10 +237,10 @@ pub async fn classify_slides(
         let frame: PathBuf = frame.clone();
         let filter: ContentFilterConfig = filter.clone();
         let llm: LlmConfig = llm.clone();
-        set.spawn(async move {
+        set.spawn(ocr::carry_vision_base(async move {
             log::trace!("classify_slides: dispatch idx={idx} frame={}", frame.display());
             (idx, classify_slide(&frame, &filter, &llm).await)
-        });
+        }));
     }
 
     let mut results: Vec<Option<ClassifyResult>> = (0..best_frames.len()).map(|_| None).collect();

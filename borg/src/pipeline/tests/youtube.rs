@@ -313,3 +313,258 @@ async fn data_api_not_found_fails_the_receipt_without_fallback() {
     assert_eq!(spawns.count(), 0, "the yt-dlp arm never runs: {:?}", spawns.calls());
     assert_eq!(hits.get("/interactions"), 0);
 }
+
+/// What the stub vision API answers every slide classification with.
+fn classified_as(category: &str) -> (&'static str, Vec<(u16, String)>) {
+    let text = format!("CATEGORY: {category}\nCONFIDENCE: 0.9");
+    let body = serde_json::json!({"content": [{"type": "text", "text": text}]});
+    ("/v1/messages", vec![(200, body.to_string())])
+}
+
+/// What one slides-on, content-filter-on `process_content` run left behind.
+struct FramesRun {
+    result: IngestResult,
+    /// The scratch root under `Scratch`; the same unused path under `Vault`.
+    root: PathBuf,
+    vault_root: PathBuf,
+    work_dir: PathBuf,
+    classify_calls: usize,
+    _data_home: tempfile::TempDir,
+}
+
+/// One `process_content` run of [`stub::URL`] with slides and the content
+/// filter on, every run classified as `category`, and `fabric` as the fabric
+/// binary (`None`: one that does not exist). `scratch` picks the policy.
+async fn run_frames(trace: &str, scratch: bool, category: &str, fabric: Option<fn(&Path) -> PathBuf>) -> FramesRun {
+    let _xdg = crate::harvest::TEST_XDG_LOCK.lock().await;
+    permits::GENERAL_PERMITS.init(4);
+    permits::HEAVY_PERMITS.init(4);
+    let data_home = tempfile::TempDir::new().unwrap();
+    let prior_xdg = std::env::var("XDG_DATA_HOME").ok();
+    unsafe { std::env::set_var("XDG_DATA_HOME", data_home.path()) };
+    let _xdg_sandbox = crate::receipts::sandbox::enter();
+
+    let mut config = stub::config(data_home.path(), YoutubeEngine::Gemini, None);
+    let vault_root = data_home.path().join("vault");
+    std::fs::create_dir_all(vault_root.join(".obsidian")).unwrap();
+    config.vault.root_path = Some(vault_root.to_string_lossy().to_string());
+    config.youtube.slides.enabled = true;
+    config.youtube.slides.content_filter.enabled = true;
+    let key = data_home.path().join("anthropic.key");
+    std::fs::write(&key, "stub-key").unwrap();
+    config.llm.api_key = key.to_string_lossy().to_string();
+    if let Some(fabric) = fabric {
+        config.fabric.binary = fabric(data_home.path()).to_string_lossy().to_string();
+    }
+    let root = data_home.path().join("distill").join(trace);
+    let policy = if scratch {
+        PublishPolicy::Scratch { root: root.clone() }
+    } else {
+        PublishPolicy::Vault
+    };
+    let mut routes = stub::routes(stub::DATAAPI_LIVE, gemini_ok());
+    routes.push(classified_as(category));
+    let (base, hits) = stub::serve(routes).await;
+    let bases = ApiBases {
+        data_api: base.clone(),
+        gemini: base.clone(),
+    };
+    {
+        let conn = receipts::open_default().unwrap();
+        receipts::record_received(
+            &conn,
+            trace,
+            vault::schema::Method::Cli,
+            vault::receipts::ReceiptKind::Url,
+            stub::URL,
+        )
+        .unwrap();
+    }
+
+    let (result, _spawns) = spawn::scope(
+        stub::yt_dlp(data_home.path()),
+        api::scope(
+            bases,
+            crate::ocr::bases::scope(
+                base,
+                // Boxed: the slides-on pipeline future overflows the test
+                // thread's stack when held inline under three scopes.
+                Box::pin(process_content(
+                    ContentKind::Url {
+                        url: stub::URL.to_string(),
+                        note: None,
+                    },
+                    Vec::new(),
+                    IngestMethod::Cli,
+                    true,
+                    &config,
+                    &policy,
+                    Some(trace.to_string()),
+                    None,
+                )),
+            ),
+        ),
+    )
+    .await;
+
+    unsafe {
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+    FramesRun {
+        result,
+        root,
+        vault_root,
+        work_dir: std::env::temp_dir().join("borg-youtube-frames").join(trace),
+        classify_calls: hits.get("/v1/messages"),
+        _data_home: data_home,
+    }
+}
+
+/// Every file under `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(files_under(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// `root/frames/` holds every extracted frame `frames.yml` lists, and no
+/// source video anywhere under `root`.
+fn assert_frames_preserved(run: &FramesRun) {
+    let preserved = run.root.join("frames");
+    let sidecar: crate::youtube::FramesSidecar =
+        serde_yaml::from_str(&std::fs::read_to_string(preserved.join("frames.yml")).expect("frames.yml preserved"))
+            .expect("frames.yml parses");
+    assert!(sidecar.frames_extracted > 0, "the stub mp4 yielded frames");
+    for frame in &sidecar.frames {
+        let name = frame.path.file_name().expect("frame file name");
+        assert!(preserved.join("frames").join(name).is_file(), "{name:?} preserved");
+    }
+    let jpgs = files_under(&preserved.join("frames"))
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
+        .count();
+    assert_eq!(
+        jpgs, sidecar.frames_extracted as usize,
+        "every extracted frame, no more"
+    );
+    let videos: Vec<PathBuf> = files_under(&run.root)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "mp4"))
+        .collect();
+    assert!(videos.is_empty(), "no source video preserved: {videos:?}");
+    assert!(
+        !run.work_dir.exists(),
+        "the /tmp work dir is gone: {}",
+        run.work_dir.display()
+    );
+}
+
+/// `root/frames/runs.yml` has one entry per classified run, each with `ocr`.
+fn assert_runs_recorded(run: &FramesRun) {
+    let runs: Vec<serde_yaml::Mapping> =
+        serde_yaml::from_str(&std::fs::read_to_string(run.root.join("frames/runs.yml")).expect("runs.yml preserved"))
+            .expect("runs.yml is a list");
+    assert!(run.classify_calls > 0, "the content filter classified runs");
+    assert_eq!(runs.len(), run.classify_calls, "one entry per classified run");
+    for entry in &runs {
+        assert!(entry.contains_key("ocr"), "every run carries ocr: {entry:?}");
+        let frame = entry["best-frame"].as_str().expect("best-frame");
+        assert!(run.root.join("frames").join(frame).is_file(), "{frame} resolves");
+    }
+}
+
+/// The classifier drops every run, so the slide path returns text-only from
+/// inside the handler: under `Scratch` the guard still preserves the whole
+/// frames tree plus `runs.yml`; under `Vault` nothing is preserved anywhere.
+#[tokio::test]
+async fn distill_policy_keeps_frames_on_text_only() {
+    let scratch = run_frames("20261025-120000-ytfrtx", true, "talking-head", None).await;
+    assert!(
+        matches!(scratch.result.status, IngestStatus::Completed),
+        "{:?}",
+        scratch.result.status
+    );
+    assert_frames_preserved(&scratch);
+    assert_runs_recorded(&scratch);
+    let slides = files_under(&scratch.root.join("frames/slides"));
+    assert!(slides.is_empty(), "no run kept, so none materialized: {slides:?}");
+
+    let vault = run_frames("20261025-120000-ytfrtv", false, "talking-head", None).await;
+    assert!(
+        matches!(vault.result.status, IngestStatus::Completed),
+        "{:?}",
+        vault.result.status
+    );
+    assert!(!vault.root.join("frames").exists(), "Vault preserves no frames");
+    assert!(!vault.work_dir.exists(), "Vault still removes the work dir");
+    let runs_files: Vec<PathBuf> = files_under(&vault.vault_root)
+        .into_iter()
+        .filter(|p| p.ends_with("runs.yml"))
+        .collect();
+    assert!(runs_files.is_empty(), "Vault writes no runs.yml: {runs_files:?}");
+}
+
+/// Every run is kept, so the slide path goes on to the slides pattern, and
+/// the fabric binary does not exist: the slide path errors after frame
+/// extraction and the note falls back to text-only. The frames are preserved.
+#[tokio::test]
+async fn distill_policy_keeps_frames_on_slide_error() {
+    let run = run_frames("20261025-120000-ytfrer", true, "architecture-diagram", None).await;
+    assert!(
+        matches!(run.result.status, IngestStatus::Completed),
+        "{:?}",
+        run.result.status
+    );
+    assert_frames_preserved(&run);
+    assert_runs_recorded(&run);
+    assert!(
+        !files_under(&run.root.join("frames/slides")).is_empty(),
+        "the kept runs were materialized before the error"
+    );
+    assert!(
+        files_under(&run.root.join("system/attachments")).is_empty(),
+        "the slide path failed, so the note embeds no slide"
+    );
+}
+
+/// Every run is kept and the slides pattern answers: the note embeds a slide
+/// and `process_url_inner` retires the work dir after `publish_slides`, which
+/// preserves it the same way.
+#[tokio::test]
+async fn distill_policy_keeps_frames_on_slide_note() {
+    let run = run_frames(
+        "20261025-120000-ytfrsn",
+        true,
+        "architecture-diagram",
+        Some(stub::slides_fabric),
+    )
+    .await;
+    assert!(
+        matches!(run.result.status, IngestStatus::Completed),
+        "{:?}",
+        run.result.status
+    );
+    assert_frames_preserved(&run);
+    assert_runs_recorded(&run);
+    let embedded: Vec<PathBuf> = files_under(&run.root.join("system/attachments"))
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "jpg"))
+        .collect();
+    assert!(
+        !embedded.is_empty(),
+        "publish_slides copied the embedded slide under root"
+    );
+}

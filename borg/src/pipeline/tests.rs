@@ -1474,13 +1474,12 @@ fn frames_work_dir_is_removed_on_every_early_return() {
     let dir = tmp.path().join("vid");
     std::fs::create_dir_all(dir.join("frames")).expect("mkdir");
     std::fs::write(dir.join("vid.mp4"), b"x").expect("write");
-    drop(handlers::WorkDirGuard::new(dir.clone()));
+    drop(frames::WorkDirGuard::new(dir.clone(), None));
     assert!(!dir.exists(), "dropped guard removes the work dir");
 
     std::fs::create_dir_all(&dir).expect("mkdir");
-    let kept = handlers::WorkDirGuard::new(dir.clone()).keep();
-    assert_eq!(kept, dir);
-    assert!(dir.exists(), "a kept dir is the slide publisher's to remove");
+    frames::WorkDirGuard::new(dir.clone(), None).retire();
+    assert!(!dir.exists(), "the slide publisher's retire removes it the same way");
 }
 
 mod article;
