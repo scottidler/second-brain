@@ -464,9 +464,11 @@ async fn reingest_one(
             if matches!(result.status, types::IngestStatus::Queued)
                 && let Some(tid) = result.trace_id.clone()
             {
-                result = replay::poll_trace_terminal(config, daemon, &tid)
-                    .await
-                    .unwrap_or(result);
+                result = match replay::poll_trace_terminal(config, daemon, &tid).await {
+                    Ok(replay::PollOutcome::Terminal(terminal)) => terminal,
+                    Ok(replay::PollOutcome::CeilingReached) => replay::ceiling_failure(&tid),
+                    Err(_) => result,
+                };
             }
             match result.status {
                 // The polled `/trace` result carries the note path but no title.

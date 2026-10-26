@@ -617,12 +617,12 @@ pub struct RetentionCliArgs {
 }
 #[derive(Subcommand)]
 pub enum RetentionAction {
-    /// Sweep aged-off trace directories and raw-input sidecars
+    /// Sweep aged-off trace directories, distill runs, and raw-input sidecars
     Sweep {
         /// List what would be swept and exit without deleting
         #[arg(long)]
         dry_run: bool,
-        /// Sweep ONLY the vault's raw-input sidecars, leaving staging alone.
+        /// Sweep ONLY the vault's raw-input sidecars, leaving staging and distill runs alone.
         #[arg(long)]
         sidecars_only: bool,
     },

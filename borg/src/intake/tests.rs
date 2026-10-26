@@ -201,18 +201,14 @@ fn failure_preserves_fetch_failed_stage() {
 }
 
 /// The scratch capture sets `scratch = 1` in the INSERT and writes the sidecar
-/// under the scratch root, not the vault.
+/// under the scratch root. It takes no config, so it has no vault to write to.
 #[tokio::test]
 async fn scratch_capture_flags_the_row_and_writes_the_sidecar_under_the_scratch_root() {
     let home = tempfile::tempdir().unwrap();
     let scratch_root = tempfile::tempdir().unwrap();
-    let vault_dir = tempfile::tempdir().unwrap();
-    let mut config = Config::default();
-    config.vault.root_path = Some(vault_dir.path().display().to_string());
     let url = "https://example.com/video";
     crate::harvest::with_xdg_data_home(home.path(), || async {
         record_scratch_with_sidecar(
-            &config,
             scratch_root.path(),
             IngestMethod::Cli,
             IntakeKind::Url,
@@ -231,8 +227,4 @@ async fn scratch_capture_flags_the_row_and_writes_the_sidecar_under_the_scratch_
     let sidecar = intake::raw_input_path(scratch_root.path(), "tr-scratch");
     assert_eq!(std::fs::read(&sidecar).unwrap(), url.as_bytes());
     assert!(sidecar.starts_with(scratch_root.path().join("system/intake")));
-    assert!(
-        !intake::raw_input_path(vault_dir.path(), "tr-scratch").exists(),
-        "nothing lands in the vault"
-    );
 }

@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::assets;
 use crate::health::HealthResponse;
 use crate::intake::{self as intake_log, Kind as IntakeKind};
+use crate::scratch::{DistillManifest, DistillRequest};
 use crate::trace;
 use crate::types::{ContentKind, IngestMethod, IngestRequest, IngestResult, IngestStatus, ReplayOrigin};
 use vault::receipts::FailureStage;
@@ -207,6 +208,204 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         canonical_url: Some(url),
         ..Default::default()
     })
+}
+
+/// `POST /distill` - capture a URL as a scratch run and queue it: the
+/// receipts row is written with `scratch = 1` and the raw-input sidecar lands
+/// under the run's scratch root (`borg_distill_dir()/<trace>/`), never the
+/// vault. The pipeline runs detached under `PublishPolicy::Scratch`, so
+/// nothing reaches the vault, the ledger or the archive. `method = cli`: no
+/// operator ping fires. `force = false`: a second distill of a URL already in
+/// flight is refused by the inflight guard instead of running twice.
+pub async fn distill(State(state): State<AppState>, Json(request): Json<DistillRequest>) -> Json<IngestResult> {
+    log::info!("Received distill request for URL: {}", request.url);
+    let method = IngestMethod::Cli;
+    let trace_id = trace::generate(method);
+    let Some(root) = crate::scratch::run_root(&vault::paths::borg_distill_dir(), &trace_id) else {
+        // A generated trace id is always one plain component; reaching this
+        // is a trace-generator bug, refused before any write.
+        log::error!("http/distill: generated trace id {trace_id:?} is not a path component");
+        return Json(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("borg generated an unusable trace id {trace_id:?}"),
+            },
+            failure_stage: Some(FailureStage::IntakeRejected),
+            ..Default::default()
+        });
+    };
+
+    // Durable intake BEFORE dispatch, as `/ingest` does: a failed write is
+    // `Failed` to the caller and nothing runs.
+    if let Err(e) = intake_log::record_scratch_with_sidecar(
+        &root,
+        method,
+        IntakeKind::Url,
+        &request.url,
+        request.url.as_bytes(),
+        &trace_id,
+    ) {
+        log::error!("http/distill: failed to record intake trace={trace_id}: {e:#}");
+        return Json(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("borg failed to record intake: {e}"),
+            },
+            trace_id: Some(trace_id),
+            ..Default::default()
+        });
+    }
+
+    let config = state.config.clone();
+    let task_trace = trace_id.clone();
+    let task_url = request.url.clone();
+    tokio::spawn(async move {
+        let policy = crate::pipeline::PublishPolicy::Scratch { root };
+        let result = crate::pipeline::process_content(
+            ContentKind::Url {
+                url: task_url.clone(),
+                note: None,
+            },
+            Vec::new(),
+            method,
+            false,
+            &config,
+            &policy,
+            Some(task_trace),
+            None,
+        )
+        .await;
+        match &result.status {
+            IngestStatus::Failed { reason } => log::warn!("Distill failed for {task_url}: {reason}"),
+            IngestStatus::Completed => log::info!("Distill completed for {task_url}"),
+            IngestStatus::Duplicate { .. } | IngestStatus::Queued => {}
+        }
+    });
+
+    Json(IngestResult {
+        status: IngestStatus::Queued,
+        trace_id: Some(trace_id),
+        canonical_url: Some(request.url),
+        ..Default::default()
+    })
+}
+
+fn distill_error(status: StatusCode, message: String) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// The terminal scratch run behind `trace_id`, with its scratch root, or the
+/// status and message that refuse it: 404 for an unknown trace or a
+/// `scratch = 0` one (a vault ingest's files are never served here), 409
+/// while it is still `received`, 500 when receipts cannot be read.
+fn terminal_scratch_run(
+    trace_id: &str,
+) -> Result<(crate::receipts::Receipt, std::path::PathBuf), (StatusCode, String)> {
+    let not_found = || (StatusCode::NOT_FOUND, format!("no distill run {trace_id}"));
+    let Some(root) = crate::scratch::run_root(&vault::paths::borg_distill_dir(), trace_id) else {
+        return Err(not_found());
+    };
+    let lookup = crate::receipts::open_default().and_then(|conn| crate::receipts::get(&conn, trace_id));
+    match lookup {
+        Ok(Some(receipt)) if receipt.scratch => {
+            if receipt.status == "received" {
+                log::debug!("distill: trace={trace_id} not terminal -> 409");
+                Err((StatusCode::CONFLICT, format!("distill run {trace_id} has not finished")))
+            } else {
+                Ok((receipt, root))
+            }
+        }
+        Ok(Some(_)) => {
+            log::debug!("distill: trace={trace_id} is not a scratch run -> 404");
+            Err(not_found())
+        }
+        Ok(None) => Err(not_found()),
+        Err(e) => {
+            log::error!("distill: receipts lookup failed for {trace_id}: {e:#}");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("receipts lookup failed: {e}"),
+            ))
+        }
+    }
+}
+
+/// `GET /distill/{trace}` - the manifest of a finished scratch run: its
+/// receipts outcome and every regular file under its scratch root. A failed
+/// run is still listed: its partial output is what the failure is debugged
+/// with. See [`terminal_scratch_run`] for the refusals.
+pub async fn distill_manifest(Path(trace_id): Path<String>) -> Response {
+    log::debug!("distill_manifest: trace_id={trace_id}");
+    let (receipt, root) = match terminal_scratch_run(&trace_id) {
+        Ok(run) => run,
+        Err((status, message)) => return distill_error(status, message),
+    };
+    match crate::scratch::regular_files(&root) {
+        Ok(files) => Json(DistillManifest {
+            trace_id: receipt.trace_id,
+            status: receipt.status,
+            failure_stage: receipt.failure_stage,
+            failure_reason: receipt.failure_reason,
+            files: files.into_iter().map(|(_, file)| file).collect(),
+        })
+        .into_response(),
+        Err(e) => {
+            log::error!("distill_manifest: walk of {} failed: {e:#}", root.display());
+            distill_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("listing the run failed: {e:#}"),
+            )
+        }
+    }
+}
+
+/// `GET /distill/{trace}/file/{*path}` - one file of a finished scratch run.
+/// A `..` component or an absolute path is a 400 before any filesystem call;
+/// then the manifest's refusals apply; then the bytes are served only when a
+/// fresh walk lists `path` as a regular file (a symlink or special file is
+/// never listed, so it is a 404 like any other unlisted path).
+pub async fn distill_file(Path((trace_id, raw_path)): Path<(String, String)>) -> Response {
+    log::debug!("distill_file: trace_id={trace_id} path={raw_path:?}");
+    let wanted = match crate::scratch::requested_path(&raw_path) {
+        Ok(wanted) => wanted,
+        Err(refusal) => {
+            log::warn!("distill_file: refusing {raw_path:?} for {trace_id}: {refusal}");
+            return distill_error(StatusCode::BAD_REQUEST, format!("{raw_path:?}: {refusal}"));
+        }
+    };
+    let (_, root) = match terminal_scratch_run(&trace_id) {
+        Ok(run) => run,
+        Err((status, message)) => return distill_error(status, message),
+    };
+    let files = match crate::scratch::regular_files(&root) {
+        Ok(files) => files,
+        Err(e) => {
+            log::error!("distill_file: walk of {} failed: {e:#}", root.display());
+            return distill_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("listing the run failed: {e:#}"),
+            );
+        }
+    };
+    if !files.iter().any(|(rel, _)| *rel == wanted) {
+        return distill_error(
+            StatusCode::NOT_FOUND,
+            format!("{raw_path:?} is not a file of distill run {trace_id}"),
+        );
+    }
+    let path = root.join(&wanted);
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+        )
+            .into_response(),
+        Err(e) => {
+            log::error!("distill_file: open {} failed: {e}", path.display());
+            distill_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("opening {raw_path:?} failed: {e}"),
+            )
+        }
+    }
 }
 
 /// The receipts lineage an `/ingest` body asks for. `replay-origin` says why a

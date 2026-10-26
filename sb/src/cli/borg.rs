@@ -244,6 +244,24 @@ impl BorgCli {
                         for name in &result.deleted {
                             println!("  {action}: {name}");
                         }
+                        let distill_root = vault::paths::borg_distill_dir();
+                        let distill =
+                            borg::retention::sweep_distill(&distill_root, config.staging.retention_days, dry_run)?;
+                        if distill.enabled {
+                            println!(
+                                "Scanned {} distill runs, kept {}, {} {} (freed {} bytes)",
+                                distill.scanned,
+                                distill.kept,
+                                action.to_ascii_lowercase(),
+                                distill.deleted.len(),
+                                distill.bytes_freed
+                            );
+                            for name in &distill.deleted {
+                                println!("  {action}: {name}");
+                            }
+                        } else {
+                            println!("Distill sweep disabled (staging.retention-days=0)");
+                        }
                     }
                     let sidecars = borg::retention::sweep_sidecars(&config, dry_run)?;
                     if sidecars.enabled {

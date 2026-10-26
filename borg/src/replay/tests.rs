@@ -350,6 +350,57 @@ mod daemon_timeouts {
         assert!(result.is_err());
         assert!(started.elapsed() < T * 2, "took {:?}", started.elapsed());
     }
+
+    /// A terminal `/trace` body is a `Terminal` outcome carrying the trace's
+    /// own result, never the ceiling: a failed trace and "stopped waiting" are
+    /// different answers.
+    #[tokio::test]
+    async fn trace_polling_reports_a_terminal_trace_as_terminal() {
+        for (body, want_completed) in [
+            (
+                r#"{"found":true,"trace_id":"trace-1","status":"succeeded","failure_stage":null,"note_path":"inbox/n.md"}"#,
+                true,
+            ),
+            (
+                r#"{"found":true,"trace_id":"trace-1","status":"failed","failure_stage":"fetch-failed","failure_reason":"boom","note_path":null}"#,
+                false,
+            ),
+        ] {
+            let (port, _) = serve(Behavior::Json(body.to_string())).await;
+            let config = config_for(port);
+            let daemon = DaemonClient::new(&config.hotkey, None).expect("client");
+            let outcome = poll_trace_terminal(&config, &daemon, "trace-1").await.expect("polled");
+            let PollOutcome::Terminal(result) = outcome else {
+                panic!("a terminal body must be Terminal, got {outcome:?}");
+            };
+            assert_eq!(result.trace_id.as_deref(), Some("trace-1"));
+            match result.status {
+                IngestStatus::Completed => {
+                    assert!(want_completed);
+                    assert_eq!(result.note_path.as_deref(), Some("inbox/n.md"));
+                }
+                IngestStatus::Failed { reason } => {
+                    assert!(!want_completed);
+                    assert_eq!(reason, "fetch-failed: boom");
+                }
+                other => panic!("unexpected status {other:?}"),
+            }
+        }
+    }
+}
+
+/// Both pollers map `CeilingReached` to this result, so its reason is the one
+/// replay and reingest have always printed for the ceiling.
+#[test]
+fn ceiling_failure_keeps_the_reason_replay_and_reingest_print() {
+    let result = ceiling_failure("trace-9");
+    assert_eq!(result.trace_id.as_deref(), Some("trace-9"));
+    assert!(
+        matches!(&result.status, IngestStatus::Failed { reason }
+            if reason == "trace did not reach a terminal state within the polling ceiling"),
+        "{:?}",
+        result.status
+    );
 }
 
 /// The client halts on a paused YouTube breaker, which only the failure text

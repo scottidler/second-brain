@@ -1,14 +1,20 @@
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-/// `/ingest` body fields this daemon writes into receipts, beyond the base
-/// contract. A client whose request depends on one (`sb borg eval --remediate
-/// --apply` needs `replay-of`) checks `/health` first: an older daemon drops
-/// an unknown field silently, which would post a remediation with no lineage.
-pub const DAEMON_FEATURES: &[&str] = &[FEATURE_REPLAY_OF];
+/// Optional capabilities this daemon has beyond the base `/ingest` contract.
+/// A client whose request depends on one (`sb borg eval --remediate --apply`
+/// needs `replay-of`, `sb borg distill` needs `distill`) checks `/health`
+/// first: an older daemon drops an unknown `/ingest` field silently, which
+/// would post a remediation with no lineage, and has no `/distill` route.
+pub const DAEMON_FEATURES: &[&str] = &[FEATURE_REPLAY_OF, FEATURE_DISTILL];
 
 /// The daemon records `replay-of` and `replay-origin` at intake.
 pub const FEATURE_REPLAY_OF: &str = "replay-of";
+
+/// The daemon serves `POST /distill`, `GET /distill/{trace}` and
+/// `GET /distill/{trace}/file/{*path}`: a scratch run that writes nothing to
+/// the vault.
+pub const FEATURE_DISTILL: &str = "distill";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {

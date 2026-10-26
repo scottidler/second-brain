@@ -117,8 +117,8 @@ pub fn record_replay_with_sidecar(
 /// `root` (`root/system/intake/<trace>.txt`), never the vault, and the
 /// receipts row is created with `scratch = 1` in the same INSERT, so a crash
 /// can never leave a scratch run counted as an ingest. Both writes propagate.
+/// Takes no config: nothing about a scratch capture depends on the vault.
 pub fn record_scratch_with_sidecar(
-    _config: &Config,
     root: &Path,
     method: IngestMethod,
     kind: IntakeKind,

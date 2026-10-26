@@ -51,6 +51,7 @@ pub mod retention;
 pub mod rkvr;
 pub mod router;
 pub mod routes;
+pub mod scratch;
 pub mod service;
 pub mod signal;
 pub mod slides;

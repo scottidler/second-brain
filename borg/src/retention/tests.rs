@@ -274,3 +274,96 @@ fn sidecar_status_reports_files_bytes_and_window() {
     assert_eq!(report.retention_days, 45);
     assert!(report.dir.ends_with("system/intake"));
 }
+
+fn write_distill_run(root: &Path, trace_id: &str, days_old: i64) -> std::path::PathBuf {
+    let dir = root.join(trace_id);
+    std::fs::create_dir_all(dir.join("stages").join(trace_id)).unwrap();
+    std::fs::write(dir.join("note.md"), b"# note\n").unwrap();
+    age_directory(&dir, days_old);
+    dir
+}
+
+#[test]
+fn distill_sweep_removes_an_old_run_and_keeps_a_young_one() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("distill");
+    let old = write_distill_run(&root, "cl-old", 20);
+    let young = write_distill_run(&root, "cl-young", 3);
+    let result = sweep_distill(&root, 14, false).unwrap();
+    assert!(result.enabled);
+    assert_eq!(result.scanned, 2);
+    assert_eq!(result.kept, 1);
+    assert_eq!(result.deleted, vec!["cl-old".to_string()]);
+    assert!(result.bytes_freed > 0);
+    assert!(!old.exists(), "a run older than the window is removed");
+    assert!(young.exists(), "a run inside the window is kept");
+}
+
+#[test]
+fn distill_sweep_dry_run_and_zero_window_delete_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("distill");
+    let old = write_distill_run(&root, "cl-old", 400);
+    let dry = sweep_distill(&root, 14, true).unwrap();
+    assert_eq!(dry.deleted, vec!["cl-old".to_string()]);
+    assert!(old.exists(), "dry run touches nothing");
+    let forever = sweep_distill(&root, 0, false).unwrap();
+    assert!(!forever.enabled);
+    assert_eq!(forever.scanned, 0);
+    assert!(old.exists(), "0 keeps everything");
+}
+
+#[test]
+fn distill_sweep_of_a_missing_root_is_empty_and_skips_symlinks() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(sweep_distill(&tmp.path().join("absent"), 14, false).unwrap().scanned, 0);
+    let root = tmp.path().join("distill");
+    std::fs::create_dir_all(&root).unwrap();
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("cl-link")).unwrap();
+    age_directory(&outside, 400);
+    let result = sweep_distill(&root, 14, false).unwrap();
+    assert_eq!(result.scanned, 0, "a symlink is not a run dir");
+    assert!(outside.join("keep.txt").exists());
+}
+
+/// The daemon task is gated on `staging.retention-days` only: with the sidecar
+/// window off (`intake.retention-days: 0`) its first pass still sweeps.
+#[tokio::test]
+async fn distill_sweep_task_runs_with_the_sidecar_window_off() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("distill");
+    let old = write_distill_run(&root, "cl-old", 20);
+    let young = write_distill_run(&root, "cl-young", 1);
+    let mut config = Config::default();
+    config.intake.retention_days = 0;
+    config.staging.retention_days = 14;
+    let task = tokio::spawn(run_distill_sweep(Arc::new(config), root.clone()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while old.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let finished_early = task.is_finished();
+    task.abort();
+    assert!(!old.exists(), "the first pass must sweep with intake.retention-days: 0");
+    assert!(young.exists());
+    assert!(!finished_early, "the task keeps running for the next pass");
+}
+
+#[tokio::test]
+async fn distill_sweep_task_returns_at_once_with_a_zero_staging_window() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("distill");
+    let old = write_distill_run(&root, "cl-old", 400);
+    let mut config = Config::default();
+    config.staging.retention_days = 0;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_distill_sweep(Arc::new(config), root.clone()),
+    )
+    .await
+    .expect("a disabled sweep returns");
+    assert!(old.exists());
+}

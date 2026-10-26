@@ -11,6 +11,11 @@
 //!   See [`sweep_sidecars`]. These had no window before that config knob
 //!   existed, so the vault grew one file per trace forever (1975 files / 75 MB
 //!   by 2026-08) and `git add -A` snapshots swept them into the vault repo.
+//! - `sb borg distill` scratch runs under `vault::paths::borg_distill_dir()`,
+//!   one `<trace>/` directory each, aged at `staging.retention_days`. See
+//!   [`sweep_distill`]. Unlike staging this tree is swept by the daemon too
+//!   ([`run_distill_sweep`]): it started empty, so a first automatic pass is
+//!   never a surprise deletion.
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use eyre::{Context, Result};
@@ -295,6 +300,128 @@ pub async fn run_sidecar_sweep(config: Arc<Config>) {
             }
             Err(e) => log::warn!("retention: sidecar sweep failed: {e:#}"),
         }
+    }
+}
+
+/// How often the daemon's background distill sweep wakes up. Daily, like the
+/// sidecar sweep: the window is measured in days.
+const DISTILL_SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+#[derive(Debug, Clone)]
+pub struct DistillSweepResult {
+    pub scanned: usize,
+    pub deleted: Vec<String>,
+    pub kept: usize,
+    pub bytes_freed: u64,
+    /// `false` when `staging.retention_days` is 0 (keep forever): nothing was
+    /// scanned and nothing deleted, which is DIFFERENT from a clean sweep.
+    pub enabled: bool,
+}
+
+/// Sweep `sb borg distill` run directories (`<root>/<trace>/`) whose mtime is
+/// older than `retention_days`. `root` is `vault::paths::borg_distill_dir()`
+/// in production. `dry_run=true` reports what would be deleted without
+/// touching disk. `retention_days == 0` keeps everything and short-circuits
+/// with `enabled: false`. Only real directories are run dirs: a symlink or a
+/// stray file at the top level is neither counted nor touched.
+pub fn sweep_distill(root: &Path, retention_days: u32, dry_run: bool) -> Result<DistillSweepResult> {
+    log::debug!(
+        "retention::sweep_distill: root={} retention_days={retention_days} dry_run={dry_run}",
+        root.display()
+    );
+    let mut result = DistillSweepResult {
+        scanned: 0,
+        deleted: Vec::new(),
+        kept: 0,
+        bytes_freed: 0,
+        enabled: retention_days > 0,
+    };
+    if !result.enabled {
+        log::debug!("retention::sweep_distill: staging.retention-days=0, keeping distill runs forever");
+        return Ok(result);
+    }
+    if !root.is_dir() {
+        return Ok(result);
+    }
+    let now = Utc::now();
+    let window = Duration::days(retention_days.min(3650) as i64);
+    for entry in std::fs::read_dir(root).with_context(|| format!("read_dir {}", root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        result.scanned += 1;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(mtime) = dir_mtime(&path) else {
+            result.kept += 1;
+            continue;
+        };
+        if now - mtime < window {
+            result.kept += 1;
+            continue;
+        }
+        let size = dir_size(&path).unwrap_or(0);
+        result.deleted.push(name);
+        result.bytes_freed += size;
+        if !dry_run {
+            std::fs::remove_dir_all(&path).with_context(|| format!("remove_dir_all {}", path.display()))?;
+        }
+    }
+    log::debug!(
+        "retention::sweep_distill: scanned={} deleted={} kept={}",
+        result.scanned,
+        result.deleted.len(),
+        result.kept
+    );
+    Ok(result)
+}
+
+/// One daemon pass of [`sweep_distill`], off the async runtime, logged.
+async fn distill_sweep_pass(root: PathBuf, retention_days: u32) {
+    let result = tokio::task::spawn_blocking(move || sweep_distill(&root, retention_days, false))
+        .await
+        .unwrap_or_else(|join_err| Err(eyre::eyre!("distill sweep join error: {join_err}")));
+    match result {
+        Ok(r) if r.deleted.is_empty() => {
+            log::debug!("retention: distill sweep clean (scanned={} kept={})", r.scanned, r.kept);
+        }
+        Ok(r) => {
+            log::info!(
+                "retention: distill sweep deleted {} run(s), freed {} bytes (scanned={} kept={})",
+                r.deleted.len(),
+                r.bytes_freed,
+                r.scanned,
+                r.kept
+            );
+        }
+        Err(e) => log::warn!("retention: distill sweep failed: {e:#}"),
+    }
+}
+
+/// Background task entry point for the distill sweep: one pass immediately at
+/// startup, then every [`DISTILL_SWEEP_INTERVAL_SECS`]. Errors are logged and
+/// the loop continues.
+///
+/// A sibling of [`run_sidecar_sweep`], not folded into it: that task returns
+/// at once when `intake.retention-days` is 0, and this window is
+/// `staging.retention_days`. Returns at once only when THAT is 0.
+pub async fn run_distill_sweep(config: Arc<Config>, root: PathBuf) {
+    let days = config.staging.retention_days;
+    if days == 0 {
+        log::info!("retention: distill sweep disabled (staging.retention-days=0)");
+        return;
+    }
+    log::info!(
+        "retention: distill sweep starting (root={}, interval={}s, window={}d)",
+        root.display(),
+        DISTILL_SWEEP_INTERVAL_SECS,
+        days
+    );
+    let mut ticker = interval(StdDuration::from_secs(DISTILL_SWEEP_INTERVAL_SECS));
+    loop {
+        ticker.tick().await;
+        distill_sweep_pass(root.clone(), days).await;
     }
 }
 

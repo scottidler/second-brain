@@ -63,6 +63,12 @@ pub fn build_router(state: AppState) -> Router {
         // YouTube channel search (one yt-dlp call, 8 s bound). Auth-gated:
         // it spends the daemon host's network and yt-dlp on the caller's behalf.
         .route("/channels/search", get(routes::channel_search))
+        // `sb borg distill`: queue a scratch run, then list and fetch its
+        // files. Auth-gated: the POST spends the pipeline, the GETs serve
+        // the run's output.
+        .route("/distill", post(routes::distill))
+        .route("/distill/{trace_id}", get(routes::distill_manifest))
+        .route("/distill/{trace_id}/file/{*path}", get(routes::distill_file))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             routes::require_auth,
@@ -284,6 +290,17 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         });
     }
 
+    // `sb borg distill` scratch-run retention, on `staging.retention-days`.
+    // A sibling of the sidecar sweep: that one stops when
+    // `intake.retention-days` is 0, and this one must not.
+    {
+        let cfg = config.clone();
+        tasks.spawn(async move {
+            retention::run_distill_sweep(cfg, vault::paths::borg_distill_dir()).await;
+            Ok::<(), eyre::Report>(())
+        });
+    }
+
     Ok((
         ServerStartup {
             addr,
@@ -299,5 +316,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
     ))
 }
 
+#[cfg(test)]
+mod distill;
 #[cfg(test)]
 mod tests;

@@ -333,8 +333,33 @@ async fn reingest_via_daemon(config: &Config, url: &str, method: &str, note: Opt
     // at a time (the documented sequential pacing - without the poll it
     // silently became enqueue-everything).
     match (&result.status, result.trace_id.as_deref()) {
-        (IngestStatus::Queued, Some(trace_id)) => poll_trace_terminal(config, &daemon, trace_id).await,
+        (IngestStatus::Queued, Some(trace_id)) => match poll_trace_terminal(config, &daemon, trace_id).await? {
+            PollOutcome::Terminal(terminal) => Ok(terminal),
+            PollOutcome::CeilingReached => Ok(ceiling_failure(trace_id)),
+        },
         _ => Ok(result),
+    }
+}
+
+/// How [`poll_trace_terminal`] ended: the trace reached a terminal state, or
+/// the polling ceiling elapsed first (the trace may still be queued or
+/// running on the daemon). Kept apart so a caller can tell "the run failed"
+/// from "I stopped waiting".
+#[derive(Debug)]
+pub(crate) enum PollOutcome {
+    Terminal(IngestResult),
+    CeilingReached,
+}
+
+/// The `Failed` result replay and reingest report when the polling ceiling
+/// elapses: the reason both have always printed for it.
+pub(crate) fn ceiling_failure(trace_id: &str) -> IngestResult {
+    IngestResult {
+        status: IngestStatus::Failed {
+            reason: "trace did not reach a terminal state within the polling ceiling".to_string(),
+        },
+        trace_id: Some(trace_id.to_string()),
+        ..Default::default()
     }
 }
 
@@ -351,11 +376,7 @@ pub(crate) fn failed_trace_reason(stage: Option<String>, reason: Option<String>)
 /// Poll `GET /trace/{trace_id}` until the receipts row reaches a terminal
 /// state, or the polling ceiling (`hard_timeout + POLL_GRACE_SECS`) elapses.
 /// Shared by replay (`reingest_via_daemon`) and `crate::reingest`.
-pub(crate) async fn poll_trace_terminal(
-    config: &Config,
-    daemon: &DaemonClient,
-    trace_id: &str,
-) -> Result<IngestResult> {
+pub(crate) async fn poll_trace_terminal(config: &Config, daemon: &DaemonClient, trace_id: &str) -> Result<PollOutcome> {
     let path = format!("/trace/{trace_id}");
     let ceiling = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS);
     let interval = std::time::Duration::from_secs(POLL_INTERVAL_SECS);
@@ -369,20 +390,20 @@ pub(crate) async fn poll_trace_terminal(
             Ok(body) => {
                 match body.status.as_deref() {
                     Some("succeeded") => {
-                        return Ok(IngestResult {
+                        return Ok(PollOutcome::Terminal(IngestResult {
                             status: IngestStatus::Completed,
                             note_path: body.note_path,
                             trace_id: Some(trace_id.to_string()),
                             ..Default::default()
-                        });
+                        }));
                     }
                     Some("failed") => {
                         let reason = failed_trace_reason(body.failure_stage, body.failure_reason);
-                        return Ok(IngestResult {
+                        return Ok(PollOutcome::Terminal(IngestResult {
                             status: IngestStatus::Failed { reason },
                             trace_id: Some(trace_id.to_string()),
                             ..Default::default()
-                        });
+                        }));
                     }
                     // Still `received`; keep polling.
                     _ => {}
@@ -395,13 +416,7 @@ pub(crate) async fn poll_trace_terminal(
         }
         if start.elapsed() > ceiling {
             log::error!("poll /trace/{trace_id}: terminal state not reached within ceiling; daemon may have crashed");
-            return Ok(IngestResult {
-                status: IngestStatus::Failed {
-                    reason: "trace did not reach a terminal state within the polling ceiling".to_string(),
-                },
-                trace_id: Some(trace_id.to_string()),
-                ..Default::default()
-            });
+            return Ok(PollOutcome::CeilingReached);
         }
         tokio::time::sleep(interval).await;
     }
