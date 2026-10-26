@@ -134,3 +134,18 @@
 - Mutation partners, each run and each observed FAILING: feature check disabled (`a_daemon_without_the_distill_feature...`); explicit-DIR refusal removed (`a_non_empty_explicit_dir...`); `requested_path` replaced by a plain `PathBuf::from` (climb, absolute and `checked_destination` tests); `CeilingReached` mapped to success (`a_trace_that_never_terminates...`); failure reason dropped (`a_failed_trace_still_writes...`); default-DIR check removed (`a_non_empty_default_dir...`). A mutation that bypassed `checked_destination` entirely left it unused and did not compile (dead-code error), so the path-check mutation was done at `requested_path` instead.
 ### Open questions
 - None.
+
+## Phase 7: docs
+### Design decisions
+- `CLAUDE.md`: one new paragraph in the durable-capture section, ahead of the ingest-queue paragraph: scratch root, `scratch = 1` row, sidecar and output outside the vault, the two GET routes, the readers that exclude scratch rows, the retention knob.
+- `borg/AGENTS.md`: a new invariant 10 (distill is the same pipeline under `Scratch`), naming the route, intake call, readers and sweep. The Phase 5/6 module-map lines (`scratch.rs`, `client/distill.rs`, the stub's `Distill` behavior) were already there and are left as they were.
+- `borg/src/pipeline/AGENTS.md`: a `PublishPolicy` section with the site table as implemented (rows named by the method or function that decides each, e.g. `frames_dest`, `scratch_staging_missing`, `UrlPublish.policy`), the entry-point signature updated to show `policy`, and an anti-pattern line.
+- `sb/AGENTS.md`: the Distill verb inside the `borg.rs` command-module line, with the 0/1/2/3 exit table.
+### Deviations
+- The design doc says to correct "cross-restart dedup checks the ledger" in `borg/AGENTS.md`; that sentence lives in `borg/src/pipeline/AGENTS.md` (invariant 7), so the correction is made there and `borg/AGENTS.md` only gains the distill invariant.
+- The site table describes shipped reality, not the doc's sketch: frames at `root/frames/frames/*.jpg`; the non-URL refusal also closes the receipts row (`intake-rejected`); the persist-failure check is one post-distill existence check; the sidecar is written at the door, not in the pipeline.
+- Design doc: only the `Status:` line changed (Draft to Implemented), as the final-phase duty.
+### Tradeoffs
+- A table in the pipeline AGENTS.md vs. prose: the table is the doc's own form and the per-site Vault/Scratch contrast reads best that way; the cost is one wide table in a file of prose bullets.
+### Open questions
+- None. The earlier-phase items (partial `frames/` on a failed preserve copy; oracle against a pre-v8 receipts DB) remain as recorded in Phases 3-5 for the implementation audit.
