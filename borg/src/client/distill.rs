@@ -141,7 +141,7 @@ async fn finish(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        std::fs::write(&dest, &bytes).with_context(|| format!("write {}", dest.display()))?;
+        write_new(&dest, &bytes)?;
     }
 
     let note = manifest
@@ -171,6 +171,21 @@ fn refuse_non_empty(dir: &Path) -> Result<()> {
         Err(_) if dir.is_file() => eyre::bail!("{} exists and is a file, not a directory", dir.display()),
         Err(e) => Err(e).with_context(|| format!("read {}", dir.display())),
     }
+}
+
+/// Write `bytes` to a file that must not exist yet. The non-empty check runs
+/// minutes before the downloads, so a second distill into the same `DIR` (or
+/// a duplicate manifest entry) would otherwise merge or overwrite; here it is
+/// a download error instead.
+fn write_new(dest: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .with_context(|| format!("create {} (distill never overwrites a file)", dest.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write {}", dest.display()))
 }
 
 /// Refuse a daemon that does not advertise `distill`: an older one would 404

@@ -94,6 +94,7 @@ pub(crate) async fn process_youtube(
     // segment slides, and (when the proposed shape is non-text-only) run
     // the slide-aware Fabric pattern instead of the flat summarizer.
     let mut slide_payload: Option<SlidePayload> = None;
+    let frames_preserve = frames::PreserveReport::default();
     if config.youtube.slides.enabled {
         match try_extract_slides(
             url,
@@ -102,6 +103,7 @@ pub(crate) async fn process_youtube(
             config,
             policy,
             trace_id,
+            &frames_preserve,
         )
         .await
         {
@@ -152,6 +154,7 @@ pub(crate) async fn process_youtube(
         description: metadata.description,
         yt_tags: metadata.tags,
         slide_payload,
+        frames_preserve,
         fell_back,
     })
 }
@@ -208,8 +211,8 @@ pub(crate) async fn fetch_video(url: &str, config: &Config, trace_id: &str) -> R
 ///
 /// All heavy work happens in tempdir under `borg-youtube-frames/<trace_id>/`.
 /// The [`frames::WorkDirGuard`] retires it on every exit, preserving it under
-/// `policy.frames_dest()` first; on success it travels in the result so the
-/// caller can copy slides out of it.
+/// `policy.frames_dest()` first and settling into `frames_preserve`; on
+/// success it travels in the result so the caller can copy slides out of it.
 pub(crate) async fn try_extract_slides(
     url: &str,
     transcript_pairs: &[(f64, String)],
@@ -217,6 +220,7 @@ pub(crate) async fn try_extract_slides(
     config: &Config,
     policy: &PublishPolicy,
     trace_id: &str,
+    frames_preserve: &frames::PreserveReport,
 ) -> Result<
     Option<(
         crate::slides::SlideManifest,
@@ -233,11 +237,7 @@ pub(crate) async fn try_extract_slides(
     let work_dir = std::env::temp_dir().join("borg-youtube-frames").join(trace_id);
     let _ = std::fs::remove_dir_all(&work_dir);
     std::fs::create_dir_all(&work_dir).context("create youtube-frames work dir")?;
-    let preserve_to = policy.frames_dest();
-    // runs.yml exists for the preserved tree only; under `Vault` it would be
-    // OCR work that dies with the work dir.
-    let record_runs = preserve_to.is_some();
-    let guard = frames::WorkDirGuard::new(work_dir.clone(), preserve_to);
+    let guard = frames::WorkDirGuard::new(work_dir.clone(), policy.frames_dest(), frames_preserve.clone());
 
     // 1. Download the video. yt-dlp `-f` picks the best mp4 under 720p so
     //    frames are reasonable and disk usage stays small.
@@ -318,20 +318,22 @@ pub(crate) async fn try_extract_slides(
     //      run that classifies title-card/other and is removed by the keep-filter.
     let content_filter = &config.youtube.slides.content_filter;
     let manifest = if content_filter.enabled {
+        // runs.yml exists for the preserved tree only; under `Vault` it would
+        // be OCR work that dies with the work dir.
         classify_and_filter_slides(
-            &video_id,
+            trace_id,
             url,
             duration_secs,
             &frames,
             transcript_pairs,
             &work_dir,
             config,
-            record_runs,
+            guard.preserving(),
         )
         .await?
     } else {
         slides::segment_with_pairs(
-            &video_id,
+            trace_id,
             url,
             duration_secs,
             &frames,
@@ -343,7 +345,7 @@ pub(crate) async fn try_extract_slides(
     };
     if let Err(e) = slides::write_manifest(&manifest, &work_dir) {
         log::warn!(
-            "[{video_id}] slides manifest write failed in {}: {e:#}",
+            "[{trace_id}] slides manifest write failed in {}: {e:#}",
             work_dir.display()
         );
     }
@@ -382,8 +384,9 @@ pub(crate) async fn try_extract_slides(
 /// Fail-closed: any per-run classification failure drops that run; the note still
 /// publishes its surviving (or text-only) shape.
 ///
-/// With `record_runs` (a preserved `Scratch` work dir) every classified run's
-/// best frame is also OCR'd and recorded in `work_dir/runs.yml`, kept or not.
+/// With `runs_report` (a preserved `Scratch` work dir) every classified run's
+/// best frame is also OCR'd and recorded in `work_dir/runs.yml`, kept or not;
+/// a failed write is recorded there and fails the run once the note is out.
 /// The manifest, and so the note, still comes from the kept runs only.
 #[allow(clippy::too_many_arguments)]
 async fn classify_and_filter_slides(
@@ -394,7 +397,7 @@ async fn classify_and_filter_slides(
     transcript_pairs: &[(f64, String)],
     work_dir: &Path,
     config: &Config,
-    record_runs: bool,
+    runs_report: Option<&frames::PreserveReport>,
 ) -> Result<crate::slides::SlideManifest> {
     use crate::slides;
     use crate::slides::classify;
@@ -441,7 +444,7 @@ async fn classify_and_filter_slides(
         tally.dropped_parse_error,
     );
 
-    if record_runs {
+    if let Some(runs_report) = runs_report {
         let records = frames::run_records(
             &windows,
             &best_frames,
@@ -452,6 +455,7 @@ async fn classify_and_filter_slides(
         );
         if let Err(e) = frames::write_runs(&records, work_dir) {
             log::warn!("[{trace_id}] runs.yml write failed in {}: {e:#}", work_dir.display());
+            runs_report.record_failure(format!("runs.yml write failed: {e:#}"));
         }
     }
 

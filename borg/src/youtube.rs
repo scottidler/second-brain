@@ -496,6 +496,9 @@ pub struct FrameRef {
     pub timestamp_secs: f64,
 }
 
+/// The file name of [`FramesSidecar`], beside the extracted frames dir.
+pub const FRAMES_SIDECAR_FILE: &str = "frames.yml";
+
 /// Sidecar written next to the extracted frames as `frames.yml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -668,8 +671,8 @@ pub async fn extract_frames(
     };
     let sidecar_path = out_dir
         .parent()
-        .map(|p| p.join("frames.yml"))
-        .unwrap_or_else(|| out_dir.join("frames.yml"));
+        .map(|p| p.join(FRAMES_SIDECAR_FILE))
+        .unwrap_or_else(|| out_dir.join(FRAMES_SIDECAR_FILE));
     let sidecar_yaml = serde_yaml::to_string(&sidecar).context("Failed to serialize frames sidecar")?;
     std::fs::write(&sidecar_path, sidecar_yaml)
         .with_context(|| format!("Failed to write frames sidecar: {}", sidecar_path.display()))?;

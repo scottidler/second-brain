@@ -332,10 +332,31 @@ struct FramesRun {
     _data_home: tempfile::TempDir,
 }
 
+/// What a frames run obstructs, to make its preserve fail.
+#[derive(Clone, Copy, PartialEq)]
+enum Obstruct {
+    Nothing,
+    /// A file at `root/frames`, so the preserve copy cannot create its dest.
+    FramesDest,
+    /// A directory at the work dir's `runs.yml`, so `write_runs` fails.
+    RunsFile,
+}
+
 /// One `process_content` run of [`stub::URL`] with slides and the content
 /// filter on, every run classified as `category`, and `fabric` as the fabric
 /// binary (`None`: one that does not exist). `scratch` picks the policy.
 async fn run_frames(trace: &str, scratch: bool, category: &str, fabric: Option<fn(&Path) -> PathBuf>) -> FramesRun {
+    run_frames_obstructed(trace, scratch, category, fabric, Obstruct::Nothing).await
+}
+
+/// [`run_frames`] with one part of the preserve obstructed.
+async fn run_frames_obstructed(
+    trace: &str,
+    scratch: bool,
+    category: &str,
+    fabric: Option<fn(&Path) -> PathBuf>,
+    obstruct: Obstruct,
+) -> FramesRun {
     let _xdg = crate::harvest::TEST_XDG_LOCK.lock().await;
     permits::GENERAL_PERMITS.init(4);
     permits::HEAVY_PERMITS.init(4);
@@ -357,6 +378,24 @@ async fn run_frames(trace: &str, scratch: bool, category: &str, fabric: Option<f
         config.fabric.binary = fabric(data_home.path()).to_string_lossy().to_string();
     }
     let root = data_home.path().join("distill").join(trace);
+    if obstruct == Obstruct::FramesDest {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("frames"), b"in the way").unwrap();
+    }
+    let yt_dlp = stub::yt_dlp(data_home.path());
+    let yt_dlp: spawn::Stub = if obstruct == Obstruct::RunsFile {
+        // The mp4 download is the first write into the work dir after it is
+        // made, so the obstruction lands before `write_runs` runs.
+        std::sync::Arc::new(move |argv: &[String]| {
+            let out = yt_dlp(argv)?;
+            if let Some(o) = argv.iter().position(|a| a == "-o").and_then(|i| argv.get(i + 1)) {
+                std::fs::create_dir_all(Path::new(o).with_file_name(crate::pipeline::frames::RUNS_FILE))?;
+            }
+            Ok(out)
+        })
+    } else {
+        yt_dlp
+    };
     let policy = if scratch {
         PublishPolicy::Scratch { root: root.clone() }
     } else {
@@ -382,7 +421,7 @@ async fn run_frames(trace: &str, scratch: bool, category: &str, fabric: Option<f
     }
 
     let (result, _spawns) = spawn::scope(
-        stub::yt_dlp(data_home.path()),
+        yt_dlp,
         api::scope(
             bases,
             crate::ocr::bases::scope(
@@ -449,8 +488,16 @@ fn assert_frames_preserved(run: &FramesRun) {
             .expect("frames.yml parses");
     assert!(sidecar.frames_extracted > 0, "the stub mp4 yielded frames");
     for frame in &sidecar.frames {
-        let name = frame.path.file_name().expect("frame file name");
-        assert!(preserved.join("frames").join(name).is_file(), "{name:?} preserved");
+        assert!(
+            frame.path.is_relative(),
+            "frames.yml points into the preserved dir, not /tmp: {}",
+            frame.path.display()
+        );
+        assert!(
+            preserved.join(&frame.path).is_file(),
+            "{} resolves",
+            frame.path.display()
+        );
     }
     let jpgs = files_under(&preserved.join("frames"))
         .into_iter()
@@ -499,6 +546,12 @@ async fn distill_policy_keeps_frames_on_text_only() {
     );
     assert_frames_preserved(&scratch);
     assert_runs_recorded(&scratch);
+    // The tally line and the manifest take one `trace_id`; it must be the
+    // run's trace, not the video id, so `tally[<trace>]` matches runs.yml.
+    let manifest: crate::slides::SlideManifest =
+        serde_yaml::from_str(&std::fs::read_to_string(scratch.root.join("frames/slides.yml")).expect("slides.yml"))
+            .expect("slides.yml parses");
+    assert_eq!(manifest.trace_id, "20261025-120000-ytfrtx");
     let slides = files_under(&scratch.root.join("frames/slides"));
     assert!(slides.is_empty(), "no run kept, so none materialized: {slides:?}");
 
@@ -567,4 +620,44 @@ async fn distill_policy_keeps_frames_on_slide_note() {
         !embedded.is_empty(),
         "publish_slides copied the embedded slide under root"
     );
+}
+
+/// A failed preserve copy on the slide-note path (retired in
+/// `process_url_inner`) fails the run `publish-failed`; the note is still the
+/// slide note, and the /tmp work dir is still removed.
+#[tokio::test]
+async fn distill_policy_fails_on_a_failed_frames_preserve() {
+    let run = run_frames_obstructed(
+        "20261025-120000-ytfrpf",
+        true,
+        "architecture-diagram",
+        Some(stub::slides_fabric),
+        Obstruct::FramesDest,
+    )
+    .await;
+    let IngestStatus::Failed { reason } = &run.result.status else {
+        panic!("a failed preserve must fail the run: {:?}", run.result.status);
+    };
+    assert!(reason.starts_with("frames preserve failed:"), "{reason}");
+    assert_eq!(run.result.failure_stage, Some(FailureStage::PublishFailed));
+    let note = run.result.note_path.as_deref().expect("the note was written");
+    assert!(Path::new(note).is_file(), "{note}");
+    assert!(
+        !files_under(&run.root.join("system/attachments")).is_empty(),
+        "the slide path did not fail: the note still embeds its slide"
+    );
+    assert!(!run.work_dir.exists(), "the /tmp work dir is still removed");
+}
+
+/// A failed `runs.yml` write on the text-only path (the guard drops in the
+/// handler) fails the run the same way.
+#[tokio::test]
+async fn distill_policy_fails_on_a_failed_runs_write() {
+    let run = run_frames_obstructed("20261025-120000-ytfrrf", true, "talking-head", None, Obstruct::RunsFile).await;
+    let IngestStatus::Failed { reason } = &run.result.status else {
+        panic!("a failed runs.yml write must fail the run: {:?}", run.result.status);
+    };
+    assert!(reason.contains("runs.yml write failed"), "{reason}");
+    assert_eq!(run.result.failure_stage, Some(FailureStage::PublishFailed));
+    assert!(!run.work_dir.exists(), "the /tmp work dir is still removed");
 }

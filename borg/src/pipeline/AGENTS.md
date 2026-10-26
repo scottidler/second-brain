@@ -56,10 +56,11 @@ Each type handler (`process_url`, `process_image`, `process_audio`, `process_doc
 | `figures::store` rollback | rkvr on failure | skipped; partial output stays for debugging |
 | frames work dir (`frames_dest`; `frames::WorkDirGuard`) | removed | copied to `root/frames/` (source video skipped), then removed, on every exit |
 | `runs.yml` (`frames::run_records`) | not written | every classified run's best frame OCR'd, in `root/frames/runs.yml` |
+| failed preserve copy, `frames.yml` rewrite or `runs.yml` write (`frames::PreserveReport`, read at the end of `process_url_inner`) | nothing to preserve | `Failed`, `publish-failed`, after the note is written; the note is unchanged and /tmp is still cleaned |
 | receipts / sidecar | `scratch = 0`, `<vault>/system/intake/` | `scratch = 1`, `root/system/intake/` (written at the door, not here) |
 
-- The frames tree keeps the work dir's own shape: frames are at `root/frames/frames/frame_NNNN.jpg`, beside `frames.yml`, `slides.yml`, `slides/` and `runs.yml`.
-- The guard rides in `SlidePayload`, so its drop preserves and removes the work dir on every early return; a failed preserve copy is a WARN, not a failed run.
+- The frames tree keeps the work dir's own shape: frames are at `root/frames/frames/frame_NNNN.jpg`, beside `frames.yml`, `slides.yml`, `slides/` and `runs.yml`. The preserved `frames.yml` is rewritten so its frame paths are relative to `root/frames/`, as `runs.yml`'s are; the work dir's own copy keeps the absolute paths `extract_frames` wrote.
+- The guard rides in `SlidePayload`, so its drop preserves and removes the work dir on every early return. A preserving guard counts itself live in the run's `PreserveReport` and settles there on drop; the report is the only way a preserve failure leaves `Drop`, and a live or failed report fails the run.
 - Per-run temp paths are keyed by trace (`borg-youtube-frames/<trace_id>`, a `tempfile` dir per whisper call) so a distill and an ingest of one video can run together.
 - `Config` is `Clone` only for the one effective-config clone per scratch run.
 

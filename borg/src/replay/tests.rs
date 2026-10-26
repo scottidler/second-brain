@@ -469,3 +469,17 @@ async fn replay_one_refuses_a_scratch_trace_and_posts_nothing() {
     })
     .await;
 }
+
+/// A host with no receipts DB (a laptop that only POSTs to the daemon) has no
+/// scratch trace: the check passes without creating an empty DB there.
+#[tokio::test]
+async fn refuse_scratch_creates_no_receipts_db_on_a_host_without_one() {
+    let home = TempDir::new().unwrap();
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let path = vault::receipts::receipts_db_path().unwrap();
+        assert!(!path.exists(), "precondition: {}", path.display());
+        refuse_scratch("cl-doesnotexist").expect("no DB, no scratch trace");
+        assert!(!path.exists(), "the check created {}", path.display());
+    })
+    .await;
+}

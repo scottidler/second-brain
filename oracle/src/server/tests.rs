@@ -1340,6 +1340,8 @@ fn failure_history_excludes_scratch_rows() {
            status TEXT, terminal_at TEXT, note_path TEXT, failure_stage TEXT,
            failure_reason TEXT, replay_of TEXT, scratch INTEGER NOT NULL DEFAULT 0
          );
+         CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+         INSERT INTO schema_version VALUES (8, '2026-10-25T00:00:00Z');
          INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status, failure_stage, scratch)
            VALUES ('tr-ingest', '2026-10-25T00:00:00Z', 'cli', 'url', 'u', 'failed', 'fetch-failed', 0),
                   ('tr-scratch', '2026-10-25T00:01:00Z', 'cli', 'url', 'u', 'failed', 'fetch-failed', 1);",
@@ -1357,4 +1359,55 @@ fn failure_history_excludes_scratch_rows() {
     let text = serde_json::to_string(&result).unwrap();
     assert!(text.contains("tr-ingest"), "{text}");
     assert!(!text.contains("tr-scratch"), "{text}");
+}
+
+fn no_filters() -> crate::tools::FailureHistoryRequest {
+    crate::tools::FailureHistoryRequest {
+        stage: None,
+        method: None,
+        source: None,
+        since: None,
+        limit: None,
+    }
+}
+
+/// A receipts DB no borg command has migrated past v7 (a client host's local
+/// DB, which the daemon restart on another host never touches) is a named
+/// error: the path, its version, the version needed, and what migrates it.
+#[test]
+fn failure_history_names_a_pre_v8_receipts_db_and_its_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipts.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE receipts (trace_id TEXT, received_at TEXT, method TEXT, kind TEXT, raw_input TEXT,
+           status TEXT, terminal_at TEXT, note_path TEXT, failure_stage TEXT, failure_reason TEXT, replay_of TEXT);
+         CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+         INSERT INTO schema_version VALUES (5, 'a'), (7, 'b');
+         INSERT INTO receipts (trace_id, received_at, method, kind, raw_input, status)
+           VALUES ('tr-old', '2026-10-10T00:00:00Z', 'cli', 'url', 'u', 'failed');",
+    )
+    .unwrap();
+    drop(conn);
+    let err = OracleMcpServer::failure_history_at(&path, &no_filters()).expect_err("a v7 DB must be refused");
+    let msg = err.message.to_string();
+    assert!(msg.contains(&path.display().to_string()), "{msg}");
+    assert!(msg.contains("schema v7") && msg.contains("needs v8"), "{msg}");
+    assert!(msg.contains("migrates it"), "{msg}");
+}
+
+/// A DB with no `schema_version` table cannot be vouched for either.
+#[test]
+fn failure_history_refuses_a_receipts_db_with_no_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipts.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE receipts (trace_id TEXT);").unwrap();
+    drop(conn);
+    let err = OracleMcpServer::failure_history_at(&path, &no_filters()).expect_err("must refuse");
+    let msg = err.message.to_string();
+    assert!(
+        msg.contains("no readable schema version") && msg.contains("needs v8"),
+        "{msg}"
+    );
 }

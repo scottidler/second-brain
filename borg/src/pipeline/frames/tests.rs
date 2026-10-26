@@ -10,18 +10,43 @@ fn work_dir(root: &Path) -> PathBuf {
     std::fs::write(dir.join("vid.f140.m4a"), b"audio").expect("m4a");
     std::fs::write(dir.join("frames/frame_0001.jpg"), b"f1").expect("f1");
     std::fs::write(dir.join("frames/frame_0002.jpg"), b"f2").expect("f2");
-    std::fs::write(dir.join("frames.yml"), b"frames: []").expect("frames.yml");
+    std::fs::write(dir.join("frames.yml"), sidecar_yaml(&dir)).expect("frames.yml");
     std::fs::write(dir.join("slides.yml"), b"slides: []").expect("slides.yml");
     std::fs::write(dir.join("slides/slide-001.jpg"), b"s1").expect("slide");
     dir
+}
+
+/// A `frames.yml` as `extract_frames` writes it: absolute paths into `dir`.
+fn sidecar_yaml(dir: &Path) -> String {
+    let frames = (1..=2)
+        .map(|index| crate::youtube::FrameRef {
+            index,
+            path: dir.join(format!("frames/frame_{index:04}.jpg")),
+            timestamp_secs: f64::from(index - 1),
+        })
+        .collect();
+    serde_yaml::to_string(&crate::youtube::FramesSidecar {
+        video_duration_secs: 2.0,
+        frame_budget: 2,
+        effective_fps: 1.0,
+        frames_extracted: 2,
+        frames,
+    })
+    .expect("sidecar yaml")
+}
+
+fn preserved_sidecar(dest: &Path) -> crate::youtube::FramesSidecar {
+    serde_yaml::from_str(&std::fs::read_to_string(dest.join("frames.yml")).expect("read")).expect("parse")
 }
 
 #[test]
 fn a_guard_with_no_destination_removes_the_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = work_dir(tmp.path());
-    drop(WorkDirGuard::new(dir.clone(), None));
+    let report = PreserveReport::default();
+    drop(WorkDirGuard::new(dir.clone(), None, report.clone()));
     assert!(!dir.exists());
+    assert_eq!(report.failure(), None, "a guard that preserves nothing never reports");
 }
 
 #[test]
@@ -31,9 +56,11 @@ fn a_guard_with_a_destination_copies_everything_but_the_video_then_removes() {
     std::os::unix::fs::symlink(dir.join("slides.yml"), dir.join("link.yml")).expect("symlink");
     let dest = tmp.path().join("scratch/frames");
 
-    drop(WorkDirGuard::new(dir.clone(), Some(dest.clone())));
+    let report = PreserveReport::default();
+    drop(WorkDirGuard::new(dir.clone(), Some(dest.clone()), report.clone()));
 
     assert!(!dir.exists(), "the work dir is removed after the copy");
+    assert_eq!(report.failure(), None, "a clean preserve reports nothing");
     for kept in [
         "frames/frame_0001.jpg",
         "frames/frame_0002.jpg",
@@ -54,19 +81,113 @@ fn retire_preserves_exactly_as_drop_does() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = work_dir(tmp.path());
     let dest = tmp.path().join("frames");
-    let guard = WorkDirGuard::new(dir.clone(), Some(dest.clone()));
+    let report = PreserveReport::default();
+    let guard = WorkDirGuard::new(dir.clone(), Some(dest.clone()), report.clone());
     assert_eq!(guard.path(), dir.as_path());
+    let live = report
+        .failure()
+        .expect("a live preserving guard is not a clean preserve");
+    assert!(live.contains("never retired"), "{live}");
     guard.retire();
     assert!(!dir.exists());
     assert!(dest.join("frames/frame_0001.jpg").is_file());
+    assert_eq!(report.failure(), None, "retired cleanly");
 }
 
 #[test]
 fn a_missing_work_dir_preserves_nothing_and_does_not_panic() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dest = tmp.path().join("frames");
-    drop(WorkDirGuard::new(tmp.path().join("never-made"), Some(dest.clone())));
+    let report = PreserveReport::default();
+    drop(WorkDirGuard::new(
+        tmp.path().join("never-made"),
+        Some(dest.clone()),
+        report.clone(),
+    ));
     assert!(!dest.exists());
+    assert_eq!(report.failure(), None);
+}
+
+/// The preserved `frames.yml` names each frame relative to the preserved dir,
+/// so it resolves after the /tmp work dir is gone.
+#[test]
+fn the_preserved_frames_yml_points_inside_the_preserved_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = work_dir(tmp.path());
+    let dest = tmp.path().join("scratch/frames");
+    drop(WorkDirGuard::new(
+        dir.clone(),
+        Some(dest.clone()),
+        PreserveReport::default(),
+    ));
+
+    let sidecar = preserved_sidecar(&dest);
+    assert_eq!(sidecar.frames.len(), 2);
+    for frame in &sidecar.frames {
+        assert!(frame.path.is_relative(), "{}", frame.path.display());
+        assert!(dest.join(&frame.path).is_file(), "{} resolves", frame.path.display());
+    }
+    assert_eq!(sidecar.frames[0].path, PathBuf::from("frames/frame_0001.jpg"));
+}
+
+/// A frame recorded outside the work dir cannot be made to resolve: the
+/// preserve fails rather than leave a dangling path.
+#[test]
+fn a_frame_outside_the_work_dir_fails_the_preserve() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = work_dir(tmp.path());
+    std::fs::write(dir.join("frames.yml"), sidecar_yaml(Path::new("/elsewhere"))).expect("frames.yml");
+    let report = PreserveReport::default();
+    drop(WorkDirGuard::new(
+        dir.clone(),
+        Some(tmp.path().join("frames")),
+        report.clone(),
+    ));
+    let failure = report.failure().expect("must fail");
+    assert!(failure.contains("outside the work dir"), "{failure}");
+    assert!(!dir.exists(), "the work dir is still removed");
+}
+
+/// A failed copy is recorded for the pipeline to fail the run on, and the
+/// /tmp work dir is still removed.
+#[test]
+fn a_failed_copy_is_reported_and_the_work_dir_is_still_removed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = work_dir(tmp.path());
+    let dest = tmp.path().join("frames");
+    std::fs::write(&dest, b"a file where the frames dir goes").expect("obstruct");
+    let report = PreserveReport::default();
+
+    drop(WorkDirGuard::new(dir.clone(), Some(dest.clone()), report.clone()));
+
+    let failure = report.failure().expect("a failed copy must be reported");
+    assert!(failure.starts_with("frames preserve failed:"), "{failure}");
+    assert!(failure.contains(&dest.display().to_string()), "{failure}");
+    assert!(!dir.exists(), "the work dir is removed regardless");
+}
+
+/// A failure recorded outside the guard (the `runs.yml` write) fails it too.
+#[test]
+fn a_recorded_runs_failure_is_reported() {
+    let report = PreserveReport::default();
+    report.record_failure("runs.yml write failed: disk full".to_string());
+    let failure = report.failure().expect("recorded");
+    assert!(failure.contains("runs.yml write failed: disk full"), "{failure}");
+}
+
+/// Only a preserving guard hands out its report, so `runs.yml` is written
+/// exactly when the work dir will be kept.
+#[test]
+fn only_a_preserving_guard_hands_out_its_report() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let kept = WorkDirGuard::new(
+        tmp.path().join("a"),
+        Some(tmp.path().join("b")),
+        PreserveReport::default(),
+    );
+    assert!(kept.preserving().is_some());
+    let removed = WorkDirGuard::new(tmp.path().join("c"), None, PreserveReport::default());
+    assert!(removed.preserving().is_none());
 }
 
 fn ocr_words(path: &Path, _: u64) -> Result<String> {

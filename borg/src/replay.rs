@@ -463,8 +463,20 @@ async fn replay_trace_top(
 /// counts (1/0, 0/1, or 0/0 for dry-run/queued).
 /// A scratch (`sb borg distill`) trace published no note; replaying it would
 /// re-POST its URL to `/ingest` and publish one. Refuse before any daemon call.
+/// A host with no receipts DB has no scratch trace, so the check is skipped
+/// rather than creating an empty DB there.
 fn refuse_scratch(trace_id: &str) -> Result<()> {
-    let conn = crate::receipts::open_default().context("open receipts DB to check for a scratch trace")?;
+    #[cfg(test)]
+    crate::receipts::sandbox::assert_active("replay::refuse_scratch");
+    let path = vault::receipts::receipts_db_path()?;
+    let exists = path
+        .try_exists()
+        .with_context(|| format!("check for the receipts DB at {}", path.display()))?;
+    log::debug!("refuse_scratch: trace={trace_id} db={} exists={exists}", path.display());
+    if !exists {
+        return Ok(());
+    }
+    let conn = crate::receipts::open_at(&path).context("open receipts DB to check for a scratch trace")?;
     if crate::receipts::get(&conn, trace_id)?.is_some_and(|r| r.scratch) {
         bail!("replay: trace {trace_id} is a scratch distill run; it has no note to replay (re-run `sb borg distill`)");
     }

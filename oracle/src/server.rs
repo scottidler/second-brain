@@ -30,6 +30,9 @@ const FIND_SIMILAR_OVERFETCH: usize = 5;
 /// tokenizer truncates to 512 tokens anyway; this bounds memory before that.
 const RERANK_TEXT_MAX_CHARS: usize = 2000;
 
+/// The receipts schema that added `scratch`, which `failure_history` filters on.
+const FAILURE_HISTORY_MIN_SCHEMA: i64 = 8;
+
 /// Oracle MCP server - knowledge retrieval from an Obsidian vault
 #[derive(Clone)]
 pub struct OracleMcpServer {
@@ -622,6 +625,33 @@ impl OracleMcpServer {
         Self::failure_history_at(&path, &params.0)
     }
 
+    /// Refuse a receipts DB older than [`FAILURE_HISTORY_MIN_SCHEMA`]: its rows
+    /// have no `scratch` flag, so the query cannot tell a distill from an
+    /// ingest. Oracle opens the DB read-only and never migrates it; the error
+    /// says which DB, its version, and what migrates it.
+    fn require_receipts_schema(conn: &rusqlite::Connection, path: &std::path::Path) -> Result<(), McpError> {
+        let version: Option<i64> = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| row.get(0))
+            .map_err(|e| {
+                Self::err(eyre::eyre!(
+                    "receipts DB at {} has no readable schema version ({e}); failure_history needs v{FAILURE_HISTORY_MIN_SCHEMA}",
+                    path.display()
+                ))
+            })?;
+        let version = version.unwrap_or(0);
+        debug!(path = %path.display(), version, "failure_history: receipts schema version");
+        if version < FAILURE_HISTORY_MIN_SCHEMA {
+            return Err(Self::err(eyre::eyre!(
+                "receipts DB at {} is schema v{version}; failure_history needs v{FAILURE_HISTORY_MIN_SCHEMA}. \
+                 Oracle reads it read-only and never migrates it: any borg command that opens the receipts DB \
+                 on this host (`sb borg log`, `sb doctor`) migrates it, as does a borg daemon restart on a host \
+                 that runs the daemon",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Path-injectable core of [`Self::failure_history`]. Scratch rows (a
     /// `sb borg distill` run publishes no note) are not ingest failures and
     /// never appear here.
@@ -641,6 +671,7 @@ impl OracleMcpServer {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(|e| Self::err(eyre::eyre!("open receipts DB: {e}")))?;
+        Self::require_receipts_schema(&conn, path)?;
 
         let mut sql = String::from(
             "SELECT trace_id, received_at, method, kind, raw_input, status, \

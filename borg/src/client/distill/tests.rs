@@ -295,3 +295,40 @@ async fn an_unreachable_daemon_is_an_error_naming_the_daemon() {
     .expect_err("unreachable");
     assert!(format!("{err:#}").contains("127.0.0.1"), "{err:#}");
 }
+
+/// A file already at a download's destination is a download error, never an
+/// overwrite: here a manifest that lists one file twice, the same collision a
+/// second distill into the same `DIR` would hit after both passed the
+/// non-empty check.
+#[tokio::test]
+async fn a_file_already_in_dir_is_a_download_error_never_an_overwrite() {
+    let tree = tempfile::tempdir().expect("tree");
+    std::fs::write(tree.path().join("one.txt"), b"1").expect("write");
+    let (port, _) = serve(stub_for(tree.path(), "succeeded", &["distill"], &["one.txt"])).await;
+    let out = tempfile::tempdir().expect("out");
+    let dir = out.path().join("run");
+
+    let err = distill_within(
+        &config_for(port),
+        "https://example.com/a",
+        Some(dir.clone()),
+        CEILING,
+        FAST,
+    )
+    .await
+    .expect_err("a second write to one path must fail");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("never overwrites") && msg.contains(TRACE), "{msg}");
+    assert_eq!(std::fs::read(dir.join("one.txt")).expect("first write kept"), b"1");
+}
+
+#[test]
+fn write_new_refuses_an_existing_file_and_keeps_its_bytes() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let path = tmp.path().join("a");
+    write_new(&path, b"first").expect("a new file");
+    let err = write_new(&path, b"second").expect_err("exists");
+    assert!(format!("{err:#}").contains("never overwrites"), "{err:#}");
+    assert_eq!(std::fs::read(&path).expect("read"), b"first");
+}

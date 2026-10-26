@@ -68,6 +68,8 @@ pub(crate) struct YouTubeResult {
     /// successfully and produced a non-text-only shape. Stage 3 publish
     /// happens in `process_url_inner` so the slug is known.
     slide_payload: Option<SlidePayload>,
+    /// The frames work dir's preserve outcome; empty unless `Scratch` preserved one.
+    frames_preserve: frames::PreserveReport,
     /// The `youtube.fallback` engine produced the fetch: the primary engine
     /// errored, so the receipt is degraded.
     fell_back: bool,
@@ -856,6 +858,7 @@ async fn process_url_inner(
     // for URL kinds; image/audio/text/vocab paths still flow through the
     // older `summary: String` field unchanged.
     let mut slide_payload: Option<SlidePayload> = None;
+    let mut frames_preserve = frames::PreserveReport::default();
     // The source text the archive needs beside `distilled.yml` for the kinds
     // whose `Distilled.transcript` does not carry it: the repo README and the
     // thread markdown. Video and article leave it `None`.
@@ -869,6 +872,7 @@ async fn process_url_inner(
     let (title, scraped_title, distilled, content_type, raw_description, yt_tags) = if url_match.is_youtube_type() {
         let yt_result = process_youtube(&url_match.url, config, policy, trace_id, capture_note).await?;
         slide_payload = yt_result.slide_payload;
+        frames_preserve = yt_result.frames_preserve;
         fetch_degraded = yt_result.fell_back;
         let yt_title = yt_result.title;
         (
@@ -1351,6 +1355,21 @@ async fn process_url_inner(
                 trace_id: Some(trace_id.to_string()),
             },
         )?;
+    }
+
+    // Every frames guard is retired by now. A scratch run's frames tree is its
+    // output, so a failed preserve fails the run; the note is already written.
+    if let Some(reason) = frames_preserve.failure() {
+        log::warn!("[{trace_id}] {reason}");
+        return Ok(IngestResult {
+            status: IngestStatus::Failed { reason },
+            note_path: Some(note_path.to_string_lossy().to_string()),
+            method: Some(method),
+            canonical_url: Some(canonical),
+            trace_id: Some(trace_id.to_string()),
+            failure_stage: Some(FailureStage::PublishFailed),
+            ..Default::default()
+        });
     }
 
     // Inflight guard releases automatically when `inflight_guard` goes out
