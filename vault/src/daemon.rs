@@ -19,6 +19,11 @@ pub mod client;
 /// `hotkey.request-timeout` is not configured.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Per-file ceiling for a `sb borg distill` download when
+/// `hotkey.download-timeout` is not configured. Longer than the request
+/// timeout because a frames tree crosses Tailscale.
+pub const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Where first-party clients reach the borg daemon (`hotkey.host` /
 /// `hotkey.port` in `borg.yml`; live: `desk.lan:8181`). The `hotkey` name
 /// predates its use as the general client-side daemon address.
@@ -35,10 +40,22 @@ pub struct HotkeyConfig {
         serialize_with = "serialize_humantime"
     )]
     pub request_timeout: Duration,
+    /// Ceiling on one `sb borg distill` file download, in place of
+    /// `request-timeout` for that request. Humantime in `borg.yml`
+    /// (`hotkey.download-timeout: 300s`).
+    #[serde(
+        deserialize_with = "deserialize_download_timeout",
+        serialize_with = "serialize_humantime"
+    )]
+    pub download_timeout: Duration,
 }
 
 fn deserialize_request_timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     deserialize_humantime(deserializer, "request-timeout")
+}
+
+fn deserialize_download_timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    deserialize_humantime(deserializer, "download-timeout")
 }
 
 impl Default for HotkeyConfig {
@@ -48,6 +65,7 @@ impl Default for HotkeyConfig {
             port: 8181,
             key: "<Ctrl><Shift>b".to_string(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            download_timeout: DEFAULT_DOWNLOAD_TIMEOUT,
         }
     }
 }

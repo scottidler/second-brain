@@ -63,3 +63,22 @@ fn a_bad_request_timeout_is_a_loud_error_naming_the_key() {
     let msg = err.to_string();
     assert!(msg.contains("request-timeout") && msg.contains("soon"), "{msg}");
 }
+
+#[test]
+fn download_timeout_defaults_to_five_minutes_and_reads_humantime() {
+    assert_eq!(
+        HotkeyConfig::default().download_timeout,
+        std::time::Duration::from_secs(300)
+    );
+    let parsed: HotkeyConfig = serde_yaml::from_str("host: desk.lan\n").expect("parse");
+    assert_eq!(parsed.download_timeout, std::time::Duration::from_secs(300));
+    let parsed: HotkeyConfig = serde_yaml::from_str("download-timeout: 2m\n").expect("parse");
+    assert_eq!(parsed.download_timeout, std::time::Duration::from_secs(120));
+}
+
+#[test]
+fn a_bad_download_timeout_is_a_loud_error_naming_the_key() {
+    let err = serde_yaml::from_str::<HotkeyConfig>("download-timeout: later\n").expect_err("must reject");
+    let msg = err.to_string();
+    assert!(msg.contains("download-timeout") && msg.contains("later"), "{msg}");
+}

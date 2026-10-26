@@ -103,6 +103,20 @@ pub enum Command {
         #[arg(long, value_enum, ignore_case = true)]
         format: Option<crate::cli::output::Format>,
     },
+    /// Run the ingest pipeline on the daemon and download everything it
+    /// produces (note, staged files, frames, OCR, figures) into a directory.
+    /// Writes nothing to the vault or the ledger. Exit 0: every file written.
+    /// 1: no daemon, no `distill` feature, a non-empty --output, a download
+    /// error, or the poll ceiling (stderr names the trace id). 3: the run
+    /// failed; its partial files were still written
+    Distill {
+        /// The URL to distill
+        url: String,
+        /// Directory to write into; must be absent or empty
+        /// (default: ./<trace-id>/)
+        #[arg(long, value_name = "DIR")]
+        output: Option<std::path::PathBuf>,
+    },
     /// Reingest existing entries through the current pipeline
     Reingest {
         /// Reingest every ledger entry rather than a filtered subset

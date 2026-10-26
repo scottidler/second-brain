@@ -24,6 +24,23 @@ pub(crate) enum Behavior {
     /// An ntfy subscription: chunked headers, an `open` event, then a
     /// `keepalive` event every `every`, for 30 s.
     NtfyKeepalives { every: Duration },
+    /// A daemon with the distill routes: `/health`, `POST /distill`,
+    /// `GET /trace/{id}`, `GET /distill/{id}` and `GET /distill/{id}/file/..`.
+    Distill(DistillStub),
+}
+
+/// What the distill stub reports and serves.
+#[derive(Clone)]
+pub(crate) struct DistillStub {
+    /// `/health` `features`.
+    pub features: Vec<String>,
+    pub trace_id: String,
+    /// `received`, `succeeded` or `failed`: what `/trace` and the manifest say.
+    pub state: &'static str,
+    /// The scratch tree the manifest lists and the file route serves.
+    pub tree: std::path::PathBuf,
+    /// Manifest entries with no file behind them (a hostile path, say).
+    pub extra_manifest_paths: Vec<String>,
 }
 
 /// Starts the stub; returns its port and the raw text of every request seen.
@@ -58,28 +75,31 @@ pub(crate) async fn serve(behavior: Behavior) -> (u16, Arc<Mutex<Vec<String>>>) 
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         return;
                     }
-                    Behavior::Json(body) => json_reply("200 OK", body),
+                    Behavior::Json(body) => json_reply("200 OK", body).into_bytes(),
                     Behavior::RequireToken { token, body } => {
                         if request
                             .to_lowercase()
                             .contains(&format!("authorization: bearer {}", token.to_lowercase()))
                         {
-                            json_reply("200 OK", body)
+                            json_reply("200 OK", body).into_bytes()
                         } else {
                             "HTTP/1.1 401 Unauthorized\r\ncontent-length: 13\r\nconnection: close\r\n\r\nunauthorized\n"
-                                .to_string()
+                                .as_bytes()
+                                .to_vec()
                         }
                     }
                     Behavior::NtfyKeepalives { every } => {
                         stream_ntfy_keepalives(&mut sock, *every).await;
                         return;
                     }
+                    Behavior::Distill(stub) => distill_reply(stub, &request),
                     Behavior::Unauthorized => {
                         "HTTP/1.1 401 Unauthorized\r\ncontent-length: 13\r\nconnection: close\r\n\r\nunauthorized\n"
-                            .to_string()
+                            .as_bytes()
+                            .to_vec()
                     }
                 };
-                let _ = sock.write_all(reply.as_bytes()).await;
+                let _ = sock.write_all(&reply).await;
             });
         }
     });
@@ -110,4 +130,70 @@ fn json_reply(status: &str, body: &str) -> String {
         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+fn bytes_reply(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut reply = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    reply.extend_from_slice(body);
+    reply
+}
+
+fn distill_reply(stub: &DistillStub, request: &str) -> Vec<u8> {
+    let line = request.lines().next().unwrap_or_default();
+    let mut parts = line.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    let not_found = || {
+        bytes_reply(
+            "404 Not Found",
+            "application/json",
+            br#"{"error":"stub: no such route"}"#,
+        )
+    };
+    let json = |value: serde_json::Value| json_reply("200 OK", &value.to_string()).into_bytes();
+    let trace = &stub.trace_id;
+    match (method, path) {
+        ("GET", "/health") => json(serde_json::json!({
+            "status": "ok", "service": "stub", "version": "v0.0.0", "features": stub.features,
+        })),
+        ("POST", "/distill") => json(serde_json::json!({
+            "status": "Queued", "note_path": null, "title": null, "tags": [], "trace_id": trace,
+        })),
+        ("GET", p) if p == format!("/trace/{trace}") => json(serde_json::json!({
+            "found": true, "trace_id": trace, "status": stub.state,
+            "failure_stage": (stub.state == "failed").then_some("publish-failed"),
+            "failure_reason": (stub.state == "failed").then_some("stub failure"),
+            "note_path": null, "source-durable": false,
+        })),
+        ("GET", p) if p == format!("/distill/{trace}") => {
+            let mut files: Vec<serde_json::Value> = crate::scratch::regular_files(&stub.tree)
+                .expect("stub tree walk")
+                .into_iter()
+                .map(|(_, f)| serde_json::json!({"path": f.path, "size": f.size}))
+                .collect();
+            files.extend(
+                stub.extra_manifest_paths
+                    .iter()
+                    .map(|p| serde_json::json!({"path": p, "size": 1})),
+            );
+            json(serde_json::json!({
+                "trace-id": trace, "status": stub.state,
+                "failure-stage": (stub.state == "failed").then_some("publish-failed"),
+                "failure-reason": (stub.state == "failed").then_some("stub failure"),
+                "files": files,
+            }))
+        }
+        ("GET", p) if p.starts_with(&format!("/distill/{trace}/file/")) => {
+            let raw = &p[format!("/distill/{trace}/file/").len()..];
+            let decoded = urlencoding::decode(raw).map(|c| c.into_owned()).unwrap_or_default();
+            match std::fs::read(stub.tree.join(&decoded)) {
+                Ok(bytes) => bytes_reply("200 OK", "application/octet-stream", &bytes),
+                Err(_) => not_found(),
+            }
+        }
+        _ => not_found(),
+    }
 }

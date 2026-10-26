@@ -4,6 +4,8 @@
 
 use eyre::{Context, Result};
 
+pub mod distill;
+
 use crate::config::{self, Config};
 use crate::{assets, intake, ledger, notify, pipeline, replay, trace, types};
 

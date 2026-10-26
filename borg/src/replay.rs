@@ -377,9 +377,28 @@ pub(crate) fn failed_trace_reason(stage: Option<String>, reason: Option<String>)
 /// state, or the polling ceiling (`hard_timeout + POLL_GRACE_SECS`) elapses.
 /// Shared by replay (`reingest_via_daemon`) and `crate::reingest`.
 pub(crate) async fn poll_trace_terminal(config: &Config, daemon: &DaemonClient, trace_id: &str) -> Result<PollOutcome> {
+    poll_trace_terminal_within(daemon, trace_id, polling_ceiling(config), poll_interval()).await
+}
+
+/// The default ceiling: the pipeline's hard timeout plus [`POLL_GRACE_SECS`].
+pub(crate) fn polling_ceiling(config: &Config) -> std::time::Duration {
+    std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS)
+}
+
+/// The default gap between `/trace/{id}` polls.
+pub(crate) fn poll_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(POLL_INTERVAL_SECS)
+}
+
+/// [`poll_trace_terminal`] with the ceiling and interval named, so a caller
+/// (and a test) can bound the wait without the pipeline's hard timeout.
+pub(crate) async fn poll_trace_terminal_within(
+    daemon: &DaemonClient,
+    trace_id: &str,
+    ceiling: std::time::Duration,
+    interval: std::time::Duration,
+) -> Result<PollOutcome> {
     let path = format!("/trace/{trace_id}");
-    let ceiling = std::time::Duration::from_secs(config.pipeline.hard_timeout_secs + POLL_GRACE_SECS);
-    let interval = std::time::Duration::from_secs(POLL_INTERVAL_SECS);
     let start = std::time::Instant::now();
     loop {
         let polled = match daemon.get(&path, &[], None).await {

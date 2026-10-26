@@ -465,3 +465,32 @@ fn eval_claims_cap_and_timeout_flow_from_borg_yml_to_the_claims_judge() {
         "an absent key is the config default"
     );
 }
+
+#[derive(Parser)]
+struct DistillHarness {
+    #[command(flatten)]
+    borg: BorgCli,
+}
+
+#[test]
+fn distill_parses_url_and_optional_output() {
+    let h = DistillHarness::try_parse_from(["sb", "distill", "https://example.com/a"]).unwrap();
+    match h.borg.command {
+        Some(Command::Distill { url, output }) => {
+            assert_eq!(url, "https://example.com/a");
+            assert_eq!(output, None);
+        }
+        _ => panic!("expected Distill"),
+    }
+    let h = DistillHarness::try_parse_from(["sb", "distill", "https://example.com/a", "--output", "out"]).unwrap();
+    match h.borg.command {
+        Some(Command::Distill { output, .. }) => assert_eq!(output, Some(std::path::PathBuf::from("out"))),
+        _ => panic!("expected Distill"),
+    }
+}
+
+#[test]
+fn distill_without_a_url_is_a_usage_error() {
+    let err = DistillHarness::try_parse_from(["sb", "distill"]).err().unwrap();
+    assert_eq!(err.exit_code(), 2);
+}

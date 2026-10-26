@@ -155,6 +155,20 @@ impl BorgCli {
                     code => Err(crate::error::ExitWith(code).into()),
                 }
             }
+            Some(Command::Distill { url, output }) => {
+                let run = borg::distill(&config, &url, output).await?;
+                println!("{}", run.dir.display());
+                if let Some(note) = &run.note {
+                    println!("{}", note.display());
+                }
+                match run.failure {
+                    None => Ok(()),
+                    Some(reason) => {
+                        eprintln!("distill trace {} failed: {reason}", run.trace_id);
+                        Err(crate::error::ExitWith(3).into())
+                    }
+                }
+            }
             Some(Command::Reingest {
                 all,
                 r#type,

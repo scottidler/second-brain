@@ -79,6 +79,7 @@ use config::Config;
 // Daemon lifecycle + OS service management live in `service`;
 // re-exported so the public API (`borg::daemon`, `borg::DaemonOutcome`) is
 // unchanged for sb's CLI dispatch.
+pub use client::distill::{DistillRun, distill};
 pub use client::{
     IngestOutcome, ReingestCandidate, ReingestEntry, ReingestEntryStatus, ReingestEvent, ReingestReport, ingest,
     ingest_file, note, reingest, resolve_ingest_url, resolve_note_text,
