@@ -135,7 +135,7 @@ pub fn merge_canonicalization_rules(config_rules: &[CanonicalRule]) -> Vec<Canon
     merged
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     pub server: ServerConfig,
@@ -255,7 +255,7 @@ fn deserialize_batch_gap<'de, D: Deserializer<'de>>(deserializer: D) -> std::res
 /// secret/environment bootstrap; other install-time knobs (log level, rayon
 /// cap) stay hardcoded in `service::install_systemd` until they also need to
 /// vary per-machine.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct DaemonConfig {
     /// Optional secret/environment bootstrap for the installed systemd unit.
@@ -1166,7 +1166,7 @@ fn host_matches(host: &Option<String>, current: Option<&str>) -> bool {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ServerConfig {
     pub host: String,
@@ -1182,7 +1182,7 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct VaultConfig {
     /// Vault root. None means the runtime requires either `--vault` on the CLI or
@@ -1196,14 +1196,14 @@ pub struct VaultConfig {
     pub vault_name: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct TranscriberConfig {
     pub url: String,
     pub timeout_secs: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct GroqConfig {
     #[serde(alias = "api_key_env", alias = "api_key")]

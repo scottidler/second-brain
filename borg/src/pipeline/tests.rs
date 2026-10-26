@@ -1484,5 +1484,6 @@ fn frames_work_dir_is_removed_on_every_early_return() {
 }
 
 mod article;
+mod policy;
 mod x;
 mod youtube;

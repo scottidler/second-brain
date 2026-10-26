@@ -354,7 +354,11 @@ pub(crate) struct UrlPublish<'a> {
     pub note_bytes: &'a [u8],
     pub replaces: Option<&'a Path>,
     pub vault_dirs: &'a [PathBuf],
+    /// The vault root, or under `Scratch` the scratch root, which takes the
+    /// vault root's place: figures land at the same vault-relative paths.
     pub vault_root: &'a Path,
+    /// `Scratch` skips the source archive and every rkvr cleanup.
+    pub policy: &'a PublishPolicy,
     pub max_note_bytes: usize,
     pub figures: &'a [figures::PlannedFigure],
     /// A candidate that passed the prefilter failed, or planning dropped one.
@@ -409,6 +413,10 @@ impl UrlPublishError {
 /// 5. only after the note is durable, remove the files the old note owned
 ///    that the new one no longer does (best-effort, logged).
 ///
+/// Under `Scratch` step 4 writes the note alone (no archive) and nothing is
+/// ever removed: a partial scratch output stays for debugging, and a scratch
+/// run never replaces a note, so there is no old note to clean up after.
+///
 /// Returns the published path and the orphans that were targeted.
 pub(crate) fn publish_url_note(spec: &UrlPublish<'_>) -> std::result::Result<(PathBuf, Vec<String>), UrlPublishError> {
     let trace_id = spec.archive.trace_id;
@@ -426,7 +434,13 @@ pub(crate) fn publish_url_note(spec: &UrlPublish<'_>) -> std::result::Result<(Pa
     if let Some(reason) = note_size_gate(spec.note_bytes.len(), spec.max_note_bytes) {
         return Err(UrlPublishError::SizeGate(reason));
     }
-    let created = figures::store(spec.vault_root, spec.figures).map_err(UrlPublishError::Store)?;
+    let created = figures::store(spec.vault_root, spec.figures, spec.policy).map_err(UrlPublishError::Store)?;
+    if matches!(spec.policy, PublishPolicy::Scratch { .. }) {
+        let note_path = atomic::publish_unique(spec.desired_path, spec.note_bytes, spec.replaces, spec.vault_dirs)
+            .map_err(|e| UrlPublishError::Publish(PublishError::NoteWrite(e)))?;
+        log::debug!("[{trace_id}] scratch publish: {} (no archive)", note_path.display());
+        return Ok((note_path, Vec::new()));
+    }
     let note_path = match archive_then_publish(
         spec.archive,
         spec.desired_path,

@@ -14,6 +14,7 @@
 //! `process_content`: the URL trace already holds a GENERAL permit, so a
 //! nested `process_image` would wait on the pool it is holding.
 
+use super::PublishPolicy;
 use crate::config::{Config, ImagesConfig};
 use crate::ocr::{self, VisionResult};
 use crate::slides::classify::{self, KeepOutcome};
@@ -328,10 +329,11 @@ fn sha8(bytes: &[u8]) -> String {
 /// (`vault::note::write_atomic_new`). Returns only the files THIS call
 /// created: a path that already held a file is reused and left alone, so the
 /// caller can remove exactly what it made if a later step fails. On a write
-/// error the files already created here are removed before the error returns.
-pub(crate) fn store(vault_root: &Path, planned: &[PlannedFigure]) -> Result<Vec<PathBuf>> {
+/// error the files already created here are removed before the error returns,
+/// except under `Scratch`, where a partial output stays for debugging.
+pub(crate) fn store(vault_root: &Path, planned: &[PlannedFigure], policy: &PublishPolicy) -> Result<Vec<PathBuf>> {
     log::debug!(
-        "figures::store: root={} figures={}",
+        "figures::store: root={} figures={} policy={policy:?}",
         vault_root.display(),
         planned.len()
     );
@@ -348,7 +350,9 @@ pub(crate) fn store(vault_root: &Path, planned: &[PlannedFigure]) -> Result<Vec<
             Ok(true) => created.push(dest),
             Ok(false) => log::info!("figures::store: {} already exists, reusing", dest.display()),
             Err(e) => {
-                if let Err(cleanup) = crate::rkvr::remove(&created) {
+                if matches!(policy, PublishPolicy::Vault)
+                    && let Err(cleanup) = crate::rkvr::remove(&created)
+                {
                     log::warn!(
                         "figures::store: rollback of {} file(s) failed: {cleanup:#}",
                         created.len()

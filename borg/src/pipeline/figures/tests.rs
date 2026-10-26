@@ -178,7 +178,7 @@ fn store_writes_files_and_returns_what_it_created() {
         planned("system/attachments/images/2026-10/t-1-aaaaaaaa.png", b"one"),
         planned("system/attachments/images/2026-10/t-2-bbbbbbbb.png", b"two"),
     ];
-    let created = store(vault.path(), &figures).unwrap();
+    let created = store(vault.path(), &figures, &PublishPolicy::Vault).unwrap();
     assert_eq!(created.len(), 2);
     assert_eq!(std::fs::read(&created[0]).unwrap(), b"one");
     assert_eq!(std::fs::read(&created[1]).unwrap(), b"two");
@@ -194,7 +194,7 @@ fn store_never_overwrites_and_does_not_claim_a_reused_path() {
         planned("system/attachments/images/2026-10/t-1-aaaaaaaa.png", b"clobber"),
         planned("system/attachments/images/2026-10/t-2-bbbbbbbb.png", b"new"),
     ];
-    let created = store(vault.path(), &figures).unwrap();
+    let created = store(vault.path(), &figures, &PublishPolicy::Vault).unwrap();
     assert_eq!(created, vec![dir.join("t-2-bbbbbbbb.png")]);
     assert_eq!(std::fs::read(dir.join("t-1-aaaaaaaa.png")).unwrap(), b"original");
 }
@@ -208,7 +208,7 @@ fn store_failure_removes_what_it_already_created() {
         planned("system/attachments/images/2026-10/t-1-aaaaaaaa.png", b"one"),
         planned("blocker/t-2-bbbbbbbb.png", b"two"),
     ];
-    let err = store(vault.path(), &figures).unwrap_err();
+    let err = store(vault.path(), &figures, &PublishPolicy::Vault).unwrap_err();
     assert!(format!("{err:#}").contains("t-2-bbbbbbbb.png"), "{err:#}");
     assert!(!vault.path().join(&figures[0].vault_path).exists());
 }

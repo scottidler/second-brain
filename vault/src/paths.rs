@@ -336,6 +336,21 @@ pub fn borg_sources_dir() -> PathBuf {
         .join("sources")
 }
 
+/// Root of `sb borg distill`'s scratch output, under the `sb/borg/` data
+/// namespace, beside (never inside) the staging root. Each distill run owns
+/// `<this>/<trace_id>/`: the rendered note, its attachments, and the run's
+/// staging under `stages/`, so no reader of the shared staging root ever sees
+/// a scratch trace (2026-10-25-borg-distill). Nothing here is part of the vault.
+///
+/// `~/.local/share/sb/borg/distill/` on Linux. Panics only when
+/// `xdg_data_dir()` returns `None` (see [`borg_signal_state_dir`]).
+pub fn borg_distill_dir() -> PathBuf {
+    xdg_data_dir()
+        .expect("xdg_data_dir() returned None (set HOME or XDG_DATA_HOME)")
+        .join("sb/borg")
+        .join("distill")
+}
+
 /// cortex's embed/graph file-lock path, under the `sb/cortex/` data
 /// namespace. The lock serializes the embed and graph passes (they share
 /// it). Lives under `sb/cortex/` like borg's data, NOT the legacy

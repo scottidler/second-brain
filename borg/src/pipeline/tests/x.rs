@@ -396,6 +396,7 @@ pub(super) fn publish_figures(set: &figures::FigureSet, title: &str, config: &Co
         replaces: None,
         vault_dirs: std::slice::from_ref(&inbox),
         vault_root: &vault,
+        policy: &PublishPolicy::Vault,
         max_note_bytes: config.pipeline.max_note_bytes,
         figures: &plan.planned,
         image_stage_degraded: set.degraded || plan.degraded,

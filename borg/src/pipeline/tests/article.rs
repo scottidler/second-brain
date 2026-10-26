@@ -512,3 +512,397 @@ async fn distill_article_resolves_relative_images_against_page_url_not_url() {
         "the requested host is never asked for the image"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `PublishPolicy::Scratch` (docs/design/2026-10-25-borg-distill.md):
+// the stub article through the real `process_content`, with the vault, the
+// shared staging root, the ledger, the archive and the receipts DB all under
+// one temp XDG_DATA_HOME.
+// ---------------------------------------------------------------------------
+
+/// Every file and directory under `root`, with each file's bytes (`None` for a
+/// directory). Empty when `root` does not exist.
+fn tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.map(|e| e.expect("entry").path()) {
+        if entry.is_dir() {
+            out.insert(entry.clone(), None);
+            out.extend(tree(&entry));
+        } else {
+            out.insert(entry.clone(), Some(std::fs::read(&entry).expect("read")));
+        }
+    }
+    out
+}
+
+/// One stub article and a config whose every write target sits under `home`.
+struct Scene {
+    base: String,
+    url: String,
+    config: Config,
+    vault: PathBuf,
+    shared_stages: PathBuf,
+    archive: PathBuf,
+}
+
+impl Scene {
+    async fn new(home: &Path) -> Self {
+        let (base, _) = serve(stub(page(1..=2), &[])).await;
+        let mut config = config(home);
+        config.archive.root = home.join("archive");
+        let vault = home.join("vault");
+        std::fs::create_dir_all(vault.join(".obsidian")).expect("vault marker");
+        std::fs::write(vault.join("existing.md"), "---\ntitle: existing\n---\n").expect("seed note");
+        let shared_stages = config.staging.root.clone();
+        std::fs::create_dir_all(shared_stages.join("cl-older000")).expect("seed stages");
+        std::fs::write(shared_stages.join("cl-older000/distilled.yml"), "summary: s\n").expect("seed staged");
+        std::fs::create_dir_all(config.archive.root.join("cl-older000")).expect("seed archive");
+        Self {
+            url: format!("{base}/article"),
+            base,
+            archive: config.archive.root.clone(),
+            config,
+            vault,
+            shared_stages,
+        }
+    }
+
+    /// A ledger row for an unrelated URL, so the ledger has bytes to compare.
+    fn seed_ledger(&self) -> PathBuf {
+        let ledger = ledger::ledger_path().expect("ledger path");
+        ledger::append_entry(
+            &ledger,
+            &LedgerEntry {
+                date: "2026-10-01".to_string(),
+                time: "09:00".to_string(),
+                method: IngestMethod::Cli,
+                filename: Some("existing.md".to_string()),
+                source: "https://unrelated.example/post".to_string(),
+                trace_id: Some("cl-older000".to_string()),
+            },
+        )
+        .expect("seed ledger");
+        ledger
+    }
+
+    fn snapshot(&self, ledger: &Path) -> Vec<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
+        let ledger_bytes = std::fs::read(ledger).ok();
+        vec![
+            tree(&self.vault),
+            tree(&self.shared_stages),
+            tree(&self.archive),
+            std::iter::once((ledger.to_path_buf(), ledger_bytes)).collect(),
+        ]
+    }
+
+    async fn run(&self, content: ContentKind, policy: &PublishPolicy, trace: &str) -> IngestResult {
+        {
+            let conn = receipts::open_default().expect("receipts");
+            receipts::record_received(
+                &conn,
+                trace,
+                vault::schema::Method::Cli,
+                vault::receipts::ReceiptKind::Url,
+                &self.url,
+            )
+            .expect("received");
+        }
+        crate::jina::bases::scope(
+            format!("{}/jina", self.base),
+            crate::ocr::bases::scope(
+                self.base.clone(),
+                process_content(
+                    content,
+                    Vec::new(),
+                    IngestMethod::Cli,
+                    false,
+                    &self.config,
+                    policy,
+                    Some(trace.to_string()),
+                    None,
+                ),
+            ),
+        )
+        .await
+    }
+
+    async fn run_url(&self, policy: &PublishPolicy, trace: &str) -> IngestResult {
+        let content = ContentKind::Url {
+            url: self.url.clone(),
+            note: None,
+        };
+        self.run(content, policy, trace).await
+    }
+
+    fn canonical(&self) -> String {
+        hygiene::normalize_url(&self.url, &self.config.canonicalization.rules).expect("canonical")
+    }
+}
+
+fn init_permits() {
+    permits::GENERAL_PERMITS.init(4);
+    permits::HEAVY_PERMITS.init(4);
+}
+
+fn top_level_notes(root: &Path) -> Vec<PathBuf> {
+    let mut notes: Vec<PathBuf> = std::fs::read_dir(root)
+        .map(|entries| entries.map(|e| e.expect("entry").path()).collect())
+        .unwrap_or_default();
+    notes.retain(|p| p.is_file() && p.extension().is_some_and(|e| e == "md"));
+    notes
+}
+
+fn receipt(trace: &str) -> receipts::Receipt {
+    let conn = receipts::open_default().expect("receipts");
+    receipts::get(&conn, trace).expect("get").expect("receipt row")
+}
+
+/// Under `Scratch` the vault, the shared staging root, the archive and the
+/// ledger are byte-identical before and after, and the run's output is the
+/// note, its figures and its staging, all under `root`.
+#[tokio::test]
+async fn distill_policy_writes_nothing_to_vault() {
+    init_permits();
+    let home = tempfile::tempdir().expect("home");
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let scene = Scene::new(home.path()).await;
+        let ledger = scene.seed_ledger();
+        let before = scene.snapshot(&ledger);
+        let trace = "cl-dst00001";
+        let root = home.path().join("distill").join(trace);
+
+        let result = scene
+            .run_url(&PublishPolicy::Scratch { root: root.clone() }, trace)
+            .await;
+
+        assert!(matches!(result.status, IngestStatus::Completed), "{:?}", result.status);
+        assert_eq!(
+            scene.snapshot(&ledger),
+            before,
+            "vault, shared staging, archive, ledger"
+        );
+        let notes = top_level_notes(&root);
+        assert_eq!(notes.len(), 1, "one top-level note: {:?}", tree(&root).keys());
+        assert_eq!(result.note_path.as_deref(), Some(notes[0].to_string_lossy().as_ref()));
+        assert_eq!(result.obsidian_url, None, "a scratch note is in no vault");
+        let staged = root.join("stages").join(trace);
+        assert!(staged.join("envelope.yml").is_file(), "{:?}", tree(&root).keys());
+        assert!(staged.join("distilled.yml").is_file(), "{:?}", tree(&root).keys());
+        let figures: Vec<_> = tree(&root.join("system/attachments/images"))
+            .into_iter()
+            .filter(|(_, bytes)| bytes.is_some())
+            .collect();
+        assert_eq!(figures.len(), 2, "both figures land under root");
+        assert_eq!(receipt(trace).status, "succeeded");
+    })
+    .await;
+}
+
+/// The note's frontmatter values derived from the wall clock, masked so two
+/// runs a moment apart compare equal: `date:`, `ingested:`, `trace-expires:`
+/// and the `YYYY-MM` of every figure path.
+fn mask_clock(note: &str) -> String {
+    const ATTACH: &str = "system/attachments/images/";
+    let lines: Vec<String> = note
+        .lines()
+        .map(|line| {
+            for key in ["date:", "ingested:", "trace-expires:"] {
+                if line.starts_with(key) {
+                    return format!("{key} <clock>");
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    let mut masked = lines.join("\n");
+    let mut from = 0;
+    while let Some(at) = masked[from..].find(ATTACH) {
+        let month = from + at + ATTACH.len();
+        masked.replace_range(month..month + "YYYY-MM".len(), "YYYY-MM");
+        from = month;
+    }
+    masked
+}
+
+/// With the trace pinned, the note a scratch run renders is the note an
+/// ingest publishes from the same stub, byte for byte apart from the clock.
+/// The ingest runs first, so its ledger row is present for the scratch run,
+/// which must still not turn into a reingest.
+#[tokio::test]
+async fn distill_policy_matches_ingest_note() {
+    init_permits();
+    let home = tempfile::tempdir().expect("home");
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let scene = Scene::new(home.path()).await;
+        let trace = "cl-dst00002";
+        let root = home.path().join("distill").join(trace);
+
+        let ingest = scene.run_url(&PublishPolicy::Vault, trace).await;
+        assert!(matches!(ingest.status, IngestStatus::Completed), "{:?}", ingest.status);
+        let ingest_path = PathBuf::from(ingest.note_path.expect("ingest note"));
+        assert!(
+            ingest_path.starts_with(scene.vault.join("inbox")),
+            "{}",
+            ingest_path.display()
+        );
+        let ingest_note = std::fs::read_to_string(&ingest_path).expect("ingest note");
+
+        let distill = scene
+            .run_url(&PublishPolicy::Scratch { root: root.clone() }, trace)
+            .await;
+        assert!(
+            matches!(distill.status, IngestStatus::Completed),
+            "{:?}",
+            distill.status
+        );
+        let distill_path = PathBuf::from(distill.note_path.expect("distill note"));
+        assert_eq!(distill_path.parent(), Some(root.as_path()));
+        let distill_note = std::fs::read_to_string(&distill_path).expect("distill note");
+
+        assert_eq!(distill_path.file_name(), ingest_path.file_name(), "same filename");
+        assert!(ingest_note.contains("\ningested: "), "{ingest_note}");
+        assert!(
+            ingest_note.contains("\n  - system/attachments/images/"),
+            "{ingest_note}"
+        );
+        assert_eq!(mask_clock(&distill_note), mask_clock(&ingest_note));
+        assert_eq!(
+            std::fs::read_to_string(&ingest_path).expect("ingest note"),
+            ingest_note,
+            "the scratch run did not reingest over the vault note"
+        );
+    })
+    .await;
+}
+
+/// A non-URL input under `Scratch` is refused before Stage 0: `Failed`
+/// `intake-rejected`, and nothing is written anywhere, the scratch root and
+/// shared staging included.
+#[tokio::test]
+async fn distill_policy_refuses_non_url() {
+    init_permits();
+    let home = tempfile::tempdir().expect("home");
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let scene = Scene::new(home.path()).await;
+        let ledger = scene.seed_ledger();
+        let before = scene.snapshot(&ledger);
+        let trace = "cl-dst00003";
+        let root = home.path().join("distill").join(trace);
+
+        let result = scene
+            .run(
+                ContentKind::Text("remember to read the gateway article".to_string()),
+                &PublishPolicy::Scratch { root: root.clone() },
+                trace,
+            )
+            .await;
+
+        let IngestStatus::Failed { reason } = &result.status else {
+            panic!("expected Failed, got {:?}", result.status);
+        };
+        assert!(reason.contains("URL only"), "{reason}");
+        assert_eq!(result.failure_stage, Some(FailureStage::IntakeRejected));
+        assert!(
+            !root.exists(),
+            "nothing under the scratch root: {:?}",
+            tree(&root).keys()
+        );
+        assert_eq!(
+            scene.snapshot(&ledger),
+            before,
+            "vault, shared staging, archive, ledger"
+        );
+        let row = receipt(trace);
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.failure_stage.as_deref(), Some("intake-rejected"));
+    })
+    .await;
+}
+
+/// A distill of a URL already being distilled fails `intake-rejected`, never
+/// `Duplicate` (which would read as `succeeded`), and an ingest of the same
+/// URL in that window is not blocked by it.
+#[tokio::test]
+async fn distill_inflight_hit_fails() {
+    init_permits();
+    let home = tempfile::tempdir().expect("home");
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let scene = Scene::new(home.path()).await;
+        let root = home.path().join("distill").join("cl-dst00004");
+        let _distilling =
+            InflightGuard::try_acquire(&format!("distill:{}", scene.canonical())).expect("the distill key is free");
+
+        let distill = scene
+            .run_url(&PublishPolicy::Scratch { root: root.clone() }, "cl-dst00004")
+            .await;
+        let IngestStatus::Failed { reason } = &distill.status else {
+            panic!("expected Failed, got {:?}", distill.status);
+        };
+        assert_eq!(reason, DISTILL_INFLIGHT_REASON);
+        assert_eq!(distill.failure_stage, Some(FailureStage::IntakeRejected));
+        assert_eq!(receipt("cl-dst00004").status, "failed");
+        assert!(top_level_notes(&root).is_empty());
+
+        let ingest = scene.run_url(&PublishPolicy::Vault, "cl-dst00005").await;
+        assert!(
+            matches!(ingest.status, IngestStatus::Completed),
+            "an in-flight distill must not block an ingest: {:?}",
+            ingest.status
+        );
+    })
+    .await;
+}
+
+/// Under `Scratch` a staging write failure fails the run, so `succeeded`
+/// always means `distilled.yml` exists. A `root/stages` that is a file is
+/// refused at Stage 0; a `distilled.yml` that cannot be written (a directory
+/// sits at its path) passes Stage 0 and fails `publish-failed`, with no note.
+#[tokio::test]
+async fn distill_persist_failure_fails() {
+    init_permits();
+    let home = tempfile::tempdir().expect("home");
+    crate::harvest::with_xdg_data_home(home.path(), || async {
+        let scene = Scene::new(home.path()).await;
+
+        // A file where `root/stages` should be: unwritable even when CI runs as root.
+        let unwritable = home.path().join("distill").join("cl-dst00006");
+        std::fs::create_dir_all(&unwritable).expect("root");
+        std::fs::write(unwritable.join("stages"), b"not a dir").expect("stages file");
+        let result = scene
+            .run_url(
+                &PublishPolicy::Scratch {
+                    root: unwritable.clone(),
+                },
+                "cl-dst00006",
+            )
+            .await;
+        assert!(
+            matches!(result.status, IngestStatus::Failed { .. }),
+            "{:?}",
+            result.status
+        );
+        assert!(top_level_notes(&unwritable).is_empty());
+
+        let trace = "cl-dst00007";
+        let root = home.path().join("distill").join(trace);
+        std::fs::create_dir_all(root.join("stages").join(trace).join("distilled.yml")).expect("obstruction");
+        let result = scene
+            .run_url(&PublishPolicy::Scratch { root: root.clone() }, trace)
+            .await;
+        let IngestStatus::Failed { reason } = &result.status else {
+            panic!("expected Failed, got {:?}", result.status);
+        };
+        assert!(reason.contains("staging persistence failed"), "{reason}");
+        assert_eq!(result.failure_stage, Some(FailureStage::PublishFailed));
+        assert!(
+            root.join("stages").join(trace).join("envelope.yml").is_file(),
+            "Stage 0 ran"
+        );
+        assert!(top_level_notes(&root).is_empty(), "no note without its staging");
+        assert_eq!(receipt(trace).failure_stage.as_deref(), Some("publish-failed"));
+    })
+    .await;
+}

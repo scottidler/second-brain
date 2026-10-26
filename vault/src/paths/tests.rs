@@ -137,6 +137,27 @@ fn borg_sources_dir_sits_beside_staging_not_inside_it() {
 }
 
 #[test]
+fn borg_distill_dir_sits_beside_staging_and_sources_not_inside_them() {
+    let distill = borg_distill_dir();
+    assert!(
+        distill.ends_with("sb/borg/distill"),
+        "borg_distill_dir() = {}",
+        distill.display()
+    );
+    let stages = borg_stages_dir();
+    let sources = borg_sources_dir();
+    assert_eq!(distill.parent(), stages.parent());
+    assert!(
+        !distill.starts_with(&stages) && !stages.starts_with(&distill),
+        "scratch output must live outside the shared staging root"
+    );
+    assert!(
+        !distill.starts_with(&sources),
+        "scratch output is not the durable archive"
+    );
+}
+
+#[test]
 fn oracle_paths_land_under_the_sb_data_namespace() {
     // R1: the oracle DB moved from `~/.local/share/oracle/` into the same
     // `sb/` namespace borg's data already lives in. `legacy_oracle_dir` is

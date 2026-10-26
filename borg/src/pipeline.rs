@@ -200,6 +200,56 @@ pub enum PublishPolicy {
     Scratch { root: PathBuf },
 }
 
+impl PublishPolicy {
+    /// The config every stage of this run reads, Stage 0 included. `Vault`
+    /// passes the live config through untouched. `Scratch` clones it once and
+    /// points staging at `root/stages`, forced on and per-trace, so no reader
+    /// of the shared `staging.root` ever sees a scratch trace and `distilled.yml`
+    /// always lands at `root/stages/<trace>/`.
+    pub fn effective_config<'a>(&self, config: &'a Config) -> std::borrow::Cow<'a, Config> {
+        match self {
+            Self::Vault => std::borrow::Cow::Borrowed(config),
+            Self::Scratch { root } => {
+                let mut effective = config.clone();
+                effective.staging.root = root.join("stages");
+                effective.staging.enabled = true;
+                effective.staging.layout = crate::config::StagingLayout::PerTrace;
+                log::debug!(
+                    "effective_config: scratch staging root={}",
+                    effective.staging.root.display()
+                );
+                std::borrow::Cow::Owned(effective)
+            }
+        }
+    }
+
+    /// Why this policy refuses `content` before Stage 0, or `None` when it
+    /// runs. Only `Scratch` refuses anything: distill is URL-only.
+    pub fn refusal(&self, content: &ContentKind) -> Option<String> {
+        match (self, content) {
+            (Self::Scratch { .. }, ContentKind::Url { .. }) | (Self::Vault, _) => None,
+            (Self::Scratch { .. }, other) => Some(format!(
+                "distill accepts a URL only, not a {} input",
+                crate::stages::raw::classify(other)
+            )),
+        }
+    }
+
+    /// The inflight-set key for a canonical URL. Scratch runs live in their
+    /// own `distill:` namespace so a distill never makes an ingest of the same
+    /// URL return `Duplicate`, and an ingest never blocks a distill.
+    pub fn inflight_key(&self, canonical: &str) -> String {
+        match self {
+            Self::Vault => canonical.to_string(),
+            Self::Scratch { .. } => format!("distill:{canonical}"),
+        }
+    }
+}
+
+/// The reason a scratch run reports when the same URL is already being
+/// distilled.
+pub const DISTILL_INFLIGHT_REASON: &str = "distill of this URL already in flight";
+
 /// Top-level pipeline entry point. Dispatches to type-specific handlers based on content kind.
 /// If `trace_id` is provided, it is used as-is; otherwise one is generated internally.
 pub async fn process_content(
@@ -218,6 +268,25 @@ pub async fn process_content(
 ) -> IngestResult {
     let trace_id = trace_id.unwrap_or_else(|| trace::generate(method));
     log::info!("[{trace_id}] Starting ingest: method={method}");
+
+    // A policy refusal (distill of a non-URL) writes nothing: no lease, no
+    // permit wait, no Stage 0. Only the receipts row is closed out, so it
+    // never sits in `received` for the watchdog to mislabel `crashed`.
+    if let Some(reason) = policy.refusal(&content) {
+        log::warn!("[{trace_id}] refused before Stage 0: {reason}");
+        let result = IngestResult {
+            status: IngestStatus::Failed { reason },
+            trace_id: Some(trace_id.clone()),
+            method: Some(method),
+            failure_stage: Some(FailureStage::IntakeRejected),
+            ..Default::default()
+        };
+        record_terminal_to_receipts(&trace_id, &result);
+        return result;
+    }
+    // Every stage below, Stage 0 included, reads the effective config.
+    let effective = policy.effective_config(config);
+    let config: &Config = &effective;
 
     // Take the cross-process trace lease *before* any await so the watchdog
     // sees the row as live during the permit wait - even a watchdog running in
@@ -644,15 +713,34 @@ async fn process_url_inner(
     // of the pipeline runs), capture its path here and remove only after
     // the atomic write of the new note succeeds.
     let mut old_path_to_delete: Option<PathBuf> = None;
-    let ledger_file = ledger::ledger_path()?;
+    // A scratch run neither reads nor appends the ledger.
+    let ledger_file = match policy {
+        PublishPolicy::Vault => Some(ledger::ledger_path()?),
+        PublishPolicy::Scratch { .. } => None,
+    };
 
     // Dedup guard: reject concurrent/duplicate ingestions (skip if --force).
     // Holding `inflight_guard` for the rest of this function keeps the URL
     // in the inflight set; on every return path (Ok, Err, panic-unwind, or
     // future-cancel from the outer hard-timeout) Drop releases it.
     let inflight_guard = if !force {
-        match InflightGuard::try_acquire(&canonical) {
+        match InflightGuard::try_acquire(&policy.inflight_key(&canonical)) {
             Some(g) => Some(g),
+            None if matches!(policy, PublishPolicy::Scratch { .. }) => {
+                log::info!("[{trace_id}] {DISTILL_INFLIGHT_REASON}: {canonical}");
+                // Not a `Duplicate`: that maps to `succeeded`, and a distill
+                // that produced no output must not read as one.
+                return Ok(IngestResult {
+                    status: IngestStatus::Failed {
+                        reason: DISTILL_INFLIGHT_REASON.to_string(),
+                    },
+                    method: Some(method),
+                    canonical_url: Some(canonical),
+                    trace_id: Some(trace_id.to_string()),
+                    failure_stage: Some(FailureStage::IntakeRejected),
+                    ..Default::default()
+                });
+            }
             None => {
                 log::info!("[{trace_id}] Duplicate URL (inflight): {canonical}");
                 // Inflight duplicates do NOT get a ledger row (the ledger is
@@ -678,8 +766,11 @@ async fn process_url_inner(
     // Replace existing note if found. Runs for both normal and --force ingestions.
     // We preserve the original date and write location so the new note overwrites
     // in place rather than demoting a promoted note back to inbox.
+    // A scratch run has no ledger, so it never reingests in place.
     let mut reingest_dest: Option<PathBuf> = None;
-    if let Some(existing) = ledger::find_completed(&ledger_file, &canonical)? {
+    if let Some(ledger_file) = ledger_file.as_deref()
+        && let Some(existing) = ledger::find_completed(ledger_file, &canonical)?
+    {
         log::info!(
             "[{trace_id}] Found existing entry for {canonical} (ingested {}), replacing",
             existing.date
@@ -687,7 +778,7 @@ async fn process_url_inner(
         let vault_root = config.vault_root()?;
         let old_note_path = match find_note_by_source(&vault_root, &canonical) {
             Some(path) => Some(path),
-            None => find_note_by_ledger_filename(&vault_root, &existing.filename, &canonical, &ledger_file)?,
+            None => find_note_by_ledger_filename(&vault_root, &existing.filename, &canonical, ledger_file)?,
         };
         if let Some(ref old_path) = old_note_path {
             original_date = read_note_date(old_path);
@@ -952,6 +1043,20 @@ async fn process_url_inner(
         (title, scraped_title, distilled, ct, None, Vec::new())
     };
 
+    // Ingest logs a failed `distilled.yml` persist and carries on; a scratch
+    // run's staging IS its output, so there `succeeded` must mean the file exists.
+    if let Some(reason) = scratch_staging_missing(policy, config, trace_id) {
+        log::warn!("[{trace_id}] {reason}");
+        return Ok(IngestResult {
+            status: IngestStatus::Failed { reason },
+            method: Some(method),
+            canonical_url: Some(canonical.clone()),
+            trace_id: Some(trace_id.to_string()),
+            failure_stage: Some(FailureStage::PublishFailed),
+            ..Default::default()
+        });
+    }
+
     // Quality gate: detect blocked/garbage content before creating a note.
     // Runs against the structured Distilled summary and `scraped_title` -
     // the title the fetcher actually returned, not any URL-derived override.
@@ -1011,7 +1116,13 @@ async fn process_url_inner(
     // value of the slide pipeline. The Distilled-derived frontmatter
     // additions (cortex-video-*, distilled flag) still apply.
     let filename_stub = hygiene::note_filename(&title, trace_id);
-    let vault_root_resolved: PathBuf = config.vault_root()?;
+    // Where the note and its attachments land: the vault, or under `Scratch`
+    // the scratch root laid out like one, so the note's vault-relative embeds
+    // resolve when the root is opened as a vault.
+    let publish_root: PathBuf = match policy {
+        PublishPolicy::Vault => config.vault_root()?,
+        PublishPolicy::Scratch { root } => root.clone(),
+    };
     // Transcript-emission policy (distillation-output-restore). Every
     // URL kind renders here, and every one publishes transcript-free: Video,
     // Repo, Article, and Thread (x-post-fetcher) keep the verbatim text in the
@@ -1020,7 +1131,7 @@ async fn process_url_inner(
     let rendered_distilled = distillers::render(&distilled, distillers::RenderOptions::for_url_publish(&distilled));
     let (distilled_body, slide_paths) = if let Some(payload) = slide_payload.as_ref() {
         let published = match crate::slides::publish::publish_slides(
-            &vault_root_resolved,
+            &publish_root,
             &filename_stub,
             &payload.manifest,
             &payload.summary,
@@ -1101,9 +1212,10 @@ async fn process_url_inner(
     let filename = format!("{}.md", hygiene::note_filename(&title, trace_id));
 
     // Resolve write path: reingest preserves the original location, new ingests go to inbox
-    let dest_path = match reingest_dest {
-        Some(d) => d,
-        None => config.inbox_dir()?,
+    let dest_path = match (reingest_dest, policy) {
+        (Some(d), _) => d,
+        (None, PublishPolicy::Vault) => config.inbox_dir()?,
+        (None, PublishPolicy::Scratch { root }) => root.clone(),
     };
     std::fs::create_dir_all(&dest_path).context("Failed to create destination directory")?;
 
@@ -1152,7 +1264,10 @@ async fn process_url_inner(
     // "Claude Code Mods"), so only THIS URL's own previous note may be
     // overwritten; any other existing note keeps its file and this one lands
     // at `-2`, `-3`, ... The vault dirs make a name taken vault-wide.
-    let vault_dirs = [vault_root_resolved.join("notes"), vault_root_resolved.join("inbox")];
+    let vault_dirs = match policy {
+        PublishPolicy::Vault => vec![publish_root.join("notes"), publish_root.join("inbox")],
+        PublishPolicy::Scratch { root } => vec![root.clone()],
+    };
     // The source archive is written first and fails closed: no archive, no
     // note. Independent of `staging.enabled`.
     let archive = crate::archive::SourceArchive {
@@ -1174,7 +1289,8 @@ async fn process_url_inner(
         note_bytes: final_str.as_bytes(),
         replaces: old_path_to_delete.as_deref(),
         vault_dirs: &vault_dirs,
-        vault_root: &vault_root_resolved,
+        vault_root: &publish_root,
+        policy,
         max_note_bytes: config.pipeline.max_note_bytes,
         figures: &figure_plan.planned,
         image_stage_degraded,
@@ -1215,24 +1331,30 @@ async fn process_url_inner(
 
     log::info!("[{trace_id}] Wrote note: {}", note_path.display());
 
-    // Log success to Borg Ledger
-    ledger::append_entry(
-        &ledger_file,
-        &LedgerEntry {
-            date: log_date,
-            time: log_time,
-            method,
-            filename: extract_filename(&note_path),
-            source: canonical.clone(),
-            trace_id: Some(trace_id.to_string()),
-        },
-    )?;
+    // Log success to Borg Ledger (a scratch run has none).
+    if let Some(ledger_file) = ledger_file.as_deref() {
+        ledger::append_entry(
+            ledger_file,
+            &LedgerEntry {
+                date: log_date,
+                time: log_time,
+                method,
+                filename: extract_filename(&note_path),
+                source: canonical.clone(),
+                trace_id: Some(trace_id.to_string()),
+            },
+        )?;
+    }
 
     // Inflight guard releases automatically when `inflight_guard` goes out
     // of scope at function return (success path here).
     drop(inflight_guard);
 
-    let obsidian_url = build_obsidian_url(&note_path.to_string_lossy());
+    // A scratch note is not in any vault, so there is nothing to deep-link.
+    let obsidian_url = match policy {
+        PublishPolicy::Vault => build_obsidian_url(&note_path.to_string_lossy()),
+        PublishPolicy::Scratch { .. } => None,
+    };
 
     Ok(IngestResult {
         status: IngestStatus::Completed,
@@ -1247,6 +1369,26 @@ async fn process_url_inner(
         failure_stage: None,
         degraded: receipt_degraded(&distilled, tags_degraded, fetch_degraded),
     })
+}
+
+/// Under `Scratch`, why the run must fail because its `distilled.yml` was not
+/// persisted under the effective staging root; `None` when it was, and always
+/// `None` under `Vault`, where a persist failure is logged and the run goes on.
+fn scratch_staging_missing(policy: &PublishPolicy, config: &Config, trace_id: &str) -> Option<String> {
+    if matches!(policy, PublishPolicy::Vault) {
+        return None;
+    }
+    let staged = config
+        .staging
+        .root
+        .join(trace_id)
+        .join(crate::stages::distill::DISTILLED_FILENAME);
+    log::debug!(
+        "scratch_staging_missing: trace={trace_id} staged={} is_file={}",
+        staged.display(),
+        staged.is_file()
+    );
+    (!staged.is_file()).then(|| format!("staging persistence failed: {} was not written", staged.display()))
 }
 
 /// A URL receipt is degraded when the L2 distiller fell back, an enumeration

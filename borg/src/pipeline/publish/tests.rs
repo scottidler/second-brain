@@ -434,6 +434,7 @@ impl Fixture {
             replaces: old_note.exists().then_some(old_note.as_path()),
             vault_dirs: std::slice::from_ref(&inbox),
             vault_root: self.vault.path(),
+            policy: &PublishPolicy::Vault,
             max_note_bytes,
             figures,
             image_stage_degraded: degraded,
