@@ -17,13 +17,13 @@ watcher = ["dep:notify", "dep:tokio"]
 http = ["dep:reqwest"]
 
 # vec stays the public "embedding is on" flag. It pulls in `search` and
-# the Candle backend (no AVX2 floor) so downstream crates that just say
-# `--features vec` get a working install on any x86_64 CPU.
-vec = ["vec-candle"]
+# both backends: Candle (no AVX2 floor, runs on any x86_64 CPU) and ONNX
+# Runtime (needs AVX2+FMA; `vault::cpu` gates it at runtime, before any
+# ORT call, so carrying it on an AVX-only CPU is safe).
+vec = ["vec-candle", "vec-onnx"]
 
 # Backend-specific flags. Each pulls in `search` so a build that names only
-# one backend still wires up the SQL layer. `vec-onnx` is filled in by the
-# ONNX backend phase; until then it declares no dependencies.
+# one backend still wires up the SQL layer.
 vec-candle = [
     "search",
     "dep:candle-core",
@@ -32,7 +32,12 @@ vec-candle = [
     "dep:tokenizers",
     "dep:hf-hub",
 ]
-vec-onnx = ["search"]
+vec-onnx = [
+    "search",
+    "dep:ort",
+    "dep:tokenizers",
+    "dep:hf-hub",
+]
 
 [dependencies]
 rusqlite = { workspace = true, optional = true }
@@ -66,6 +71,10 @@ libc = "0.2.186"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
 humantime = "2.4.0"
 socket2 = { version = "0.6.3", optional = true }
+# Static ONNX Runtime (pyke archive, hash-pinned by ort-sys). Default features
+# trimmed: no `tracing` (ORT logs route to `log` through `vault::onnx`), no
+# native-tls/openssl (the build-time archive download uses rustls), no ndarray.
+ort = { version = "2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-rustls", "api-31"] }
 
 [dev-dependencies]
 vault = { path = ".", features = ["test-util"] }

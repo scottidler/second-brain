@@ -17,8 +17,9 @@
 //!   need embeddings.
 //!
 //! Both processes pin `bge-small-en-v1.5` (384 dims, L2-normalized output).
-//! The active backend (Candle today) is a
-//! compile-time choice; the `EmbeddingModel` trait is the shared seam.
+//! Two backends compile in: [`candle`] (any x86_64 CPU) and [`onnx`] (ONNX
+//! Runtime, AVX2+FMA only, gated by `vault::cpu`). The load paths below
+//! still load Candle; the `EmbeddingModel` trait is the shared seam.
 //! The model identifier is stored in the search DB's `embedding_config`
 //! table as `active_model`; oracle and cortex read it on every dispatch so
 //! the two processes cannot drift onto different models.
@@ -30,8 +31,13 @@ use std::sync::{Arc, OnceLock, RwLock};
 #[cfg(feature = "vec-candle")]
 pub mod candle;
 
+#[cfg(feature = "vec-onnx")]
+pub mod onnx;
+
 #[cfg(feature = "vec-candle")]
 pub use candle::CandleBertModel;
+#[cfg(feature = "vec-onnx")]
+pub use onnx::OnnxEmbedder;
 
 /// Pin: `bge-small-en-v1.5` outputs 384-dim L2-normalized vectors. Cosine
 /// similarity reduces to a plain dot product because both query and stored

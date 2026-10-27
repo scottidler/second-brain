@@ -6,6 +6,7 @@ pub mod canonical;
 pub mod capture;
 pub mod channel;
 pub mod config;
+pub mod cpu;
 pub mod daemon;
 pub mod detail;
 pub mod distilled;
@@ -20,6 +21,8 @@ pub mod intake;
 pub mod ledger;
 pub mod logging;
 pub mod note;
+#[cfg(feature = "vec-onnx")]
+pub mod onnx;
 pub mod paths;
 pub mod process;
 pub mod queue;

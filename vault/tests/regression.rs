@@ -14,3 +14,7 @@ mod hybrid;
 #[cfg(feature = "vec-candle")]
 #[path = "regression/candle.rs"]
 mod candle;
+
+#[cfg(feature = "vec-onnx")]
+#[path = "regression/onnx.rs"]
+mod onnx;

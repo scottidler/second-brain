@@ -32,14 +32,17 @@ struct Fixture {
     embeddings: Vec<Vec<f32>>,
 }
 
-/// Cosine distance (1 - cosine similarity) between two equal-length
-/// vectors. Both inputs are assumed L2-normalized; the model produces
-/// unit vectors and the fixture's `normalize_embeddings=True` flag
-/// guarantees the reference is normalized too.
+fn norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// Absolute cosine distance `|1 - a.b|`. Callers assert both inputs are
+/// unit-length first: a plain `1 - dot` lets a doubled vector score a
+/// negative (passing) distance, and a missing L2 normalize go unseen.
 fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "vector dim mismatch");
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    1.0 - dot
+    (1.0 - dot).abs()
 }
 
 #[test]
@@ -61,6 +64,8 @@ fn candle_bert_matches_sentence_transformers_reference() {
     let model = CandleBertModel::load().expect("load CandleBertModel");
     for (text, expected) in fixture.texts.iter().zip(fixture.embeddings.iter()) {
         let got = model.embed_one(text).expect("embed_one");
+        let got_norm = norm(&got);
+        assert!((got_norm - 1.0).abs() < 1e-4, "candle norm on {text:?}: {got_norm}");
         let cos_dist = cosine_distance(&got, expected);
         assert!(
             cos_dist < 1e-3,

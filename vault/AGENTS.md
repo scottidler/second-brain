@@ -14,6 +14,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - `vault::paths::{expand_tilde, deserialize_tilde_pathbuf, config_root, resolve_vault_root}`; `borg_stages_dir()` (swept staging) and `borg_sources_dir()` (the durable source archive) are borg's two per-trace roots. `vault::trace::dir(root, trace)` is the one per-trace path join, refusing any trace that is not a single plain component.
 - `vault::ledger` — borg's dedup log helpers; `vault::receipts::FailureStage` (the seven terminal stages).
 - `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle, feature-gated).
+- `vault::embedding::OnnxEmbedder::load_version(version, threads, &CpuFeatures)` (feature `vec-onnx`): ONNX Runtime bge-small; refuses a CPU without AVX2+FMA before any `ort` call; `threads == 0` is `DEFAULT_ONNX_THREADS` capped at available parallelism.
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
 - `vault::process::run(cmd, stdin, timeout, label) -> Outcome { Exited | TimedOut }`: the one subprocess primitive. Owns all three pipes (stdin `/dev/null` when `None`, never inherited), drains on threads, spawns in its own process group and SIGKILLs the group at the deadline. `kill_registered()` / `install_interrupt_handler()` cover Ctrl-C for interactive sb commands.
@@ -51,7 +52,8 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - **Schema/notes:** `schema.rs`, `frontmatter.rs`, `note.rs`, `detail.rs`, `table.rs` (+`table/`), `wikilink.rs` (+`wikilink/`).
 - **Paths:** `paths.rs` (+`paths/`).
 - **Capture/ledger:** `ledger.rs`, `receipts.rs` (+`receipts/`), `intake.rs` (+`intake/`), `trace.rs`.
-- **Embeddings/distilled:** `embedding.rs` (+`embedding/`), `distilled.rs` (+`distilled/`).
+- **Embeddings/distilled:** `embedding.rs` (+`embedding/`: `candle.rs` and `onnx.rs`, the two backends), `distilled.rs` (+`distilled/`).
+- **Inference runtime:** `cpu.rs` (+`cpu/`: `CpuFeatures::detect`, `onnx_capable` = AVX2+FMA, the runtime SIGILL guard), `onnx.rs` (+`onnx/`; feature `vec-onnx`: the one ORT environment per process, `build_session` (CPU gate first, `intra_threads`, `inter_threads = 1`, `Level3`), ORT logs forwarded to `log` at warning and above).
 - **Search:** `search.rs` (+`search/`) — see `src/search/AGENTS.md`.
 - **Tags/hygiene:** `canonical.rs`, `hygiene.rs`.
 - **Daemon client / ingest queue:** `daemon.rs` (+`daemon/`: `HotkeyConfig` incl. `request-timeout`, the client-side borg daemon address, `client_auth_token`, the first-party bearer resolver, and under feature `http` `daemon::client::DaemonClient`, the ONE request path to the daemon: address + token + timeout resolved once, status checked before any body parse; shared by borg and oracle), `http.rs` (+`http/`; feature `http`: `client(timeout)` and `builder(Timeouts)` (`Timeouts::total` for request/response, `Timeouts::Stream { connect, read }` for ntfy), the one place a `reqwest::Client` is built; `clippy.toml` `disallowed-methods` bans `Client::new`/`Client::builder`/`ClientBuilder::new` everywhere else, tests included), `queue.rs` (+`queue/`: the `QueueSnapshot` wire contract for `GET /queue`), `channel.rs` (+`channel/`: the `ChannelHit` / `ChannelSearch` / `ChannelSearchFailure` wire contract for `GET /channels/search`).
