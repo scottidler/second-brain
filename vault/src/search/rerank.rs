@@ -27,9 +27,9 @@
 //!   resolution table (`vault::embedding::backend::resolve_with_parity`) with
 //!   the registry's parity bit, then loads and caches one model per process.
 //!
-//! ## Honest status on the daemon host
+//! ## Honest status on a CPU without AVX2+FMA
 //!
-//! The daemon host (`desk`) is AVX-only; the ONNX runtime aborts there, so this is a
+//! On a CPU without AVX2+FMA (`talos`) the ONNX runtime aborts, so there this is a
 //! Candle scalar-backend pipeline at ~150-300 ms **per pair**. Reranking 50
 //! unbatched candidates is ~7.5-15 s - past any interactive budget. The stage
 //! is therefore **off by default** and gated by a warmup latency probe (in

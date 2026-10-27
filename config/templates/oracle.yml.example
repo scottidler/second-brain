@@ -82,8 +82,8 @@ retrieval:
     k: 60               # RRF smoothing constant
 
   # --- 3. Rerank. Optional cross-encoder second stage. OFF by default. ---
-  # WARNING: on an AVX-only CPU the cross-encoder is ~150-300 ms/pair (Candle
-  # scalar), so 50 candidates can be ~7.5-15 s. The warmup probe projects the
+  # WARNING: on a CPU without AVX2+FMA (Candle scalar) the cross-encoder is
+  # ~150-300 ms/pair, so 50 candidates can be ~7.5-15 s. The warmup probe projects the
   # batch cost and FAILS OPEN to the fused order (logs a WARN) when it exceeds
   # latency-budget-ms — expect that to happen on older hardware. Before enabling,
   # prefetch the model so the first query does not block on a download.

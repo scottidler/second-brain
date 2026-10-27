@@ -926,7 +926,7 @@ fn summary_embed_text_keeps_the_pre_capture_note_shape_byte_identical() {
 // --- per-tick chunk ceiling (governance-starvation fix) ----------
 //
 // The incident: `batch_size` bounds NOTES, so a tick's real work was
-// `64 notes x unbounded chunks`. One tick ran two days on an AVX-only host,
+// `64 notes x unbounded chunks`. One tick ran two days on `talos` (AVX-only),
 // held the shared rayon pool, and starved classify. These pin the bound.
 
 fn tw(path: &str, chunks: usize) -> TranscriptWork {

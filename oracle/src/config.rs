@@ -235,8 +235,9 @@ pub enum RerankMethod {
     CrossEncoder,
 }
 
-/// Optional cross-encoder rerank stage. OFF by default on this host:
-/// cross-encoder inference is the most AVX-sensitive stage.
+/// Optional cross-encoder rerank stage. OFF by default: cross-encoder
+/// inference is the most CPU-sensitive stage (~150-300 ms/pair on Candle
+/// without AVX2+FMA, as on `talos`; ONNX is faster where the CPU allows it).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct RerankConfig {

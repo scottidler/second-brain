@@ -19,7 +19,7 @@ http = ["dep:reqwest"]
 # vec stays the public "embedding is on" flag. It pulls in `search` and
 # both backends: Candle (no AVX2 floor, runs on any x86_64 CPU) and ONNX
 # Runtime (needs AVX2+FMA; `vault::cpu` gates it at runtime, before any
-# ORT call, so carrying it on an AVX-only CPU is safe).
+# ORT call, so carrying it on a pre-AVX2 CPU such as `talos` is safe).
 vec = ["vec-candle", "vec-onnx"]
 
 # Backend-specific flags. Each pulls in `search` so a build that names only

@@ -84,8 +84,8 @@ pub const DEFAULT_MAX_CHUNKS_PER_CALL: usize = 64;
 /// `DEFAULT_MAX_CHUNKS_PER_CALL` bounds peak MEMORY per model call; this
 /// bounds the tick's WALL CLOCK, which is a different failure. `batch_size`
 /// counts notes, so a tick's real work is `64 notes × (however many chunks
-/// each transcript yields)` - unbounded. On 2026-08-16 a single tick on an
-/// AVX-only host (scalar gemm microkernel, no vectorized f32 path) ran for
+/// each transcript yields)` - unbounded. On 2026-08-16 a single tick on
+/// `talos` (AVX-only; scalar gemm microkernel, no vectorized f32 path) ran for
 /// two days holding the whole rayon pool, and because the batch logs nothing
 /// between start and finish it was invisible: the daemon read as healthy
 /// while classify never ran again.
@@ -104,8 +104,8 @@ pub const DEFAULT_MAX_CHUNKS_PER_TICK: usize = 512;
 /// `cortex::quality`, `classify`, and the lint passes run
 /// their `par_iter` on.
 ///
-/// This is the invariant the 2026-08-16 incident was missing. Inference on an
-/// AVX-only host is slow and will stay slow (no vectorized gemm microkernel
+/// This is the invariant the 2026-08-16 incident was missing. Candle inference on
+/// an AVX-only host (`talos`) is slow and will stay slow (no vectorized gemm microkernel
 /// exists for a CPU without FMA); the defect was never the latency, it was
 /// that the latency was load-bearing for governance. Slow is acceptable.
 /// Slow-and-shared is not.

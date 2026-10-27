@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dictate - push-to-talk dictation: record the mic with pw-record, transcribe
-# via Groq whisper-large-v3 (no local inference; works on an AVX-only box), and
+# via Groq whisper-large-v3 (no local inference; works on `talos`, which is AVX-only), and
 # print the text to stdout. Recordings are kept under ~/.local/share/sb/dictate/
 # (durable-capture: nothing is deleted; prune by hand if it ever matters).
 #

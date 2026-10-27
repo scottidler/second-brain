@@ -42,7 +42,7 @@ embed:
   # Hard ceiling on chunks embedded per tick, across all notes. `batch-size`
   # bounds NOTES (64), not chunks, and one long transcript can chunk into
   # hundreds - so a tick had no wall-clock bound at all. On 2026-08-16 a single
-  # tick on an AVX-only host ran for TWO DAYS, held the shared rayon pool, and
+  # tick on `talos` (AVX-only, Candle) ran for TWO DAYS, held the shared rayon pool, and
   # starved classify so 50 harvested notes sat unfiled while systemd still
   # reported the daemon `active (running)`. Truncation is free: deferred notes
   # keep their stale marker and lead the next tick. 0 disables the cap.

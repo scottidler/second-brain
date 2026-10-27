@@ -35,7 +35,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 ## Invariants
 
 - **Staleness watermark:** `note_embeddings.source_modified_at < notes.modified_at` ⇒ stale. cortex writes the current `notes.modified_at` on upsert.
-- **Model versioning:** `note_embeddings.model_version == embedding_config.active_model`; a backend swap changes the string and triggers re-embed via the staleness path.
+- **Model versioning:** `note_embeddings.model_version == embedding_config.active_model`; the id names the model, never the backend, so a backend swap changes nothing in the DB and triggers no re-embed. What keeps that safe is the `onnx_parity` gate on the `embedding::MODELS` registry: a model gets the bit only with a passing real-model parity test (`onnx_matches_candle_real_model` in `embedding/onnx/tests.rs`, `otto ignored`), and `resolve_backend` refuses ONNX for a model without it. A new model id (or a different vector space) is what triggers re-embed via the staleness path.
 - **Transcript eligibility** is generated from `NoteType::transcript_eligible()` — never hardcode the type list in SQL.
 - **BLOB validation:** `validate_embedding_bytes(bytes, dim)` checks `len == dim*4` before the dot loop (no OOB reads).
 - **Atomic embedding writes:** `upsert_embeddings_batch` is a single `BEGIN IMMEDIATE … COMMIT` so hybrid search never sees half-replaced vectors.
@@ -48,7 +48,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 
 - **Dispatch hybrid (oracle):** `search(bm25)` + `embed_query()` → `search_vector(limit=50)` → `reciprocal_rank_fusion(k=60, limit=20)`.
 - **Add an FTS5 column:** update the `CREATE TABLE` in the schema-ensure path and the sync triggers.
-- **Re-embed (cortex):** `stale_embedding_targets(Summary, active_model, batch)` → `load_active_model()` → embed in parallel → `upsert_embeddings_batch()`.
+- **Re-embed (cortex):** `stale_embedding_targets(Summary, active_model, batch)` → `cortex::embed::load_embedder` (resolves `embed.backend`, loads via `vault::embedding::load_model_version`) → embed in parallel → `upsert_embeddings_batch()`.
 
 ## Anti-patterns
 

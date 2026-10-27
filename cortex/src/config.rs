@@ -312,7 +312,7 @@ pub struct EmbedConfig {
     ///
     /// `batch_size` bounds NOTES (64 by default), not chunks, and one long
     /// transcript can chunk into hundreds - so a tick had no wall-clock bound
-    /// at all. On an AVX-only host (no vectorized gemm microkernel) that is how
+    /// at all. On an AVX-only host such as `talos` (no vectorized gemm microkernel) that is how
     /// one tick became a two-day run with no log line between start and finish.
     /// Truncating the flattened chunk list to this cap makes each tick bounded
     /// and spreads the same total work across ticks; the notes that do not fit

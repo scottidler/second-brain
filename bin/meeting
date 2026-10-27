@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # meeting - record a work meeting (mic + system audio), transcribe via Groq
-# whisper-large-v3 (no local inference; desk is AVX-only), distill minutes via
+# whisper-large-v3 (no local inference; `talos` is AVX-only), distill minutes via
 # the fabric `meeting-minutes` pattern, and drop a type:meeting note into the
 # vault inbox for cortex to classify and promote.
 #
