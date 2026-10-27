@@ -280,12 +280,33 @@ tasks:
       echo "✅ Installed to ~/.cargo/bin: $(echo $BINS | tr '\n' ' ')"
 
   deploy:
-    help: "Build sb, install bin + assets, restart workspace daemons (units come from `sb borg|cortex daemon --install`)"
+    help: "Build sb, stop workspace daemons, install bin + assets, start the daemons again (units come from `sb borg|cortex daemon --install`)"
     bash: |
       cargo build --release --locked --workspace --bins
       BINS=$(cargo metadata --format-version 1 --no-deps \
         | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
         | sort -u)
+
+      # Stop any workspace daemons whose systemd units exist BEFORE the new
+      # binary lands, and start them only after install + bootstrap. A new
+      # binary opening oracle.db migrates it (the backend-free embedding
+      # model ids); an old cortex still running would then re-pin its old id
+      # and re-embed every row under it. Units are written + maintained by
+      # `sb borg daemon --install` and `sb cortex daemon --install` (not by
+      # this deploy task) so the source of truth for unit content stays
+      # in-binary. The EXIT trap starts them again even if install or
+      # bootstrap fails, so a failed deploy never leaves the daemons down.
+      DAEMONS=""
+      for unit in borg cortex; do
+        if systemctl --user cat "$unit.service" >/dev/null 2>&1; then
+          DAEMONS="$DAEMONS $unit"
+        fi
+      done
+      if [ -n "$DAEMONS" ]; then
+        systemctl --user stop $DAEMONS
+        trap 'systemctl --user start $DAEMONS' EXIT
+      fi
+
       for bin in $BINS; do
         install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
       done
@@ -300,21 +321,14 @@ tasks:
       # no flags.
       sb bootstrap --force --skip-systemd --skip-prefetch-model
 
-      # Restart any workspace daemons whose systemd units exist. Units are
-      # written + maintained by `sb borg daemon --install` and `sb cortex
-      # daemon --install` (not by this deploy task) so the source of truth
-      # for unit content stays in-binary.
-      DAEMONS=""
-      for unit in borg cortex; do
-        if systemctl --user cat "$unit.service" >/dev/null 2>&1; then
-          DAEMONS="$DAEMONS $unit"
-        fi
-      done
-      [ -n "$DAEMONS" ] && systemctl --user restart $DAEMONS
+      if [ -n "$DAEMONS" ]; then
+        trap - EXIT
+        systemctl --user start $DAEMONS
+      fi
 
       echo "✅ Installed bins:$(echo $BINS | tr '\n' ' ' | sed 's/^/ /')"
       echo "✅ Refreshed canonical assets in ~/.config/sb/ via sb bootstrap --force"
-      echo "✅ Restarted daemons:${DAEMONS:- (none - run \`sb borg daemon --install\` / \`sb cortex daemon --install\` first)}"
+      echo "✅ Stopped before install and started after:${DAEMONS:- (none - run \`sb borg daemon --install\` / \`sb cortex daemon --install\` first)}"
 
       # Refresh the Firefox extension iff this machine has it installed.
       # --if-installed short-circuits (no sign, no sudo, no Firefox dep) on

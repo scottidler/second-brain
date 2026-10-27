@@ -1,4 +1,6 @@
-//! Migration tests: the `note_embeddings` table rebuild that widens
+//! Migration tests. Two migrations live here: the backend-free model-id
+//! rename (`migrate_backend_free_model_ids`, at the end of this file) and,
+//! first, the `note_embeddings` table rebuild that widens
 //! the `kind` CHECK constraint to permit `'claim'`. The migration is the
 //! high-risk change in the claim-kind work (a deployed DB corruption is High impact),
 //! so these are hard gates: row-preservation is asserted byte-identical,
@@ -335,4 +337,344 @@ fn notes_has_column(index: &SearchIndex, col: &str) -> bool {
         .map(|r| r.expect("col name"))
         .collect();
     cols.iter().any(|c| c == col)
+}
+
+// --- backend-free model ids -------------------------------------------------
+
+const LEGACY_SMALL: &str = "bge-small-en-v1.5-candle";
+const SMALL: &str = "bge-small-en-v1.5";
+const LEGACY_BASE: &str = "bge-base-en-v1.5-candle";
+const BASE: &str = "bge-base-en-v1.5";
+
+/// One `note_embeddings` row with an explicit `produced_at`, so the dedup's
+/// newer-wins rule is under the test's control.
+fn insert_embedding(
+    index: &SearchIndex,
+    note_path: &str,
+    kind: &str,
+    chunk_index: i64,
+    text: &str,
+    model_version: &str,
+    produced_at: i64,
+) {
+    index
+        .conn
+        .execute(
+            "INSERT INTO note_embeddings
+                (note_path, kind, chunk_index, text, embedding, dim, model_version, produced_at, source_modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, 100)",
+            params![
+                note_path,
+                kind,
+                chunk_index,
+                text,
+                vec![0u8; 4],
+                model_version,
+                produced_at
+            ],
+        )
+        .expect("insert embedding");
+}
+
+fn insert_examined(index: &SearchIndex, note_path: &str, kind: &str, model_version: &str, examined_at: i64) {
+    index
+        .conn
+        .execute(
+            "INSERT INTO embedding_examined (note_path, kind, model_version, examined_at) VALUES (?1, ?2, ?3, ?4)",
+            params![note_path, kind, model_version, examined_at],
+        )
+        .expect("insert examined");
+}
+
+/// A note with a non-empty summary and claims, last modified at 100 (the
+/// `source_modified_at` every seeded embedding carries, so a row under the
+/// active id is current, not stale).
+fn insert_embeddable_note(index: &SearchIndex, path: &str, note_type: &str) {
+    index
+        .conn
+        .execute(
+            "INSERT INTO notes (path, title, note_type, summary, claims, modified_at) VALUES (?1, 'T', ?2, 'a summary', 'a claim', 100)",
+            params![path, note_type],
+        )
+        .expect("insert note");
+}
+
+fn set_pin(index: &SearchIndex, model_version: &str) {
+    index
+        .conn
+        .execute(
+            "UPDATE embedding_config SET value = ?1 WHERE key = 'active_model'",
+            params![model_version],
+        )
+        .expect("set pin");
+}
+
+fn pin(index: &SearchIndex) -> String {
+    index.active_embedding_model().expect("active_model")
+}
+
+/// `(note_path, kind, model_version, examined_at)`, ordered.
+fn dump_examined(index: &SearchIndex) -> Vec<(String, String, String, i64)> {
+    let mut stmt = index
+        .conn
+        .prepare("SELECT note_path, kind, model_version, examined_at FROM embedding_examined ORDER BY 1, 2, 3")
+        .expect("prepare examined");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("query examined")
+        .map(|r| r.expect("examined row"))
+        .collect()
+}
+
+fn model_versions_in_use(index: &SearchIndex) -> Vec<String> {
+    let mut stmt = index
+        .conn
+        .prepare("SELECT DISTINCT model_version FROM note_embeddings ORDER BY 1")
+        .expect("prepare versions");
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .expect("query versions")
+        .map(|r| r.expect("version"))
+        .collect()
+}
+
+/// A DB written by a pre-rename binary: `-candle` pin, `-candle` rows for
+/// every embedding kind, and `-candle` examined sentinels. Reopening renames
+/// all of it in place: the backend-free pin, the same row count, every row
+/// current (no stale target for any kind), so nothing re-embeds.
+#[test]
+fn backend_free_migration_renames_the_pin_and_rows_without_a_reembed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("oracle.db");
+    {
+        let index = SearchIndex::open(&db).expect("seed open");
+        set_pin(&index, LEGACY_SMALL);
+        for (i, path) in ["notes/a.md", "notes/b.md", "notes/c.md"].iter().enumerate() {
+            insert_embeddable_note(&index, path, "youtube");
+            insert_embedding(&index, path, "summary", 0, "s", LEGACY_SMALL, 10 + i as i64);
+            insert_embedding(&index, path, "claim", 0, "c", LEGACY_SMALL, 10);
+            insert_embedding(&index, path, "transcript-chunk", 0, "t0", LEGACY_SMALL, 10);
+            insert_embedding(&index, path, "transcript-chunk", 1, "t1", LEGACY_SMALL, 10);
+        }
+        // An examined sentinel for a note with no transcript rows of its own.
+        insert_embeddable_note(&index, "notes/silent.md", "youtube");
+        insert_embedding(&index, "notes/silent.md", "summary", 0, "s", LEGACY_SMALL, 10);
+        insert_embedding(&index, "notes/silent.md", "claim", 0, "c", LEGACY_SMALL, 10);
+        insert_examined(&index, "notes/silent.md", "transcript-chunk", LEGACY_SMALL, 100);
+        // The A/B candidate's legacy id migrates too.
+        insert_embedding(&index, "notes/a.md", "summary", 0, "s", LEGACY_BASE, 10);
+    }
+    // Read the seed through a raw connection: a `SearchIndex::open` here
+    // would already run the migration under test.
+    let seeded: i64 = Connection::open(&db)
+        .expect("raw open")
+        .query_row("SELECT COUNT(*) FROM note_embeddings", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(seeded, 15, "seeded row count");
+
+    let index = SearchIndex::open(&db).expect("migrating open");
+
+    assert_eq!(pin(&index), SMALL, "the pin is backend-free");
+    let rows = dump_rows(&index);
+    assert_eq!(rows.len(), 15, "a rename, not a delete or a re-embed");
+    assert_eq!(model_versions_in_use(&index), vec![BASE.to_string(), SMALL.to_string()]);
+    assert_eq!(
+        dump_examined(&index),
+        vec![(
+            "notes/silent.md".to_string(),
+            "transcript-chunk".to_string(),
+            SMALL.to_string(),
+            100
+        )]
+    );
+    for kind in [
+        EmbeddingKind::Summary,
+        EmbeddingKind::TranscriptChunk,
+        EmbeddingKind::Claim,
+    ] {
+        let stale = index.stale_embedding_targets(kind, SMALL, 100).expect("stale targets");
+        assert!(
+            stale.is_empty(),
+            "{kind:?}: every note is current under the backend-free id, got {:?}",
+            stale.iter().map(|t| &t.note_path).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The deploy race: an old cortex wrote `-candle` rows and re-pinned
+/// `-candle` after a new binary had already renamed the DB. Both ids then
+/// hold the same chunks, which would abort a bare rename on the UNIQUE
+/// constraint. The open succeeds, and per `(note_path, kind)` only the set
+/// with the newer `produced_at` survives, renamed.
+#[test]
+fn backend_free_migration_keeps_the_newer_row_when_both_ids_exist() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("oracle.db");
+    {
+        let index = SearchIndex::open(&db).expect("seed open");
+        insert_embeddable_note(&index, "notes/old-wins.md", "youtube");
+        insert_embeddable_note(&index, "notes/new-wins.md", "youtube");
+        insert_embeddable_note(&index, "notes/tie.md", "youtube");
+        insert_embeddable_note(&index, "notes/chunks.md", "youtube");
+
+        // The `-candle` row is newer: it wins and is renamed.
+        insert_embedding(&index, "notes/old-wins.md", "summary", 0, "free-older", SMALL, 200);
+        insert_embedding(
+            &index,
+            "notes/old-wins.md",
+            "summary",
+            0,
+            "legacy-newer",
+            LEGACY_SMALL,
+            300,
+        );
+        // The backend-free row is newer: it wins, the `-candle` row goes.
+        insert_embedding(&index, "notes/new-wins.md", "summary", 0, "free-newer", SMALL, 300);
+        insert_embedding(
+            &index,
+            "notes/new-wins.md",
+            "summary",
+            0,
+            "legacy-older",
+            LEGACY_SMALL,
+            200,
+        );
+        // A tie keeps the backend-free row.
+        insert_embedding(&index, "notes/tie.md", "summary", 0, "free-tie", SMALL, 250);
+        insert_embedding(&index, "notes/tie.md", "summary", 0, "legacy-tie", LEGACY_SMALL, 250);
+        // Multi-chunk: the newer `-candle` set has 2 chunks, the older
+        // backend-free set 3. The newer set wins whole; the older set's
+        // chunk 2 does not survive beside it.
+        for i in 0..3 {
+            insert_embedding(
+                &index,
+                "notes/chunks.md",
+                "transcript-chunk",
+                i,
+                "free-old-chunk",
+                SMALL,
+                200,
+            );
+        }
+        for i in 0..2 {
+            insert_embedding(
+                &index,
+                "notes/chunks.md",
+                "transcript-chunk",
+                i,
+                "legacy-new-chunk",
+                LEGACY_SMALL,
+                300,
+            );
+        }
+        // Examined sentinels: the newer `examined_at` wins either way.
+        insert_examined(&index, "notes/old-wins.md", "transcript-chunk", SMALL, 100);
+        insert_examined(&index, "notes/old-wins.md", "transcript-chunk", LEGACY_SMALL, 150);
+        insert_examined(&index, "notes/new-wins.md", "transcript-chunk", SMALL, 150);
+        insert_examined(&index, "notes/new-wins.md", "transcript-chunk", LEGACY_SMALL, 100);
+        // The old cortex re-pins its id on every tick.
+        set_pin(&index, LEGACY_SMALL);
+    }
+
+    let index = SearchIndex::open(&db).expect("the open succeeds despite the collisions");
+
+    assert_eq!(pin(&index), SMALL);
+    assert_eq!(model_versions_in_use(&index), vec![SMALL.to_string()]);
+    let survivors: Vec<(String, String, i64, String, i64)> = dump_rows(&index)
+        .into_iter()
+        .map(|r| (r.note_path, r.kind, r.chunk_index, r.text, r.produced_at))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let expect = |p: &str, k: &str, i: i64, t: &str, at: i64| (p.to_string(), k.to_string(), i, t.to_string(), at);
+    assert_eq!(
+        survivors,
+        vec![
+            expect("notes/chunks.md", "transcript-chunk", 0, "legacy-new-chunk", 300),
+            expect("notes/chunks.md", "transcript-chunk", 1, "legacy-new-chunk", 300),
+            expect("notes/new-wins.md", "summary", 0, "free-newer", 300),
+            expect("notes/old-wins.md", "summary", 0, "legacy-newer", 300),
+            expect("notes/tie.md", "summary", 0, "free-tie", 250),
+        ]
+    );
+    assert_eq!(
+        dump_examined(&index),
+        vec![
+            (
+                "notes/new-wins.md".to_string(),
+                "transcript-chunk".to_string(),
+                SMALL.to_string(),
+                150
+            ),
+            (
+                "notes/old-wins.md".to_string(),
+                "transcript-chunk".to_string(),
+                SMALL.to_string(),
+                150
+            ),
+        ]
+    );
+}
+
+/// A second open of a migrated DB changes nothing: same rows byte for byte,
+/// same sentinels, same pin, and the migration reports no work.
+#[test]
+fn backend_free_migration_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("oracle.db");
+    {
+        let index = SearchIndex::open(&db).expect("seed open");
+        set_pin(&index, LEGACY_SMALL);
+        insert_embeddable_note(&index, "notes/a.md", "youtube");
+        insert_embedding(&index, "notes/a.md", "summary", 0, "s", LEGACY_SMALL, 10);
+        insert_embedding(&index, "notes/a.md", "summary", 0, "s-free", SMALL, 20);
+        insert_examined(&index, "notes/a.md", "transcript-chunk", LEGACY_SMALL, 100);
+    }
+    let (rows, examined, first_pin) = {
+        let index = SearchIndex::open(&db).expect("first open migrates");
+        (dump_rows(&index), dump_examined(&index), pin(&index))
+    };
+    assert_eq!(first_pin, SMALL);
+    assert_eq!(rows.len(), 1);
+
+    let index = SearchIndex::open(&db).expect("second open");
+    assert_eq!(dump_rows(&index), rows, "rows unchanged byte for byte");
+    assert_eq!(dump_examined(&index), examined);
+    assert_eq!(pin(&index), first_pin);
+    assert!(
+        !index.migrate_backend_free_model_ids().expect("third run"),
+        "a migrated DB has nothing to rename"
+    );
+}
+
+/// A fresh DB is seeded with the backend-free pin directly, and the
+/// migration finds nothing to do.
+#[test]
+fn backend_free_migration_is_a_no_op_on_a_fresh_db() {
+    let index = SearchIndex::open_memory().expect("open");
+    assert_eq!(pin(&index), SMALL);
+    assert!(!index.migrate_backend_free_model_ids().expect("run"));
+}
+
+/// Ids this migration does not own are left alone: `-fastembed` rows were
+/// never written by a shipped binary and stay stale for the re-embed path,
+/// and an operator's custom pin is untouched.
+#[test]
+fn backend_free_migration_leaves_unowned_ids_alone() {
+    let index = SearchIndex::open_memory().expect("open");
+    insert_embeddable_note(&index, "notes/a.md", "youtube");
+    insert_embedding(
+        &index,
+        "notes/a.md",
+        "summary",
+        0,
+        "s",
+        "bge-small-en-v1.5-fastembed",
+        10,
+    );
+    set_pin(&index, "mock-model");
+    assert!(!index.migrate_backend_free_model_ids().expect("run"));
+    assert_eq!(
+        model_versions_in_use(&index),
+        vec!["bge-small-en-v1.5-fastembed".to_string()]
+    );
+    assert_eq!(pin(&index), "mock-model");
 }

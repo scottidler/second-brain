@@ -581,7 +581,7 @@ fn vec_schema_seeds_active_model_config() {
             |row| row.get(0),
         )
         .expect("active_model row");
-    assert_eq!(model, "bge-small-en-v1.5-candle");
+    assert_eq!(model, "bge-small-en-v1.5");
 
     let dim: String = index
         .conn

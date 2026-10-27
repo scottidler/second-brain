@@ -1,5 +1,14 @@
 use super::*;
 
+/// Backend-suffixed model ids a shipped binary wrote, each paired with the
+/// backend-free id it migrates to. `-fastembed` ids are absent on purpose: no
+/// shipped binary wrote them, so any such rows stay stale and re-embed.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub(crate) const LEGACY_MODEL_IDS: &[(&str, &str)] = &[
+    ("bge-small-en-v1.5-candle", crate::embedding::BGE_SMALL_MODEL_VERSION),
+    ("bge-base-en-v1.5-candle", crate::embedding::BGE_BASE_MODEL_VERSION),
+];
+
 impl super::SearchIndex {
     pub(crate) fn ensure_schema(&self) -> Result<()> {
         // Fresh-DB path: create the content table with every column. Existing
@@ -185,6 +194,9 @@ impl super::SearchIndex {
             INSERT OR IGNORE INTO embedding_config (key, value)
                 VALUES ('active_dim', '384');",
         )?;
+        // Before the seed below: a pre-existing `-candle` pin is renamed in
+        // place, and a fresh DB has no pin for the seed to collide with.
+        self.migrate_backend_free_model_ids()?;
         self.conn.execute(
             "INSERT OR IGNORE INTO embedding_config (key, value) VALUES ('active_model', ?1)",
             rusqlite::params![crate::embedding::ACTIVE_MODEL_VERSION],
@@ -284,6 +296,147 @@ impl super::SearchIndex {
                 Err(e)
             }
         }
+    }
+
+    /// Rename the backend-suffixed model ids in [`LEGACY_MODEL_IDS`] to their
+    /// backend-free ids in every place a model id is stored:
+    /// `embedding_config.active_model`, `note_embeddings.model_version` and
+    /// `embedding_examined.model_version` (the full set in this schema;
+    /// `docs/design/2026-10-27-cpu-tier-inference-backend.md`).
+    ///
+    /// Returns `true` if it changed anything. Guarantees:
+    ///
+    /// - **Idempotent and cheap when done.** A read-only probe runs first;
+    ///   with no legacy id left anywhere it returns without taking the write
+    ///   lock, so every later open pays only that read.
+    /// - **Dedup before rename.** An old cortex still running across a deploy
+    ///   can write `-candle` rows after a new binary renamed the DB, so both
+    ///   ids can hold the same `(note_path, kind)`. The rename would then hit
+    ///   `UNIQUE (note_path, kind, chunk_index, model_version)` (and the
+    ///   `embedding_examined` primary key). For each colliding
+    ///   `(note_path, kind)` the whole set with the newer `MAX(produced_at)`
+    ///   wins (ties keep the backend-free set) and the other set is deleted;
+    ///   `embedding_examined` keeps the newer `examined_at` the same way. The
+    ///   next open converges after any such race.
+    /// - **One transaction.** `BEGIN IMMEDIATE` → dedup → rename → `COMMIT`;
+    ///   any error rolls the whole thing back.
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+    pub(crate) fn migrate_backend_free_model_ids(&self) -> Result<bool> {
+        if !self.legacy_model_ids_present()? {
+            return Ok(false);
+        }
+        log::info!("search::migrate: renaming backend-suffixed embedding model ids to backend-free ids");
+
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            for (legacy, current) in LEGACY_MODEL_IDS {
+                self.rename_model_id(legacy, current)?;
+            }
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether any legacy id remains in the pin or either embedding table.
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+    fn legacy_model_ids_present(&self) -> Result<bool> {
+        for (legacy, _) in LEGACY_MODEL_IDS {
+            let present: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM embedding_config WHERE key = 'active_model' AND value = ?1)
+                     OR EXISTS (SELECT 1 FROM note_embeddings WHERE model_version = ?1)
+                     OR EXISTS (SELECT 1 FROM embedding_examined WHERE model_version = ?1)",
+                rusqlite::params![legacy],
+                |row| row.get(0),
+            )?;
+            if present {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Dedup then rename one `legacy` id to `current`. Runs inside the
+    /// caller's transaction.
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+    fn rename_model_id(&self, legacy: &str, current: &str) -> Result<()> {
+        let params = rusqlite::params![legacy, current];
+
+        // A (note_path, kind) whose legacy set is strictly newer drops its
+        // backend-free set. After this, every (note_path, kind) still holding
+        // both ids has the backend-free set newest (or tied).
+        let embeddings_superseded = self.conn.execute(
+            "DELETE FROM note_embeddings
+              WHERE model_version = ?2
+                AND (SELECT MAX(l.produced_at) FROM note_embeddings l
+                      WHERE l.model_version = ?1
+                        AND l.note_path = note_embeddings.note_path
+                        AND l.kind = note_embeddings.kind)
+                  > (SELECT MAX(c.produced_at) FROM note_embeddings c
+                      WHERE c.model_version = ?2
+                        AND c.note_path = note_embeddings.note_path
+                        AND c.kind = note_embeddings.kind)",
+            params,
+        )?;
+        let embeddings_dropped = self.conn.execute(
+            "DELETE FROM note_embeddings
+              WHERE model_version = ?1
+                AND EXISTS (SELECT 1 FROM note_embeddings c
+                             WHERE c.model_version = ?2
+                               AND c.note_path = note_embeddings.note_path
+                               AND c.kind = note_embeddings.kind)",
+            params,
+        )?;
+        let embeddings_renamed = self.conn.execute(
+            "UPDATE note_embeddings SET model_version = ?2 WHERE model_version = ?1",
+            params,
+        )?;
+
+        let examined_superseded = self.conn.execute(
+            "DELETE FROM embedding_examined
+              WHERE model_version = ?2
+                AND EXISTS (SELECT 1 FROM embedding_examined l
+                             WHERE l.model_version = ?1
+                               AND l.note_path = embedding_examined.note_path
+                               AND l.kind = embedding_examined.kind
+                               AND l.examined_at > embedding_examined.examined_at)",
+            params,
+        )?;
+        let examined_dropped = self.conn.execute(
+            "DELETE FROM embedding_examined
+              WHERE model_version = ?1
+                AND EXISTS (SELECT 1 FROM embedding_examined c
+                             WHERE c.model_version = ?2
+                               AND c.note_path = embedding_examined.note_path
+                               AND c.kind = embedding_examined.kind)",
+            params,
+        )?;
+        let examined_renamed = self.conn.execute(
+            "UPDATE embedding_examined SET model_version = ?2 WHERE model_version = ?1",
+            params,
+        )?;
+
+        let pin_renamed = self.conn.execute(
+            "UPDATE embedding_config SET value = ?2 WHERE key = 'active_model' AND value = ?1",
+            params,
+        )?;
+
+        log::info!(
+            "search::migrate: {legacy} -> {current}: note_embeddings renamed={embeddings_renamed} \
+             dropped-older={} embedding_examined renamed={examined_renamed} dropped-older={} pin={pin_renamed}",
+            embeddings_superseded + embeddings_dropped,
+            examined_superseded + examined_dropped,
+        );
+        Ok(())
     }
 
     /// Add cortex governance columns if they don't exist yet (handles schema migration)

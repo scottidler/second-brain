@@ -23,6 +23,12 @@
 //! The model identifier is stored in the search DB's `embedding_config`
 //! table as `active_model`; oracle and cortex read it on every dispatch so
 //! the two processes cannot drift onto different models.
+//!
+//! Model identifiers name the model, never the backend: [`MODELS`] is the one
+//! registry both backends read. Candle serves every entry; ONNX serves only an
+//! entry whose `onnx_parity` is set, which is what keeps a backend without a
+//! parity proof from writing vectors under an id
+//! (`docs/design/2026-10-27-cpu-tier-inference-backend.md`).
 
 use eyre::Result;
 #[cfg(feature = "vec-candle")]
@@ -44,16 +50,63 @@ pub use onnx::OnnxEmbedder;
 /// vectors are unit-length; the brute-force vector scan relies on this.
 pub const BGE_SMALL_EN_V15_DIM: usize = 384;
 
-/// Canonical model identifier written into `note_embeddings.model_version`
-/// and `embedding_config.active_model`. The value depends on the active
-/// backend feature: switching backend families changes this
-/// string, which triggers the existing stale-detection path in
-/// `vault::search::vector::stale_embedding_targets` to re-embed.
+/// Model identifier of `BAAI/bge-small-en-v1.5`, the default model.
+pub const BGE_SMALL_MODEL_VERSION: &str = "bge-small-en-v1.5";
+
+/// Model identifier of `BAAI/bge-base-en-v1.5`, the 768-dim A/B candidate.
+pub const BGE_BASE_MODEL_VERSION: &str = "bge-base-en-v1.5";
+
+/// One embedding model the backends can serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSpec {
+    /// Written into `note_embeddings.model_version` and
+    /// `embedding_config.active_model`. Names the model, not the backend.
+    pub id: &'static str,
+    /// Output dimensionality; checked against the checkpoint's `hidden_size`
+    /// at load.
+    pub dim: usize,
+    /// HuggingFace Hub repo both backends download from.
+    pub hf_repo: &'static str,
+    /// `true` only when an `otto ignored` test proves the ONNX vectors within
+    /// 1e-3 cosine of the model's reference fixture
+    /// (`vault/tests/regression/onnx/parity.rs`). ONNX refuses an entry
+    /// without it, so it can never write vectors under an id it has not
+    /// matched.
+    pub onnx_parity: bool,
+}
+
+/// Every model the registry knows. All entries are standard `BertModel`
+/// (CLS-pooled) checkpoints, so adding one is a row here, not a forward-code
+/// change. The operator A/Bs a candidate by re-pinning
+/// `embedding_config.active_model` (`sb cortex embed --model <id>`, which
+/// re-embeds on the change) and measuring with `sb oracle eval`.
 ///
-/// Kernel variants within a family (Candle scalar → AVX2 → MKL) keep the
-/// same string; fp32 drift across kernels is within cosine top-K tolerance.
-#[cfg(feature = "vec-candle")]
-pub const ACTIVE_MODEL_VERSION: &str = candle::CANDLE_MODEL_VERSION;
+/// `nomic-embed-text-v2` is deliberately absent: it is a different
+/// architecture (`nomic_bert`) and would need its own loader. Pointing
+/// `BertModel` at nomic weights would be silently wrong.
+pub const MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: BGE_SMALL_MODEL_VERSION,
+        dim: BGE_SMALL_EN_V15_DIM,
+        hf_repo: "BAAI/bge-small-en-v1.5",
+        onnx_parity: true,
+    },
+    ModelSpec {
+        id: BGE_BASE_MODEL_VERSION,
+        dim: 768,
+        hf_repo: "BAAI/bge-base-en-v1.5",
+        onnx_parity: false,
+    },
+];
+
+/// Look up a model by its identifier; `None` if the registry lacks it.
+pub fn model_spec(id: &str) -> Option<&'static ModelSpec> {
+    MODELS.iter().find(|spec| spec.id == id)
+}
+
+/// The model identifier a fresh search DB pins in
+/// `embedding_config.active_model`, and the fallback when no pin is readable.
+pub const ACTIVE_MODEL_VERSION: &str = BGE_SMALL_MODEL_VERSION;
 
 /// Type alias for the active embedding backend. Downstream crates (cortex,
 /// oracle) construct and store an `Arc<ActiveModel>` directly; the alias
@@ -74,10 +127,9 @@ pub trait EmbeddingModel: Send + Sync {
     /// Dimensionality of the output vectors.
     fn dim(&self) -> usize;
 
-    /// Stable model identifier, e.g. `"bge-small-en-v1.5-candle"`.
-    /// Written into `note_embeddings.model_version` so a backend swap
-    /// can co-exist with old rows (and the stale-detection path
-    /// invalidates them on a backend family change).
+    /// Stable model identifier, e.g. `"bge-small-en-v1.5"` (a [`ModelSpec`]
+    /// id). Written into `note_embeddings.model_version`; a model change
+    /// makes every row stale, a backend change does not.
     fn model_version(&self) -> &str;
 
     /// Embed one text. Returns a vector of length `self.dim()`.
@@ -121,7 +173,7 @@ pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
 
 /// Load a specific supported model by `model_version` (the A/B path).
 /// `workers == 0` means platform-default parallelism. The Candle backend
-/// supports the BERT-family registry (`candle::SUPPORTED_MODELS`).
+/// serves every [`MODELS`] entry.
 #[cfg(feature = "vec-candle")]
 pub fn load_model_version(model_version: &str, workers: usize) -> Result<ActiveModel> {
     candle::CandleBertModel::load_version(model_version, workers)

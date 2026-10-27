@@ -29,50 +29,18 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use super::EmbeddingModel;
+use super::{BGE_SMALL_MODEL_VERSION, EmbeddingModel, MODELS, ModelSpec, model_spec};
 
-/// HuggingFace Hub repo id for the default model.
-const MODEL_REPO: &str = "BAAI/bge-small-en-v1.5";
-
-/// Canonical model identifier when the active backend is Candle (the default).
-pub const CANDLE_MODEL_VERSION: &str = "bge-small-en-v1.5-candle";
-
-/// Embedding dimensionality of `BAAI/bge-small-en-v1.5`.
-pub const DIM: usize = 384;
-
-/// The larger 768-dim bge model. Same `BertModel`
-/// architecture as bge-small, so it rides the identical load + CLS-pool +
-/// forward path - only the weights and dim differ.
-pub const BGE_BASE_MODEL_VERSION: &str = "bge-base-en-v1.5-candle";
-
-/// Candle BERT-family models the backend can load: `(model_version, repo, dim)`.
-///
-/// All entries are standard `BertModel` (CLS-pooled) checkpoints, so adding one
-/// is just a row here - no forward-code change. The operator A/Bs a candidate
-/// by re-pinning `embedding_config.active_model` (via `sb cortex embed --model
-/// <version>`, which re-embeds on the model-version change) and measuring with
-/// `sb oracle eval`; the default stays bge-small unless a candidate wins.
-///
-/// `nomic-embed-text-v2` is deliberately NOT here: it is a different
-/// architecture (`nomic_bert`, not `BertModel`) and would need its own loader,
-/// not a registry entry. Pointing `BertModel` at nomic weights would be
-/// silently wrong.
-const SUPPORTED_MODELS: &[(&str, &str, usize)] = &[
-    (CANDLE_MODEL_VERSION, MODEL_REPO, DIM),
-    (BGE_BASE_MODEL_VERSION, "BAAI/bge-base-en-v1.5", 768),
-];
-
-/// Resolve a supported model version to its `(repo, dim)`; `None` if unknown.
-pub fn supported_model(version: &str) -> Option<(&'static str, usize)> {
-    SUPPORTED_MODELS
-        .iter()
-        .find(|(v, _, _)| *v == version)
-        .map(|(_, repo, dim)| (*repo, *dim))
+/// Resolve a model version to its registry entry; `None` if unknown. Candle
+/// serves every [`MODELS`] entry: it is the reference backend, so it needs no
+/// parity gate.
+pub fn supported_model(version: &str) -> Option<&'static ModelSpec> {
+    model_spec(version)
 }
 
 /// The model-version ids this backend can load (for error messages / probes).
 pub fn supported_versions() -> Vec<&'static str> {
-    SUPPORTED_MODELS.iter().map(|(v, _, _)| *v).collect()
+    MODELS.iter().map(|spec| spec.id).collect()
 }
 
 /// Hard token limit declared by the bge-small-en-v1.5 model card.
@@ -97,9 +65,8 @@ const DEFAULT_WORKERS: usize = 1;
 /// via rayon. Replica count is bounded by `MAX_WORKERS` and the caller's
 /// configured worker count.
 ///
-/// Backend identification (`CANDLE_MODEL_VERSION`) is independent of
-/// replica count and kernel choice; switching scalar → AVX2 → MKL does
-/// not change the model_version string.
+/// The model_version string names the model only; replica count, kernel
+/// choice and backend do not change it.
 pub struct CandleBertModel {
     replicas: Vec<Mutex<Inner>>,
     next_replica: AtomicUsize,
@@ -126,7 +93,7 @@ impl CandleBertModel {
     /// (`bge-small-en-v1.5`) with an explicit replica count. Thin wrapper over
     /// [`load_version`]; preserved so existing callers are byte-identical.
     pub fn load_with_workers(workers: usize) -> Result<Self> {
-        Self::load_version(CANDLE_MODEL_VERSION, workers)
+        Self::load_version(BGE_SMALL_MODEL_VERSION, workers)
     }
 
     /// Download (if needed) and load a supported model by `version`, with an
@@ -137,12 +104,7 @@ impl CandleBertModel {
     /// underlying physical pages across replicas so total RSS stays at one
     /// model's worth regardless of N.
     pub fn load_version(version: &str, workers: usize) -> Result<Self> {
-        let (repo, dim) = supported_model(version).ok_or_else(|| {
-            eyre::eyre!(
-                "unsupported Candle model version {version:?}; supported: {:?}",
-                supported_versions()
-            )
-        })?;
+        let ModelSpec { hf_repo: repo, dim, .. } = *lookup(version)?;
         // `workers == 0` means "platform default" (matches the old `load()` path).
         let workers = if workers == 0 {
             default_worker_count()
@@ -184,12 +146,7 @@ impl CandleBertModel {
     /// Idempotent prefetch of a supported model's files (config, tokenizer,
     /// weights) into the hf-hub cache without instantiating the model.
     pub fn prefetch_version(version: &str) -> Result<()> {
-        let (repo, _dim) = supported_model(version).ok_or_else(|| {
-            eyre::eyre!(
-                "unsupported Candle model version {version:?}; supported: {:?}",
-                supported_versions()
-            )
-        })?;
+        let repo = lookup(version)?.hf_repo;
         log::debug!("CandleBertModel::prefetch_version: version={version} repo={repo}");
         let _ = download_files(repo)?;
         log::info!("CandleBertModel::prefetch_version: cache warmed for {repo}");
@@ -199,7 +156,7 @@ impl CandleBertModel {
     /// Prefetch the default model (`bge-small-en-v1.5`). Used by
     /// `cortex embed --prefetch-model`. Thin wrapper over [`prefetch_version`].
     pub fn prefetch_bge_small() -> Result<()> {
-        Self::prefetch_version(CANDLE_MODEL_VERSION)
+        Self::prefetch_version(BGE_SMALL_MODEL_VERSION)
     }
 
     fn embed_inner(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -276,6 +233,15 @@ impl EmbeddingModel for CandleBertModel {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         self.embed_inner(texts)
     }
+}
+
+fn lookup(version: &str) -> Result<&'static ModelSpec> {
+    supported_model(version).ok_or_else(|| {
+        eyre::eyre!(
+            "unsupported Candle model version {version:?}; supported: {:?}",
+            supported_versions()
+        )
+    })
 }
 
 /// Pick a sensible default replica count for this machine. The cap is

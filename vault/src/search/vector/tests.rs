@@ -812,7 +812,7 @@ fn rrf_tie_at_limit_boundary_keeps_stable_membership() {
 fn active_embedding_model_reads_the_default_seed() {
     let index = SearchIndex::open_memory().expect("open");
     let m = index.active_embedding_model().expect("read");
-    assert_eq!(m, "bge-small-en-v1.5-candle");
+    assert_eq!(m, "bge-small-en-v1.5");
     let d = index.active_embedding_dim().expect("dim");
     assert_eq!(d, 384);
 }

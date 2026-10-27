@@ -52,12 +52,14 @@ fn pool_batch_matches_one_at_a_time_real_model() {
 
 #[test]
 fn supported_model_resolves_default_and_candidate() {
-    // Default (bge-small) maps to its repo + 384 dim.
-    assert_eq!(supported_model(CANDLE_MODEL_VERSION), Some((MODEL_REPO, DIM)));
-    // The bge-base candidate maps to its repo + 768 dim.
-    assert_eq!(
-        supported_model(BGE_BASE_MODEL_VERSION),
-        Some(("BAAI/bge-base-en-v1.5", 768))
+    // Candle serves every registry entry, with or without an ONNX parity proof.
+    let small = supported_model(BGE_SMALL_MODEL_VERSION).expect("bge-small");
+    assert_eq!((small.hf_repo, small.dim), ("BAAI/bge-small-en-v1.5", 384));
+    let base = supported_model(crate::embedding::BGE_BASE_MODEL_VERSION).expect("bge-base");
+    assert_eq!((base.hf_repo, base.dim), ("BAAI/bge-base-en-v1.5", 768));
+    assert!(
+        !base.onnx_parity,
+        "bge-base has no ONNX parity proof but Candle still serves it"
     );
     // Unknown versions (and nomic, which is a different architecture) are absent.
     assert_eq!(supported_model("nomic-embed-text-v2"), None);
@@ -65,10 +67,19 @@ fn supported_model_resolves_default_and_candidate() {
 }
 
 #[test]
+fn supported_model_rejects_the_backend_suffixed_ids() {
+    // The `-candle` ids are migrated away on DB open; nothing serves them.
+    assert_eq!(supported_model("bge-small-en-v1.5-candle"), None);
+    assert_eq!(supported_model("bge-base-en-v1.5-candle"), None);
+}
+
+#[test]
 fn supported_versions_lists_bert_family_only() {
     let versions = supported_versions();
-    assert!(versions.contains(&CANDLE_MODEL_VERSION));
-    assert!(versions.contains(&BGE_BASE_MODEL_VERSION));
+    assert_eq!(
+        versions,
+        vec![BGE_SMALL_MODEL_VERSION, crate::embedding::BGE_BASE_MODEL_VERSION]
+    );
     assert!(
         !versions.iter().any(|v| v.contains("nomic")),
         "nomic needs its own loader; it must not be in the BertModel registry"

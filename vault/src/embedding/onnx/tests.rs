@@ -7,6 +7,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use crate::embedding::BGE_SMALL_MODEL_VERSION;
 
 fn cpu(avx2: bool, fma: bool) -> CpuFeatures {
     CpuFeatures {
@@ -19,7 +20,7 @@ fn cpu(avx2: bool, fma: bool) -> CpuFeatures {
 
 #[test]
 fn load_refuses_a_cpu_without_avx2() {
-    let err = OnnxEmbedder::load_version(ONNX_MODEL_VERSION, 1, &cpu(false, true))
+    let err = OnnxEmbedder::load_version(BGE_SMALL_MODEL_VERSION, 1, &cpu(false, true))
         .err()
         .unwrap()
         .to_string();
@@ -28,7 +29,7 @@ fn load_refuses_a_cpu_without_avx2() {
 
 #[test]
 fn load_refuses_a_cpu_without_fma() {
-    let err = OnnxEmbedder::load_version(ONNX_MODEL_VERSION, 1, &cpu(true, false))
+    let err = OnnxEmbedder::load_version(BGE_SMALL_MODEL_VERSION, 1, &cpu(true, false))
         .err()
         .unwrap()
         .to_string();
@@ -54,12 +55,12 @@ fn prefetch_rejects_a_model_without_a_parity_proof_offline() {
 
 #[test]
 fn supported_model_lists_bge_small_only() {
-    assert_eq!(
-        supported_model(ONNX_MODEL_VERSION),
-        Some(("BAAI/bge-small-en-v1.5", 384))
-    );
+    let small = supported_model(BGE_SMALL_MODEL_VERSION).expect("bge-small");
+    assert_eq!((small.hf_repo, small.dim), ("BAAI/bge-small-en-v1.5", 384));
+    // In the registry, but without a parity proof.
+    assert!(crate::embedding::model_spec("bge-base-en-v1.5").is_some());
     assert_eq!(supported_model("bge-base-en-v1.5"), None);
-    assert_eq!(supported_versions(), vec![ONNX_MODEL_VERSION]);
+    assert_eq!(supported_versions(), vec![BGE_SMALL_MODEL_VERSION]);
 }
 
 #[test]
@@ -127,7 +128,7 @@ fn assert_unit(v: &[f32], what: &str) {
 #[test]
 #[ignore = "downloads bge-small onnx (~133 MB)"]
 fn pool_batch_matches_one_at_a_time_real_model() {
-    let model = OnnxEmbedder::load_version(ONNX_MODEL_VERSION, 4, &CpuFeatures::detect()).expect("load");
+    let model = OnnxEmbedder::load_version(BGE_SMALL_MODEL_VERSION, 4, &CpuFeatures::detect()).expect("load");
     let texts = mixed_texts();
     let inputs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let batched = model.embed_batch(&inputs).expect("batch");
@@ -150,7 +151,7 @@ fn pool_batch_matches_one_at_a_time_real_model() {
 #[test]
 #[ignore = "downloads bge-small onnx + safetensors (~266 MB)"]
 fn onnx_matches_candle_real_model() {
-    let onnx = OnnxEmbedder::load_version(ONNX_MODEL_VERSION, 4, &CpuFeatures::detect()).expect("load onnx");
+    let onnx = OnnxEmbedder::load_version(BGE_SMALL_MODEL_VERSION, 4, &CpuFeatures::detect()).expect("load onnx");
     let candle = crate::embedding::CandleBertModel::load_with_workers(2).expect("load candle");
     let texts = mixed_texts();
     let inputs: Vec<&str> = texts.iter().map(String::as_str).collect();

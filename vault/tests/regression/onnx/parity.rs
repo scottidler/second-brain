@@ -15,8 +15,9 @@
 
 use serde::Deserialize;
 use vault::cpu::CpuFeatures;
+use vault::embedding::BGE_SMALL_MODEL_VERSION;
 use vault::embedding::EmbeddingModel;
-use vault::embedding::onnx::{ONNX_MODEL_VERSION, OnnxEmbedder};
+use vault::embedding::onnx::OnnxEmbedder;
 
 const FIXTURE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bge-reference.json",);
 
@@ -55,7 +56,8 @@ fn onnx_matches_sentence_transformers_reference() {
     );
     assert!(!fixture.texts.is_empty(), "empty parity fixture");
 
-    let model = OnnxEmbedder::load_version(ONNX_MODEL_VERSION, 0, &CpuFeatures::detect()).expect("load OnnxEmbedder");
+    let model =
+        OnnxEmbedder::load_version(BGE_SMALL_MODEL_VERSION, 0, &CpuFeatures::detect()).expect("load OnnxEmbedder");
     for (text, expected) in fixture.texts.iter().zip(fixture.embeddings.iter()) {
         let got = model.embed_one(text).expect("embed_one");
         let got_norm = norm(&got);

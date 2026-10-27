@@ -11,9 +11,10 @@
 //! - **Threads.** One `Session` with `intra_threads = N`. ORT's thread pool is
 //!   the parallelism, so there are no replicas: `Session::run` takes `&mut
 //!   self` in `ort` rc.15, and the session sits behind a `Mutex`.
-//! - **Parity.** A model id is listed here only when an `otto ignored` test
-//!   proves its vectors within 1e-3 cosine of the sentence-transformers
-//!   reference (`vault/tests/regression/onnx/parity.rs`). Today that is
+//! - **Parity.** This backend serves a registry entry (`super::MODELS`) only
+//!   when its `onnx_parity` is set, i.e. an `otto ignored` test proves its
+//!   vectors within 1e-3 cosine of the sentence-transformers reference
+//!   (`vault/tests/regression/onnx/parity.rs`). Today that is
 //!   `bge-small-en-v1.5` alone.
 
 use eyre::{Result, WrapErr, eyre};
@@ -24,15 +25,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use super::EmbeddingModel;
+use super::{EmbeddingModel, MODELS, ModelSpec, model_spec};
 use crate::cpu::CpuFeatures;
 use crate::onnx::{build_session, require_onnx_capable};
-
-/// Model identifier this backend serves for `BAAI/bge-small-en-v1.5`.
-///
-/// Backend-free on purpose: the ONNX vectors match the Candle ones to 1e-13
-/// (measured on `ripr`), so the id names the model, not the runtime.
-pub const ONNX_MODEL_VERSION: &str = "bge-small-en-v1.5";
 
 /// Intra-op threads when the caller asks for the default (`threads == 0`).
 ///
@@ -47,21 +42,19 @@ const MAX_SEQ_LEN: usize = 512;
 /// Path of the ONNX export inside each HF repo.
 const MODEL_FILE: &str = "onnx/model.onnx";
 
-/// Models with an ONNX parity proof: `(model_version, hf_repo, dim)`.
-const SUPPORTED_MODELS: &[(&str, &str, usize)] = &[(ONNX_MODEL_VERSION, "BAAI/bge-small-en-v1.5", 384)];
-
-/// Resolve a model version to its `(hf_repo, dim)`; `None` if this backend
-/// has no parity proof for it.
-pub fn supported_model(version: &str) -> Option<(&'static str, usize)> {
-    SUPPORTED_MODELS
-        .iter()
-        .find(|(v, _, _)| *v == version)
-        .map(|(_, repo, dim)| (*repo, *dim))
+/// Resolve a model version to its registry entry; `None` if the registry
+/// lacks it or it has no ONNX parity proof.
+pub fn supported_model(version: &str) -> Option<&'static ModelSpec> {
+    model_spec(version).filter(|spec| spec.onnx_parity)
 }
 
 /// The model versions this backend can serve (for error messages).
 pub fn supported_versions() -> Vec<&'static str> {
-    SUPPORTED_MODELS.iter().map(|(v, _, _)| *v).collect()
+    MODELS
+        .iter()
+        .filter(|spec| spec.onnx_parity)
+        .map(|spec| spec.id)
+        .collect()
 }
 
 /// ONNX Runtime BERT encoder producing L2-normalized CLS embeddings.
@@ -82,7 +75,7 @@ impl OnnxEmbedder {
     pub fn load_version(version: &str, threads: usize, cpu: &CpuFeatures) -> Result<Self> {
         log::debug!("OnnxEmbedder::load_version: version={version} threads={threads}");
         require_onnx_capable(cpu)?;
-        let (repo, dim) = lookup(version)?;
+        let ModelSpec { hf_repo: repo, dim, .. } = *lookup(version)?;
         let threads = resolve_threads(threads);
         let files = download_files(repo)?;
 
@@ -122,7 +115,7 @@ impl OnnxEmbedder {
     /// session (so it runs on any CPU).
     pub fn prefetch_version(version: &str) -> Result<()> {
         log::debug!("OnnxEmbedder::prefetch_version: version={version}");
-        let (repo, _dim) = lookup(version)?;
+        let repo = lookup(version)?.hf_repo;
         download_files(repo)?;
         log::info!("OnnxEmbedder::prefetch_version: cache warmed for {repo}");
         Ok(())
@@ -224,7 +217,7 @@ fn available_parallelism() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
-fn lookup(version: &str) -> Result<(&'static str, usize)> {
+fn lookup(version: &str) -> Result<&'static ModelSpec> {
     supported_model(version).ok_or_else(|| {
         eyre!(
             "no ONNX parity proof for model version {version:?}; ONNX serves: {:?}",
