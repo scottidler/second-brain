@@ -1029,6 +1029,31 @@ impl SearchIndex {
         Ok(v)
     }
 
+    /// The pinned model id at `db_path`, read through a read-only connection:
+    /// never creates the file, never runs the schema migration, never takes a
+    /// write lock. `Ok(None)` when the file or the pin row is absent. For
+    /// reporters (`sb doctor`) that must not change what they inspect.
+    pub fn peek_active_model(db_path: &Path) -> Result<Option<String>> {
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let conn = rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| eyre::eyre!("open {} read-only: {e}", db_path.display()))?;
+        let pin = conn.query_row(
+            "SELECT value FROM embedding_config WHERE key = 'active_model'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match pin {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(eyre::eyre!(
+                "read embedding_config.active_model from {}: {e}",
+                db_path.display()
+            )),
+        }
+    }
+
     /// Read the active embedding dimension from `embedding_config`. Used
     /// by `search_vector` to validate the query vector matches the rows
     /// it is about to score.

@@ -96,6 +96,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: classifier_findings(),
         },
         Section {
+            name: "cpu",
+            findings: cpu::findings(),
+        },
+        Section {
             name: "embedding cache",
             findings: embedding_findings(),
         },
@@ -1414,6 +1418,7 @@ fn current_hostname() -> String {
     borg::config::current_hostname().unwrap_or_default()
 }
 
+mod cpu;
 mod eval;
 mod fabric_patterns;
 mod stop_timeout;

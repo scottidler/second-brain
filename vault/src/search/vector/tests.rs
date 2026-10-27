@@ -817,6 +817,28 @@ fn active_embedding_model_reads_the_default_seed() {
     assert_eq!(d, 384);
 }
 
+#[test]
+fn peek_active_model_reads_the_pin_without_migrating_or_creating() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("oracle.db");
+    assert_eq!(SearchIndex::peek_active_model(&path).expect("absent"), None);
+    assert!(!path.exists(), "peek must not create the file");
+
+    drop(SearchIndex::open(&path).expect("open"));
+    assert_eq!(
+        SearchIndex::peek_active_model(&path).expect("peek").as_deref(),
+        Some("bge-small-en-v1.5")
+    );
+}
+
+#[test]
+fn peek_active_model_errors_on_a_file_that_is_not_a_search_db() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("oracle.db");
+    std::fs::write(&path, b"not sqlite").expect("write");
+    assert!(SearchIndex::peek_active_model(&path).is_err());
+}
+
 // --- max-pool aggregation over summary + transcript-chunk -----
 
 #[test]
