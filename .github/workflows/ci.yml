@@ -18,7 +18,9 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    container: debian:bookworm
+    # trixie, not bookworm: the static ONNX Runtime archive `ort` links needs
+    # glibc 2.38+ (__isoc23_strtol) and GCC 13+ libstdc++ (_M_replace_cold).
+    container: debian:trixie
     steps:
       - name: Install build dependencies
         run: |
@@ -66,7 +68,7 @@ jobs:
       # Mirrors the `bloat` task (.otto.yml:22-49). Needs an explicit bash:
       # the loop below feeds `find` in through process substitution, which is
       # a bashism, and GitHub's default shell in a container is `sh -e` (dash
-      # on debian:bookworm), where it is a syntax error.
+      # on debian:trixie), where it is a syntax error.
       - name: Check file line counts
         shell: bash
         run: |

@@ -16,7 +16,9 @@ permissions:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    container: debian:bookworm
+    # trixie, not bookworm: the static ONNX Runtime archive `ort` links needs
+    # glibc 2.38+ (__isoc23_strtol) and GCC 13+ libstdc++ (_M_replace_cold).
+    container: debian:trixie
     strategy:
       matrix:
         include:
