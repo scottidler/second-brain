@@ -506,6 +506,20 @@ pub(super) fn print_server_banner(s: &borg::ServerStartup) {
     }
 }
 
+/// One line per ingest target: `<target> -> queued <trace>` |
+/// `-> ingested <note path>` | `-> failed: <reason>`.
+pub(super) fn render_target_line(report: &borg::TargetReport) -> String {
+    let target = &report.target;
+    match &report.result {
+        Ok(borg::IngestOutcome::Queued { trace_id }) => format!("{target} -> queued {trace_id}"),
+        Ok(borg::IngestOutcome::Captured { path, .. }) => format!("{target} -> ingested {path}"),
+        Ok(borg::IngestOutcome::Duplicate { original_date }) => {
+            format!("{target} -> ingested (duplicate of {original_date})")
+        }
+        Ok(borg::IngestOutcome::Failed { reason }) | Err(reason) => format!("{target} -> failed: {reason}"),
+    }
+}
+
 /// Format and emit a borg `IngestOutcome`. Failed outcomes write to stderr
 /// and exit with code 1 to preserve the prior shell contract.
 pub(super) fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> {
@@ -516,8 +530,8 @@ pub(super) fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> 
         borg::IngestOutcome::Duplicate { original_date } => {
             println!("Duplicate: already ingested on {original_date}");
         }
-        borg::IngestOutcome::Queued => {
-            println!("Queued for processing.");
+        borg::IngestOutcome::Queued { trace_id } => {
+            println!("Queued for processing: {trace_id}");
         }
         borg::IngestOutcome::Failed { reason } => {
             eprintln!("Error: {reason}");

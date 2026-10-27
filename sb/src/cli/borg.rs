@@ -44,28 +44,44 @@ impl BorgCli {
                 }
             }
             Some(Command::Ingest {
-                url,
+                targets,
                 clipboard,
-                file,
                 tags,
                 force,
                 note,
             }) => {
-                let outcome = if let Some(file_path) = file {
-                    if note.is_some() {
-                        eyre::bail!("--note applies to URL ingest, not --file");
+                if clipboard {
+                    let url = borg::resolve_ingest_url(None, true)?;
+                    let outcome =
+                        borg::ingest(config, url, tags, force, borg::types::IngestMethod::Clipboard, note).await?;
+                    return print_ingest_outcome(&outcome);
+                }
+                let classified = match borg::classify_targets(&targets, tags.as_deref(), note.as_deref()) {
+                    Ok(classified) => classified,
+                    Err(usage) => {
+                        eprintln!("Error: {usage}");
+                        return Err(crate::error::ExitWith(2).into());
                     }
-                    borg::ingest_file(config, file_path, tags, force).await?
-                } else {
-                    let resolved_url = borg::resolve_ingest_url(url, clipboard)?;
-                    let method = if clipboard {
-                        borg::types::IngestMethod::Clipboard
-                    } else {
-                        borg::types::IngestMethod::Cli
-                    };
-                    borg::ingest(config, resolved_url, tags, force, method, note).await?
                 };
-                print_ingest_outcome(&outcome)
+                let file_tags = tags.clone();
+                let run = borg::ingest_targets(
+                    &config,
+                    classified,
+                    tags,
+                    force,
+                    note,
+                    borg::send_notification,
+                    |path| borg::ingest_file(config.clone(), path, file_tags.clone(), force),
+                    |report| match report.failed() {
+                        true => eprintln!("{}", render_target_line(report)),
+                        false => println!("{}", render_target_line(report)),
+                    },
+                )
+                .await;
+                match run.any_failed() {
+                    true => Err(crate::error::ExitWith(1).into()),
+                    false => Ok(()),
+                }
             }
             Some(Command::Note { text, clipboard, tags }) => {
                 let resolved_text = borg::resolve_note_text(text, clipboard)?;

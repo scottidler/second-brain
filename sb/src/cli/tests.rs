@@ -47,9 +47,9 @@ fn the_hotkey_command_parses_as_a_borg_clipboard_ingest() {
     let words: Vec<&str> = command.split_whitespace().collect();
     match parse_with_sb(&words) {
         Cmd::Borg(c) => match c.command {
-            Some(borg::Command::Ingest { clipboard, url, .. }) => {
+            Some(borg::Command::Ingest { clipboard, targets, .. }) => {
                 assert!(clipboard, "the hotkey must read the clipboard");
-                assert!(url.is_none());
+                assert!(targets.is_empty());
             }
             _ => panic!("hotkey command did not parse as `borg ingest`: {command}"),
         },

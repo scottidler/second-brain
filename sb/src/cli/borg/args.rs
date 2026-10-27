@@ -29,15 +29,16 @@ pub struct BorgCli {
 pub enum Command {
     /// Manage the daemon (install, start, stop, status, etc.)
     Daemon(DaemonArgs),
-    /// Send a URL to the running daemon for ingestion
+    /// Ingest 1+ targets: http(s) URLs (queued on the daemon) and/or file
+    /// paths (ingested in-process on this host)
     Ingest {
-        url: Option<String>,
-        /// Read the URL from the clipboard instead of taking it as an argument
-        #[arg(long)]
+        /// URLs or file paths, space-separated. Put them before -t/--tags,
+        /// which is greedy
+        #[arg(required_unless_present = "clipboard")]
+        targets: Vec<String>,
+        /// Read one URL from the clipboard instead of taking targets
+        #[arg(long, conflicts_with = "targets")]
         clipboard: bool,
-        /// Ingest this local file instead of a URL
-        #[arg(long)]
-        file: Option<PathBuf>,
         /// Operator tags to seed the note with (space-separated). They enter
         /// the classifier as author-side candidates, not as final tags
         #[arg(short, long, num_args = 0..)]
@@ -46,9 +47,9 @@ pub enum Command {
         /// which preserves the existing note's location and cortex fields)
         #[arg(long)]
         force: bool,
-        /// Why you are capturing this URL. Rendered into the note's
+        /// Why you are capturing these URLs. Rendered into each note's
         /// `## Why Captured` section and given to the distiller as the stated
-        /// interest. Applies to URL ingest only
+        /// interest. Applies to URL targets only; a file target with --note is an error
         #[arg(long)]
         note: Option<String>,
     },

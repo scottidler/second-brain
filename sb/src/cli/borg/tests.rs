@@ -494,3 +494,30 @@ fn distill_without_a_url_is_a_usage_error() {
     let err = DistillHarness::try_parse_from(["sb", "distill"]).err().unwrap();
     assert_eq!(err.exit_code(), 2);
 }
+
+#[test]
+fn target_lines_render_queued_ingested_and_failed() {
+    let line = |result| {
+        render_target_line(&borg::TargetReport {
+            target: "t".to_string(),
+            is_url: true,
+            result,
+        })
+    };
+    assert_eq!(
+        line(Ok(borg::IngestOutcome::Queued { trace_id: "tr1".into() })),
+        "t -> queued tr1"
+    );
+    assert_eq!(
+        line(Ok(borg::IngestOutcome::Captured {
+            title: "x".into(),
+            path: "notes/x.md".into()
+        })),
+        "t -> ingested notes/x.md"
+    );
+    assert_eq!(
+        line(Ok(borg::IngestOutcome::Failed { reason: "boom".into() })),
+        "t -> failed: boom"
+    );
+    assert_eq!(line(Err("no daemon".into())), "t -> failed: no daemon");
+}

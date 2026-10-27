@@ -5,6 +5,7 @@
 use eyre::{Context, Result};
 
 pub mod distill;
+pub mod targets;
 
 use crate::config::{self, Config};
 use crate::{assets, intake, ledger, notify, pipeline, replay, trace, types};
@@ -29,10 +30,20 @@ pub fn resolve_note_text(text: Option<String>, clipboard: bool) -> Result<String
 /// variant to the corresponding stdout/stderr/exit-code combo.
 #[derive(Debug)]
 pub enum IngestOutcome {
-    Captured { title: String, path: String },
-    Duplicate { original_date: String },
-    Failed { reason: String },
-    Queued,
+    Captured {
+        title: String,
+        path: String,
+    },
+    Duplicate {
+        original_date: String,
+    },
+    Failed {
+        reason: String,
+    },
+    /// The daemon accepted the submit; `trace_id` names the receipts row.
+    Queued {
+        trace_id: String,
+    },
 }
 
 pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Result<IngestOutcome> {
@@ -55,7 +66,7 @@ pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Re
         false,
         &config,
         &pipeline::PublishPolicy::Vault,
-        Some(trace_id),
+        Some(trace_id.clone()),
         None,
     )
     .await;
@@ -67,7 +78,7 @@ pub async fn note(config: Config, text: String, tags: Option<Vec<String>>) -> Re
         },
         types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
         types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
-        types::IngestStatus::Queued => IngestOutcome::Queued,
+        types::IngestStatus::Queued => IngestOutcome::Queued { trace_id },
     })
 }
 
@@ -142,7 +153,7 @@ pub async fn ingest_file(
         force,
         &config,
         &pipeline::PublishPolicy::Vault,
-        Some(trace_id),
+        Some(trace_id.clone()),
         None,
     )
     .await;
@@ -154,7 +165,7 @@ pub async fn ingest_file(
         },
         types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
         types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
-        types::IngestStatus::Queued => IngestOutcome::Queued,
+        types::IngestStatus::Queued => IngestOutcome::Queued { trace_id },
     })
 }
 
@@ -528,26 +539,40 @@ pub async fn ingest(
     method: types::IngestMethod,
     note: Option<String>,
 ) -> Result<IngestOutcome> {
+    post_ingest(&config, &url, tags, force, method, note.as_deref(), &send_notification).await
+}
+
+/// POST one URL to `/ingest`. `toast` is called when the POST itself fails.
+async fn post_ingest(
+    config: &Config,
+    url: &str,
+    tags: Option<Vec<String>>,
+    force: bool,
+    method: types::IngestMethod,
+    note: Option<&str>,
+    toast: &dyn Fn(&str, &str),
+) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
 
-    let body = ingest_body(&url, tags, force, method, note.as_deref());
+    let body = ingest_body(url, tags, force, method, note);
 
     // The client sends the write-route Bearer token when one is configured, so
     // enabling server.auth-token doesn't 401 this first-party CLI path.
     let daemon = vault::daemon::client::DaemonClient::new(&config.hotkey, config.server.auth_token.as_deref())?;
-    // The Error toast here is unconditional and load-bearing: when the HTTP
-    // POST itself fails (daemon not running), the daemon by definition
-    // cannot deliver the failure notification. The CLI may be wired to a
-    // desktop hotkey where stderr is not visible. This is the symmetric
-    // counterpart to the `fail()` / `catch (err)` path in popup.js.
+    // The Error toast here is unconditional and load-bearing for a single
+    // target: when the HTTP POST itself fails (daemon not running), the daemon
+    // by definition cannot deliver the failure notification. The CLI may be
+    // wired to a desktop hotkey where stderr is not visible. A multi-target
+    // run passes a silent `toast` and sends one aggregated toast instead
+    // (`targets::ingest_targets`).
     let response = daemon.post_json("/ingest", &body).await.map_err(|e| {
         let msg = if e.is_connect() {
             format!("cannot reach the borg daemon at http://{host}:{port} - is the daemon running?")
         } else {
             format!("{e}")
         };
-        send_notification("Error", &msg);
+        toast("Error", &msg);
         eyre::eyre!("{msg}")
     })?;
 
@@ -561,7 +586,10 @@ pub async fn ingest(
         }
         types::IngestStatus::Duplicate { original_date } => IngestOutcome::Duplicate { original_date },
         types::IngestStatus::Failed { reason } => IngestOutcome::Failed { reason },
-        types::IngestStatus::Queued => IngestOutcome::Queued,
+        types::IngestStatus::Queued => match result.trace_id {
+            Some(trace_id) => IngestOutcome::Queued { trace_id },
+            None => eyre::bail!("the daemon answered Queued without a trace id"),
+        },
     })
 }
 
@@ -570,7 +598,7 @@ pub async fn ingest(
 /// how long the toast stays on screen, so it is intentionally longer.
 const HOTKEY_NOTIFY_DISPLAY_MS: u32 = 5000;
 
-fn send_notification(summary: &str, body: &str) {
+pub fn send_notification(summary: &str, body: &str) {
     if notify::real_notifications_disabled() {
         log::debug!("send_notification: suppressed under test (summary={summary:?})");
         return;

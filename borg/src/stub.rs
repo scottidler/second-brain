@@ -21,6 +21,10 @@ pub(crate) enum Behavior {
     RequireToken { token: String, body: String },
     /// Answers 401 with a non-JSON body.
     Unauthorized,
+    /// A `/ingest` daemon: answers `Queued` with a fresh trace id, except a
+    /// request whose body contains `drop_marker`, which is dropped unanswered
+    /// (a transport failure on the client's POST).
+    IngestDropping { drop_marker: String },
     /// An ntfy subscription: chunked headers, an `open` event, then a
     /// `keepalive` event every `every`, for 30 s.
     NtfyKeepalives { every: Duration },
@@ -87,6 +91,21 @@ pub(crate) async fn serve(behavior: Behavior) -> (u16, Arc<Mutex<Vec<String>>>) 
                                 .as_bytes()
                                 .to_vec()
                         }
+                    }
+                    Behavior::IngestDropping { drop_marker } => {
+                        if request.contains(drop_marker.as_str()) {
+                            return;
+                        }
+                        let n = log.lock().expect("stub log").len();
+                        json_reply(
+                            "200 OK",
+                            &serde_json::json!({
+                                "status": "Queued", "note_path": null, "title": null, "tags": [],
+                                "trace_id": format!("stub-trace-{n}"),
+                            })
+                            .to_string(),
+                        )
+                        .into_bytes()
                     }
                     Behavior::NtfyKeepalives { every } => {
                         stream_ntfy_keepalives(&mut sock, *every).await;
