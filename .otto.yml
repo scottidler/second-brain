@@ -271,12 +271,24 @@ tasks:
       echo "✅ Cargo.lock refreshed; run 'otto deploy' to install with the new lock"
 
   install:
-    help: "Install workspace binaries locally (one parallel cargo build, locked)"
+    help: "Install workspace binaries locally (one parallel cargo build, locked); stops and restarts running daemons around the install"
     bash: |
       cargo build --release --locked --workspace --bins
       BINS=$(cargo metadata --format-version 1 --no-deps \
         | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
         | sort -u)
+      # Same reason as deploy: an old cortex running beside a new binary
+      # re-pins the legacy model id after the new binary migrates oracle.db.
+      DAEMONS=""
+      for unit in borg cortex; do
+        if systemctl --user cat "$unit.service" >/dev/null 2>&1; then
+          DAEMONS="$DAEMONS $unit"
+        fi
+      done
+      if [ -n "$DAEMONS" ]; then
+        trap 'systemctl --user start $DAEMONS' EXIT
+        systemctl --user stop $DAEMONS
+      fi
       for bin in $BINS; do
         install -m 0755 "target/release/$bin" "$HOME/.cargo/bin/$bin"
       done
@@ -306,8 +318,10 @@ tasks:
         fi
       done
       if [ -n "$DAEMONS" ]; then
-        systemctl --user stop $DAEMONS
+        # Trap before stop: a partial stop (borg stopped, cortex refused)
+        # exits under `set -e` and must still start what it stopped.
         trap 'systemctl --user start $DAEMONS' EXIT
+        systemctl --user stop $DAEMONS
       fi
 
       for bin in $BINS; do

@@ -39,7 +39,9 @@ fn findings_for(
     let pin = match pin {
         Ok(Some(model)) => {
             findings.push(pin_finding(&model));
-            Some(model)
+            // The loaders open (and so migrate) the DB before they resolve,
+            // so a legacy pin resolves as the id it is about to become.
+            Some(vault::search::migrated_model_id(&model).map_or(model, str::to_string))
         }
         Ok(None) => {
             findings.push(Finding::info(
@@ -92,6 +94,11 @@ fn features_finding(cpu: &CpuFeatures) -> Finding {
 }
 
 fn pin_finding(model: &str) -> Finding {
+    if let Some(current) = vault::search::migrated_model_id(model) {
+        return Finding::info(format!(
+            "db pin: {model} (legacy id, renamed to {current} on the next open by this build)"
+        ));
+    }
     match model_spec(model) {
         Some(spec) => Finding::ok(format!(
             "db pin: {model} (onnx parity: {})",
@@ -99,9 +106,7 @@ fn pin_finding(model: &str) -> Finding {
         )),
         None => Finding::warn(
             format!("db pin: {model} is not in the model registry"),
-            "a legacy `-candle` id is renamed when cortex or oracle on this build opens the search DB; \
-             otherwise sb cortex embed --model bge-small-en-v1.5"
-                .to_string(),
+            "sb cortex embed --model bge-small-en-v1.5".to_string(),
         ),
     }
 }

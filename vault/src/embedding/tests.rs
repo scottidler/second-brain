@@ -82,7 +82,7 @@ fn embed_query_rejects_unknown_model_version() {
 #[cfg(feature = "vec")]
 #[test]
 fn embed_query_onnx_pin_on_incapable_cpu_fails_before_loading() {
-    // An AVX-only CPU with `onnx` pinned must error at resolution: no
+    // A CPU lacking AVX2+FMA with `onnx` pinned must error at resolution: no
     // download, no `ort` call, no registry entry.
     let avx_only = crate::cpu::CpuFeatures {
         avx: true,
@@ -93,7 +93,7 @@ fn embed_query_onnx_pin_on_incapable_cpu_fails_before_loading() {
         threads: 0,
     };
     let err = embed_query("hello", BGE_SMALL_MODEL_VERSION, &inference, &avx_only)
-        .expect_err("onnx pinned on an AVX-only CPU must fail")
+        .expect_err("onnx pinned on a CPU lacking AVX2+FMA must fail")
         .to_string();
     assert!(err.contains("lacks avx2 and fma"), "got: {err}");
 }

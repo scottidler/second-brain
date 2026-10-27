@@ -353,6 +353,9 @@ pub use vector::{
     reciprocal_rank_fusion, reciprocal_rank_fusion_weighted,
 };
 
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub use schema::migrated_model_id;
+
 mod graph;
 
 pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};

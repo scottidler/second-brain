@@ -9,6 +9,16 @@ pub(crate) const LEGACY_MODEL_IDS: &[(&str, &str)] = &[
     ("bge-base-en-v1.5-candle", crate::embedding::BGE_BASE_MODEL_VERSION),
 ];
 
+/// The backend-free id a legacy pin migrates to on the next open, or `None`
+/// for an id the migration does not own.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn migrated_model_id(legacy: &str) -> Option<&'static str> {
+    LEGACY_MODEL_IDS
+        .iter()
+        .find(|(old, _)| *old == legacy)
+        .map(|(_, current)| *current)
+}
+
 impl super::SearchIndex {
     pub(crate) fn ensure_schema(&self) -> Result<()> {
         // Fresh-DB path: create the content table with every column. Existing

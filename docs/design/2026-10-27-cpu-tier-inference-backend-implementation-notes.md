@@ -208,3 +208,22 @@ Scratch branch `cpu-tier-phase0-spike`, commit `d361970`, worktree `/home/saidle
 
 ### Open questions
 - None.
+
+## Implementation audit (review panel round 1, orchestrator fold)
+
+Panel run: `~/.cache/review-panel/runs/p3CfEBVO/synthesis.md`. The architect seat delivered; the staff-engineer seat hit its 10 min cap (rc=124), and the panel re-tested its interim findings itself.
+
+### Design decisions
+- `otto deploy`: the EXIT trap is now set before `systemctl --user stop`. Supersedes the Phase 3 entry claiming "a failed deploy never leaves the daemons down": under `set -euo pipefail` a partial stop exited before the trap existed (the panel reproduced it with a stubbed `systemctl`).
+- `otto install` gets the same stop, trap and start around the binary install. It had the same race as deploy: a new binary migrating `oracle.db` beside a running old cortex.
+- Doctor `cpu` section: a legacy `-candle` pin is now an info line naming the id it migrates to, and the backend lines resolve against that id (`vault::search::migrated_model_id`, `sb/src/cli/checks/cpu.rs:pin_finding` and `findings_for`). Supersedes the Phase 6 legacy-pin Warn, whose advice was false: the same doctor run's `vault` section opens the DB and migrates it, and the loaders migrate before they resolve. The unregistered-id Warn stays for any other unknown pin. Test: `legacy_pin_is_info_and_resolves_as_its_migrated_id`.
+- Four test strings said "AVX-only CPU" about a generic incapable CPU; reworded to "a CPU lacking AVX2+FMA" so the Phase 7 / acceptance `avx-only` check passes as written.
+
+### Deviations
+- Phase 1 criterion amended in the doc: Phases 3 and 4 add 8 `fastembed` lines on purpose (negative cases for the migration and the config enum). This is a doc defect: the criterion pins zero, and later phases' own work has to name the removed backend.
+
+### Tradeoffs
+- Fixes land as one follow-up commit, not folded into the phase commits: interactive rebase is unavailable here, and the repo's precedent is a separate "fold the implementation-audit findings" commit.
+
+### Open questions
+- None. Deferred by the panel: the acceptance criteria and the deploy stop/start are only checkable on `ripr` after the deploy.

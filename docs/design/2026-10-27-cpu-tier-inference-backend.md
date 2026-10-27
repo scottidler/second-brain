@@ -295,6 +295,8 @@ pub fn resolve_backend(req: BackendChoice, cpu: &CpuFeatures, model: &str) -> ey
 - **Success criteria:**
   - `rg -n -i --hidden --glob '!.git/**' --glob '!docs/**' --glob '!config/**' --glob '!Cargo.lock' fastembed` returns no matches (`config/` holds generated glossary and eval fixture text, not code; `--hidden` catches `.otto.yml` and `.gitignore`)
     - Observed on main: 83 matching lines
+    - Observed at Phase 1 (`3bf5ef7`): no matches (rg exit 1)
+    - Amended at the implementation audit: the zero-match check holds at Phase 1 only. Phases 3 and 4 add 8 lines that name the removed backend as a negative case, by design: the migration leaves `-fastembed` rows alone (`vault/src/search/schema.rs`, `schema/tests.rs`) and `backend: fastembed` must fail config load (`embedding/backend/tests.rs`, `cortex/src/config/tests.rs`). No production path names fastembed.
   - `otto ci` exits 0
 
 #### Phase 2: `OnnxEmbedder`

@@ -99,7 +99,7 @@ fn onnx_pin_on_avx_only_fails_without_loading() {
         &avx_only(),
         recording_load(&mut seen),
     ) {
-        Ok(_) => panic!("onnx on an AVX-only CPU must fail"),
+        Ok(_) => panic!("onnx on a CPU lacking AVX2+FMA must fail"),
         Err(e) => format!("{e:#}"),
     };
     assert!(err.contains("lacks avx2 and fma"), "{err}");

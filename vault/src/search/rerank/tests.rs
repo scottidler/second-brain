@@ -130,7 +130,7 @@ mod resolution {
         };
         let err = get_or_load_reranker(RERANK_MODEL_ID, &inference, &cpu(false))
             .err()
-            .expect("no ONNX on an AVX-only CPU")
+            .expect("no ONNX on a CPU lacking AVX2+FMA")
             .to_string();
         assert!(err.contains("lacks avx2 and fma"), "{err}");
     }

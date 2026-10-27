@@ -91,6 +91,30 @@ fn pin_finding_reports_parity_and_flags_an_unknown_model() {
 }
 
 #[test]
+fn legacy_pin_is_info_and_resolves_as_its_migrated_id() {
+    let legacy = pin_finding("bge-small-en-v1.5-candle");
+    assert_eq!(legacy.severity, Severity::Info);
+    assert!(
+        legacy.message.contains("renamed to bge-small-en-v1.5"),
+        "{}",
+        legacy.message
+    );
+
+    let findings = findings_for(
+        &avx512_host(),
+        Some(BackendChoice::Auto),
+        Some(BackendChoice::Auto),
+        Ok(Some("bge-small-en-v1.5-candle".to_string())),
+    );
+    let backends: Vec<_> = findings.iter().filter(|f| f.message.contains("backend:")).collect();
+    assert_eq!(backends.len(), 2);
+    assert!(
+        backends.iter().all(|f| f.message.contains("backend: onnx")),
+        "{backends:?}"
+    );
+}
+
+#[test]
 fn unreadable_pin_is_an_error_and_a_missing_pin_is_info() {
     let findings = findings_for(&avx512_host(), None, None, Err(eyre::eyre!("boom")));
     assert!(
