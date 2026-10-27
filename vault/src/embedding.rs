@@ -18,8 +18,9 @@
 //!
 //! Both processes pin `bge-small-en-v1.5` (384 dims, L2-normalized output).
 //! Two backends compile in: [`candle`] (any x86_64 CPU) and [`onnx`] (ONNX
-//! Runtime, AVX2+FMA only, gated by `vault::cpu`). The load paths below
-//! still load Candle; the `EmbeddingModel` trait is the shared seam.
+//! Runtime, AVX2+FMA only, gated by `vault::cpu`). Every load path takes a
+//! [`Backend`], resolved from config plus the detected CPU by
+//! [`resolve_backend`], and returns a `dyn EmbeddingModel`.
 //! The model identifier is stored in the search DB's `embedding_config`
 //! table as `active_model`; oracle and cortex read it on every dispatch so
 //! the two processes cannot drift onto different models.
@@ -31,9 +32,10 @@
 //! (`docs/design/2026-10-27-cpu-tier-inference-backend.md`).
 
 use eyre::Result;
-#[cfg(feature = "vec-candle")]
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 use std::sync::{Arc, OnceLock, RwLock};
 
+pub mod backend;
 #[cfg(feature = "vec-candle")]
 pub mod candle;
 
@@ -44,6 +46,11 @@ pub mod onnx;
 pub use candle::CandleBertModel;
 #[cfg(feature = "vec-onnx")]
 pub use onnx::OnnxEmbedder;
+
+pub use backend::{Backend, BackendChoice, InferenceConfig, resolve_backend, resolve_backend_logged};
+
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+use crate::cpu::CpuFeatures;
 
 /// Pin: `bge-small-en-v1.5` outputs 384-dim L2-normalized vectors. Cosine
 /// similarity reduces to a plain dot product because both query and stored
@@ -108,17 +115,12 @@ pub fn model_spec(id: &str) -> Option<&'static ModelSpec> {
 /// `embedding_config.active_model`, and the fallback when no pin is readable.
 pub const ACTIVE_MODEL_VERSION: &str = BGE_SMALL_MODEL_VERSION;
 
-/// Type alias for the active embedding backend. Downstream crates (cortex,
-/// oracle) construct and store an `Arc<ActiveModel>` directly; the alias
-/// keeps their code free of `#[cfg]` blocks.
-#[cfg(feature = "vec-candle")]
-pub type ActiveModel = CandleBertModel;
-
 /// Port for the embedding model.
 ///
 /// The trait is the seam tests use to inject [`MockEmbedder`] without
-/// loading the real ~100 MB model. Production code calls the trait
-/// through the active backend impl or the [`embed_query`] convenience.
+/// loading the real ~100 MB model. Production code holds a
+/// `dyn EmbeddingModel` from [`load_model_version`] or calls the
+/// [`embed_query`] convenience.
 ///
 /// `Send + Sync` so a single instance can be shared across threads
 /// (cortex holds one in its daemon; oracle's [`embed_query`] keeps
@@ -144,69 +146,98 @@ pub trait EmbeddingModel: Send + Sync {
     }
 }
 
-#[cfg(feature = "vec-candle")]
-type RegistryEntry = (String, Arc<ActiveModel>);
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+type RegistryEntry = (String, Arc<dyn EmbeddingModel>);
 
 /// Process-local registry of loaded models, keyed by `model_version`.
 ///
 /// Oracle dispatches every query embedding through [`embed_query`]; the
-/// first call for a given `model_version` performs the lazy load, stores
-/// the `Arc<ActiveModel>` in the registry, and returns. Subsequent calls
+/// first call for a given `model_version` resolves the backend, performs the
+/// lazy load, stores the model in the registry, and returns. Subsequent calls
 /// hit the registry at ~0 ms overhead. Model bumps are rare, so holding
-/// multiple models resident is acceptable.
-#[cfg(feature = "vec-candle")]
+/// multiple models resident is acceptable. The backend is fixed per process
+/// (it comes from config and the CPU), so the key needs no backend part.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 static MODEL_REGISTRY: OnceLock<RwLock<Vec<RegistryEntry>>> = OnceLock::new();
 
-#[cfg(feature = "vec-candle")]
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
     MODEL_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Backend-agnostic active-model loader.
+/// Load the default model ([`ACTIVE_MODEL_VERSION`]) on `backend`.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn load_active_model(backend: Backend, threads: usize, cpu: &CpuFeatures) -> Result<Box<dyn EmbeddingModel>> {
+    load_model_version(ACTIVE_MODEL_VERSION, backend, threads, cpu)
+}
+
+/// Load `model_version` on the resolved `backend` (see [`resolve_backend`]).
 ///
-/// Candle accepts a worker count for its internal replica pool; pass
-/// `0` to let it pick the platform-aware default.
-#[cfg(feature = "vec-candle")]
-pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
-    load_model_version(ACTIVE_MODEL_VERSION, workers)
+/// `threads == 0` is the backend's default. Candle reads it as its replica
+/// count (`min(8, available_parallelism)` at 0); ONNX as its intra-op thread
+/// count ([`onnx::DEFAULT_ONNX_THREADS`] at 0, capped at available
+/// parallelism). `cpu` reaches the ONNX loader, which refuses an incapable
+/// CPU before any `ort` call.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn load_model_version(
+    model_version: &str,
+    backend: Backend,
+    threads: usize,
+    cpu: &CpuFeatures,
+) -> Result<Box<dyn EmbeddingModel>> {
+    log::debug!("embedding::load_model_version: model={model_version} backend={backend} threads={threads}");
+    match backend {
+        #[cfg(feature = "vec-candle")]
+        Backend::Candle => {
+            let _ = cpu;
+            Ok(Box::new(candle::CandleBertModel::load_version(model_version, threads)?))
+        }
+        #[cfg(feature = "vec-onnx")]
+        Backend::Onnx => Ok(Box::new(onnx::OnnxEmbedder::load_version(model_version, threads, cpu)?)),
+        #[allow(unreachable_patterns)]
+        other => eyre::bail!("this binary was built without the {other} embedding backend"),
+    }
 }
 
-/// Load a specific supported model by `model_version` (the A/B path).
-/// `workers == 0` means platform-default parallelism. The Candle backend
-/// serves every [`MODELS`] entry.
-#[cfg(feature = "vec-candle")]
-pub fn load_model_version(model_version: &str, workers: usize) -> Result<ActiveModel> {
-    candle::CandleBertModel::load_version(model_version, workers)
+/// Whether `backend` in this binary can load `model_version`. Lets callers
+/// validate a requested pin before loading or re-embedding.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn is_supported_model_version(model_version: &str, backend: Backend) -> bool {
+    match backend {
+        #[cfg(feature = "vec-candle")]
+        Backend::Candle => candle::supported_model(model_version).is_some(),
+        #[cfg(feature = "vec-onnx")]
+        Backend::Onnx => onnx::supported_model(model_version).is_some(),
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
 }
 
-/// Whether this binary's backend can load `model_version`. Lets callers
-/// validate a requested pin before re-embedding.
-#[cfg(feature = "vec-candle")]
-pub fn is_supported_model_version(model_version: &str) -> bool {
-    candle::supported_model(model_version).is_some()
+/// Idempotent prefetch of the default model's files for `backend`.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn prefetch_active_model(backend: Backend) -> Result<()> {
+    prefetch_model_version(ACTIVE_MODEL_VERSION, backend)
 }
 
-/// Idempotent backend-agnostic prefetch.
-///
-/// Candle: downloads `config.json`, `tokenizer.json`, and
-/// `model.safetensors` into the hf-hub cache without instantiating the
-/// BertModel (cheap; no weight loading).
-///
-/// Used by `cortex embed --prefetch-model` so the first real embedding
-/// call does not pay network latency.
-#[cfg(feature = "vec-candle")]
-pub fn prefetch_active_model() -> Result<()> {
-    prefetch_model_version(ACTIVE_MODEL_VERSION)
+/// Download `model_version`'s files for `backend` into the shared hf-hub
+/// cache without loading the model (warm a host, or a candidate before
+/// re-embedding). Candle fetches `model.safetensors`; ONNX fetches
+/// `onnx/model.onnx`; both fetch `config.json` and `tokenizer.json`. Runs on
+/// any CPU: no session is built.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn prefetch_model_version(model_version: &str, backend: Backend) -> Result<()> {
+    log::debug!("embedding::prefetch_model_version: model={model_version} backend={backend}");
+    match backend {
+        #[cfg(feature = "vec-candle")]
+        Backend::Candle => candle::CandleBertModel::prefetch_version(model_version),
+        #[cfg(feature = "vec-onnx")]
+        Backend::Onnx => onnx::OnnxEmbedder::prefetch_version(model_version),
+        #[allow(unreachable_patterns)]
+        other => eyre::bail!("this binary was built without the {other} embedding backend"),
+    }
 }
 
-/// Prefetch a specific supported model's weights into the cache (warm
-/// a candidate before re-embedding). Candle uses the registry.
-#[cfg(feature = "vec-candle")]
-pub fn prefetch_model_version(model_version: &str) -> Result<()> {
-    candle::CandleBertModel::prefetch_version(model_version)
-}
-
-/// Lazy-load the active backend's model for `model_version` and embed `text`.
+/// Lazy-load `model_version` and embed `text`.
 ///
 /// Used by oracle's hybrid/vector dispatch where every query needs an
 /// embedding and the model identifier comes from the DB's
@@ -214,18 +245,27 @@ pub fn prefetch_model_version(model_version: &str) -> Result<()> {
 /// concrete model at the start of every `cortex embed` invocation because
 /// every call uses inference, so the lazy registry adds no value there.
 ///
-/// Only the active backend's `model_version` is recognized. Passing any
-/// other value returns a clear error pointing at the expected string;
-/// this protects against silent misuse when a downstream caller has stale
-/// hardcoded model_version strings after a backend swap.
-#[cfg(feature = "vec-candle")]
-pub fn embed_query(text: &str, model_version: &str) -> Result<Vec<f32>> {
-    let model = get_or_load_model(model_version)?;
+/// The first call for a `model_version` resolves `inference.backend` against
+/// `cpu` and that model (logging the resolution at INFO), then loads it with
+/// `inference.threads`. A model no backend in this binary can serve returns
+/// a clear error; this protects against a stale hardcoded `model_version`.
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub fn embed_query(
+    text: &str,
+    model_version: &str,
+    inference: &InferenceConfig,
+    cpu: &CpuFeatures,
+) -> Result<Vec<f32>> {
+    let model = get_or_load_model(model_version, inference, cpu)?;
     model.embed_one(text)
 }
 
-#[cfg(feature = "vec-candle")]
-fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+fn get_or_load_model(
+    model_version: &str,
+    inference: &InferenceConfig,
+    cpu: &CpuFeatures,
+) -> Result<Arc<dyn EmbeddingModel>> {
     {
         let guard = registry()
             .read()
@@ -234,13 +274,17 @@ fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
             return Ok(entry.1.clone());
         }
     }
-    if !is_supported_model_version(model_version) {
+    if model_spec(model_version).is_none() {
         eyre::bail!(
-            "unknown or backend-mismatched model_version: {model_version:?} \
-             (this binary's backend cannot load it)"
+            "unknown model_version: {model_version:?} (registry serves {:?})",
+            MODELS.iter().map(|spec| spec.id).collect::<Vec<_>>()
         );
     }
-    let model = Arc::new(load_model_version(model_version, 0)?);
+    let backend = resolve_backend_logged(inference.backend, cpu, model_version)?;
+    if !is_supported_model_version(model_version, backend) {
+        eyre::bail!("the {backend} backend in this binary cannot load model_version {model_version:?}");
+    }
+    let model: Arc<dyn EmbeddingModel> = Arc::from(load_model_version(model_version, backend, inference.threads, cpu)?);
     let mut guard = registry()
         .write()
         .map_err(|_| eyre::eyre!("MODEL_REGISTRY write lock poisoned"))?;

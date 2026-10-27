@@ -671,7 +671,7 @@ impl CortexCli {
             Command::Embed(a) => {
                 let opts_struct: cortex::opts::EmbedOpts = a.into();
                 if opts_struct.prefetch_model {
-                    let resolved = cortex::embed::prefetch(opts_struct.model.as_deref())?;
+                    let resolved = cortex::embed::prefetch(opts_struct.model.as_deref(), config.embed.backend)?;
                     println!("Prefetched embedding model {resolved}.");
                 } else if let Some(kind) = opts_struct.drop_kind.as_deref() {
                     let deleted = cortex::embed::drop_kind(&config, kind)?;

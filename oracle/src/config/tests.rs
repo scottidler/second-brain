@@ -215,3 +215,34 @@ fn llm_unknown_key_errors() {
         .expect_err("oracle's llm block has no api-key");
     assert!(err.to_string().contains("api-key"), "{err}");
 }
+
+#[test]
+fn inference_block_absent_is_auto_with_default_threads() {
+    let cfg: Config = serde_yaml::from_str("{}").expect("empty yaml");
+    assert_eq!(cfg.inference.backend, vault::embedding::BackendChoice::Auto);
+    assert_eq!(cfg.inference.threads, 0);
+}
+
+#[test]
+fn inference_block_parses_backend_case_insensitively() {
+    let cfg: Config = serde_yaml::from_str("inference:\n  backend: Candle\n  threads: 4\n").expect("parse");
+    assert_eq!(cfg.inference.backend, vault::embedding::BackendChoice::Candle);
+    assert_eq!(cfg.inference.threads, 4);
+}
+
+#[test]
+fn inference_unknown_backend_fails_config_load() {
+    let err = serde_yaml::from_str::<Config>("inference:\n  backend: gpu\n")
+        .expect_err("an unknown backend must fail the load")
+        .to_string();
+    assert!(err.contains("gpu"), "{err}");
+    assert!(err.contains("auto, candle, onnx"), "{err}");
+}
+
+#[test]
+fn inference_unknown_key_fails_config_load() {
+    let err = serde_yaml::from_str::<Config>("inference:\n  workers: 4\n")
+        .expect_err("a typo'd inference key must fail the load")
+        .to_string();
+    assert!(err.contains("workers"), "{err}");
+}

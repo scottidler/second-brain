@@ -8,9 +8,10 @@
 //! - Tier 1 (AVX2): rebuild with `RUSTFLAGS="-C target-cpu=native"`.
 //! - Tier 2 (AVX2 + MKL): add `candle-core/mkl` feature.
 //!
-//! Production callers obtain an instance via `super::get_or_load_model`;
-//! a process holds a single `Arc<CandleBertModel>` for the lifetime of
-//! the work (cortex's daemon, oracle's lazy registry).
+//! Production callers obtain an instance via `super::load_model_version`
+//! (as a `dyn EmbeddingModel`) when backend resolution picks Candle; a
+//! process holds one for the lifetime of the work (cortex's daemon,
+//! oracle's lazy registry).
 //!
 //! Pooling: `BertModel::forward` returns `[batch, seq, 384]`. We CLS-pool
 //! by taking token 0 only (the canonical BGE recipe per the model card;

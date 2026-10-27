@@ -272,11 +272,9 @@ impl Default for GraphConfig {
 
 /// Knobs for `cortex embed` and the daemon's embed tick.
 ///
-/// `workers` controls the internal replica pool inside the Candle
-/// backend. The default of 0 means "let the backend pick its own
-/// platform-aware default" (currently `min(8, available_parallelism)`).
-/// A non-zero value pins an explicit count; the backend clamps it to
-/// its own `[1, MAX_WORKERS]` range.
+/// `backend` picks the inference backend (`auto | candle | onnx`, resolved
+/// against the detected CPU by `vault::embedding::resolve_backend`), and
+/// `workers` is its thread count; see each field.
 ///
 /// `max_chunks_per_call` bounds the input size of any single
 /// `embed_batch` invocation, regardless of how many notes the read
@@ -287,9 +285,20 @@ impl Default for GraphConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EmbedConfig {
-    /// Size of the DEDICATED inference thread pool (`embed::in_inference_pool`).
+    /// Inference backend: `auto` (ONNX when the CPU has AVX2+FMA and the
+    /// pinned model has an ONNX parity proof, else Candle), or an explicit
+    /// `candle` / `onnx` pin with no fallback. Case-insensitive; an unknown
+    /// value fails config load.
+    pub backend: vault::embedding::BackendChoice,
+    /// Inference threads; 0 is the backend default.
     ///
-    /// 0 used to mean "let the backend pick", which is
+    /// Candle: the size of the DEDICATED inference thread pool
+    /// (`embed::in_inference_pool`; 0 = 2) its matmul fans out on.
+    /// ONNX: the session's intra-op thread count (0 =
+    /// `DEFAULT_ONNX_THREADS`, 16, capped at available parallelism); ORT runs
+    /// its own pool, and only tokenization rides the rayon inference pool.
+    ///
+    /// Why the Candle default is small: 0 used to mean "let the backend pick", which is
     /// `min(8, available_parallelism)`: 8 replicas on a 32-core box, all
     /// contending for the global rayon pool
     /// that every governance action also uses. That contention is what starved
@@ -321,6 +330,7 @@ pub struct EmbedConfig {
 impl Default for EmbedConfig {
     fn default() -> Self {
         Self {
+            backend: vault::embedding::BackendChoice::default(),
             workers: 0,
             max_chunks_per_call: crate::embed::DEFAULT_MAX_CHUNKS_PER_CALL,
             max_chunks_per_tick: crate::embed::DEFAULT_MAX_CHUNKS_PER_TICK,

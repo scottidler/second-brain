@@ -30,6 +30,17 @@ logging:
   level: info
   # file: ~/.local/share/sb/oracle.log
 
+# Inference backend for query embedding: auto | candle | onnx, same values and
+# meaning as cortex.yml's embed.backend (case-insensitive; anything else fails
+# config load). auto = onnx when the CPU has AVX2+FMA and the pinned model has an
+# ONNX parity proof, else candle. Resolved on the first vector query and logged
+# at INFO.
+inference:
+  backend: auto
+  # 0 = backend default (candle min(8, CPU count) replicas, onnx 16 intra-op
+  # threads capped at the CPU count).
+  threads: 0
+
 # Retrieval pipeline — composed for any knowledge_search query that arrives with
 # no explicit `mode`. An explicit per-call `mode` (bm25/vector/hybrid/graph/
 # graph-hybrid) overrides this entire section and runs the legacy single path.

@@ -67,7 +67,7 @@ impl OracleMcpServer {
         let active_model = db.active_embedding_model().map_err(Self::err)?;
         let q_vec = match &self.query_embedder {
             Some(embedder) => embedder.embed_one(query),
-            None => vault::embedding::embed_query(query, &active_model),
+            None => vault::embedding::embed_query(query, &active_model, &self.config.inference, &self.cpu),
         }
         .map_err(Self::err)?;
         let hits = db

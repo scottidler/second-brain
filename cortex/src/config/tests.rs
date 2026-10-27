@@ -381,3 +381,28 @@ fn load_service_config_defaults_when_the_file_is_missing_and_errors_when_unparse
     std::fs::write(&missing, "daemon: [not, a, map]\n").unwrap();
     assert!(Config::load_service_config(&missing).is_err());
 }
+
+#[test]
+fn embed_backend_defaults_to_auto() {
+    let cfg: Config = serde_yaml::from_str("log-level: info\n").expect("deserialize");
+    assert_eq!(cfg.embed.backend, vault::embedding::BackendChoice::Auto);
+    assert_eq!(cfg.embed.workers, 0);
+}
+
+#[test]
+fn embed_backend_parses_case_insensitively() {
+    let cfg: Config = serde_yaml::from_str("embed:\n  backend: ONNX\n  workers: 24\n").expect("deserialize");
+    assert_eq!(cfg.embed.backend, vault::embedding::BackendChoice::Onnx);
+    assert_eq!(cfg.embed.workers, 24);
+    let cfg: Config = serde_yaml::from_str("embed:\n  backend: Candle\n").expect("deserialize");
+    assert_eq!(cfg.embed.backend, vault::embedding::BackendChoice::Candle);
+}
+
+#[test]
+fn embed_backend_unknown_value_fails_config_load() {
+    let err = serde_yaml::from_str::<Config>("embed:\n  backend: fastembed\n")
+        .expect_err("an unknown backend must fail the load")
+        .to_string();
+    assert!(err.contains("fastembed"), "{err}");
+    assert!(err.contains("auto, candle, onnx"), "{err}");
+}

@@ -457,10 +457,12 @@ fn run_systemctl(args: &[String]) -> Result<()> {
 }
 
 fn prefetch_embedding_model() -> Result<()> {
-    // Warm the embedding cache via cortex's dedicated prefetch entry. Returns
+    // Warm the embedding cache via cortex's dedicated prefetch entry, for the
+    // backend cortex.yml's `embed.backend` resolves to on this CPU. Returns
     // the resolved model name; bootstrap prints it so the operator sees
     // exactly which model was fetched.
-    let resolved = cortex::embed::prefetch(None).context("prefetch embedding model")?;
+    let cortex_config = cortex::config::Config::load(None).context("load cortex config for model prefetch")?;
+    let resolved = cortex::embed::prefetch(None, cortex_config.embed.backend).context("prefetch embedding model")?;
     println!("Prefetched embedding model {resolved}.");
     Ok(())
 }

@@ -44,6 +44,8 @@ pub struct OracleMcpServer {
     /// Test seam: embeds the query instead of loading the production model.
     /// `None` is `vault::embedding::embed_query`.
     query_embedder: Option<std::sync::Arc<dyn vault::embedding::EmbeddingModel>>,
+    /// The CPU `config.inference.backend` resolves against, detected once.
+    cpu: vault::cpu::CpuFeatures,
 }
 
 impl OracleMcpServer {
@@ -62,6 +64,7 @@ impl OracleMcpServer {
             db: std::sync::Arc::new(Mutex::new(db)),
             borg_config: None,
             query_embedder: None,
+            cpu: vault::cpu::CpuFeatures::detect(),
         }
     }
 

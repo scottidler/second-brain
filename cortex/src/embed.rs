@@ -39,7 +39,11 @@ use std::time::Duration;
 
 use eyre::{Context, Result};
 use fs2::FileExt;
-use vault::embedding::{ACTIVE_MODEL_VERSION, EmbeddingModel, load_model_version, prefetch_model_version};
+use vault::cpu::CpuFeatures;
+use vault::embedding::{
+    ACTIVE_MODEL_VERSION, BackendChoice, EmbeddingModel, load_model_version, prefetch_model_version,
+    resolve_backend_logged,
+};
 use vault::schema::NoteType;
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
@@ -48,8 +52,10 @@ use crate::opts::EmbedOpts;
 use crate::shutdown::StopHandle;
 
 mod carry;
+mod loader;
 mod source;
 pub use carry::EmbedCarry;
+pub use loader::{LoadedModel, load_embedder};
 pub use source::SourceRoots;
 use source::{read_source_transcript, revive_archived_sentinels, sentinel_watermark};
 
@@ -239,11 +245,12 @@ impl ChunkAllowance {
     }
 }
 
-/// Prefetch the active embedding model and return the resolved model name
-/// so sb can print "Prefetched embedding model {name}". Split from
-/// `embed::run` to keep `EmbedStats` Copy and avoid stuffing prefetch-only
-/// state into the per-batch stats type.
-pub fn prefetch(model_override: Option<&str>) -> Result<String> {
+/// Prefetch the active embedding model's files for the backend `backend`
+/// resolves to on this host's CPU, and return the resolved model name so sb
+/// can print "Prefetched embedding model {name}". Split from `embed::run` to
+/// keep `EmbedStats` Copy and avoid stuffing prefetch-only state into the
+/// per-batch stats type.
+pub fn prefetch(model_override: Option<&str>, backend: BackendChoice) -> Result<String> {
     // Resolve the model name from the active SearchIndex if possible (matches
     // the prior behavior); otherwise fall back to the compiled-in
     // ACTIVE_MODEL_VERSION. We accept an Option<&str> --model override so the
@@ -252,8 +259,9 @@ pub fn prefetch(model_override: Option<&str>) -> Result<String> {
         Some(m) => m.to_string(),
         None => ACTIVE_MODEL_VERSION.to_string(),
     };
-    log::info!("cortex::embed: prefetching model {resolved}");
-    prefetch_model_version(&resolved).wrap_err("failed to prefetch embedding model")?;
+    let backend = resolve_backend_logged(backend, &CpuFeatures::detect(), &resolved)?;
+    log::info!("cortex::embed: prefetching model {resolved} for backend {backend}");
+    prefetch_model_version(&resolved, backend).wrap_err("failed to prefetch embedding model")?;
     log::info!("prefetched embedding model {resolved}");
     Ok(resolved)
 }
@@ -273,7 +281,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
     );
 
     if opts.prefetch_model {
-        prefetch(opts.model.as_deref())?;
+        prefetch(opts.model.as_deref(), config.embed.backend)?;
         return Ok(EmbedStats::default());
     }
 
@@ -299,7 +307,12 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 .map(vault::rss::human_bytes)
                 .unwrap_or_else(|| "n/a".to_string()),
         );
-        let m = load_model_version(&model_version, config.embed.workers).wrap_err("failed to load embedding model")?;
+        let LoadedModel { model: m, .. } = load_embedder(
+            &config.embed,
+            &model_version,
+            &CpuFeatures::detect(),
+            load_model_version,
+        )?;
         let rss_post = vault::rss::read_self_rss();
         if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
             log::info!(
@@ -308,7 +321,7 @@ pub fn run(vault_root: &Path, config: &Config, opts: &EmbedOpts) -> Result<Embed
                 vault::rss::human_bytes(post.saturating_sub(pre)),
             );
         }
-        Box::new(m)
+        m
     };
 
     // Make sure embedding_config matches the model we're about to write
@@ -413,10 +426,13 @@ pub fn load_daemon_model(config: &Config) -> Result<Box<dyn EmbeddingModel>> {
             .map(vault::rss::human_bytes)
             .unwrap_or_else(|| "n/a".to_string()),
     );
-    let model: Box<dyn EmbeddingModel> = Box::new(
-        load_model_version(&model_version, config.embed.workers)
-            .wrap_err("failed to load embedding model for daemon")?,
-    );
+    let LoadedModel { model, .. } = load_embedder(
+        &config.embed,
+        &model_version,
+        &CpuFeatures::detect(),
+        load_model_version,
+    )
+    .wrap_err("failed to load embedding model for daemon")?;
     let rss_post = vault::rss::read_self_rss();
     if let (Some(pre), Some(post)) = (rss_pre, rss_post) {
         log::info!(

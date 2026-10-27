@@ -50,6 +50,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 
 - Don't hold the embed write txn across `embed_batch` — it starves oracle's writes.
 - Don't call `model.embed_batch` outside `in_inference_pool` — that puts inference back on the governance pool.
+- Don't load an embedding model except through `embed::load_embedder` (`embed/loader.rs`): it resolves `embed.backend` against the detected CPU and logs the resolution once. ONNX calls go through `in_inference_pool` too (tokenization runs on rayon); `embed.workers` reaches the backend as its thread count (ONNX intra-op threads).
 - Don't add a long-running loop that logs only at start and finish. The two-day embed tick was invisible because of exactly that; `embed_in_sub_batches` logs per sub-batch on purpose.
 - Don't run rayon sweeps on a tokio worker thread — always `block_in_place`.
 - Don't load the embedding model per daemon tick — load once at startup and hand a reference (avoids per-tick allocation leak).

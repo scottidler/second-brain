@@ -40,6 +40,14 @@ pub struct Config {
     #[serde(default)]
     pub retrieval: RetrievalConfig,
 
+    /// Inference backend and threads for query embedding: `backend` is
+    /// `auto | candle | onnx` (case-insensitive; resolved against the
+    /// detected CPU and the pinned model on first use), `threads` 0 is the
+    /// backend default (Candle 8 replicas capped at the CPU count, ONNX 16
+    /// intra-op threads capped the same way).
+    #[serde(default)]
+    pub inference: vault::embedding::InferenceConfig,
+
     /// Credentials for oracle's own fabric calls (the eval relevance judge).
     #[serde(default)]
     pub llm: LlmConfig,
@@ -70,6 +78,7 @@ impl Default for Config {
             watcher: WatcherConfig::default(),
             inbound_recompute_interval_secs: default_inbound_recompute_interval_secs(),
             retrieval: RetrievalConfig::default(),
+            inference: vault::embedding::InferenceConfig::default(),
             llm: LlmConfig::default(),
         }
     }

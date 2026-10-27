@@ -68,12 +68,59 @@ fn mock_embedder_handles_empty_string() {
 fn embed_query_rejects_unknown_model_version() {
     // Use a version string we know is not the canonical bge-small. The
     // function must error cleanly without attempting a download.
-    let err = embed_query("hello", "not-a-real-model").expect_err("must fail");
+    let err = embed_query(
+        "hello",
+        "not-a-real-model",
+        &InferenceConfig::default(),
+        &crate::cpu::CpuFeatures::default(),
+    )
+    .expect_err("must fail");
     let msg = format!("{err}");
-    assert!(
-        msg.contains("unknown or backend-mismatched model_version"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("unknown model_version"), "got: {msg}");
+}
+
+#[cfg(feature = "vec")]
+#[test]
+fn embed_query_onnx_pin_on_incapable_cpu_fails_before_loading() {
+    // An AVX-only CPU with `onnx` pinned must error at resolution: no
+    // download, no `ort` call, no registry entry.
+    let avx_only = crate::cpu::CpuFeatures {
+        avx: true,
+        ..Default::default()
+    };
+    let inference = InferenceConfig {
+        backend: BackendChoice::Onnx,
+        threads: 0,
+    };
+    let err = embed_query("hello", BGE_SMALL_MODEL_VERSION, &inference, &avx_only)
+        .expect_err("onnx pinned on an AVX-only CPU must fail")
+        .to_string();
+    assert!(err.contains("lacks avx2 and fma"), "got: {err}");
+}
+
+#[cfg(feature = "vec")]
+#[test]
+fn backend_support_follows_the_parity_gate() {
+    assert!(is_supported_model_version(BGE_SMALL_MODEL_VERSION, Backend::Candle));
+    assert!(is_supported_model_version(BGE_BASE_MODEL_VERSION, Backend::Candle));
+    assert!(is_supported_model_version(BGE_SMALL_MODEL_VERSION, Backend::Onnx));
+    assert!(!is_supported_model_version(BGE_BASE_MODEL_VERSION, Backend::Onnx));
+    assert!(!is_supported_model_version("not-a-real-model", Backend::Candle));
+}
+
+#[cfg(feature = "vec")]
+#[test]
+fn load_model_version_onnx_refuses_incapable_cpu() {
+    let err = match load_model_version(
+        BGE_SMALL_MODEL_VERSION,
+        Backend::Onnx,
+        0,
+        &crate::cpu::CpuFeatures::default(),
+    ) {
+        Ok(_) => panic!("an incapable CPU must not load ONNX"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("lacks avx2 and fma"), "got: {err}");
 }
 
 // --- chunker ------------------------------------------------
