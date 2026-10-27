@@ -113,14 +113,24 @@ fn has_onnx_parity(model: &str) -> bool {
 /// | `onnx` | no | any | error naming the missing features |
 /// | `onnx` | yes | no | error naming the model |
 /// | `onnx` | yes | yes | `Onnx` |
+///
+/// The parity column comes from the embedding registry (`super::MODELS`).
 pub fn resolve_backend(requested: BackendChoice, cpu: &CpuFeatures, model: &str) -> Result<Backend> {
+    resolve_with_parity(requested, cpu, model, has_onnx_parity(model))
+}
+
+/// The [`resolve_backend`] table with the parity column supplied by the
+/// caller. The cross-encoder registry (`vault::search::rerank`) resolves
+/// through this, so rerank and embedding share one decision table.
+pub fn resolve_with_parity(
+    requested: BackendChoice,
+    cpu: &CpuFeatures,
+    model: &str,
+    onnx_parity: bool,
+) -> Result<Backend> {
     match requested {
         BackendChoice::Candle => Ok(Backend::Candle),
-        BackendChoice::Auto => Ok(if cpu.onnx_capable() && has_onnx_parity(model) {
-            Backend::Onnx
-        } else {
-            Backend::Candle
-        }),
+        BackendChoice::Auto => Ok(if cpu.onnx_capable() && onnx_parity { Backend::Onnx } else { Backend::Candle }),
         BackendChoice::Onnx => {
             let missing = cpu.missing_for_onnx();
             if !missing.is_empty() {
@@ -130,7 +140,7 @@ pub fn resolve_backend(requested: BackendChoice, cpu: &CpuFeatures, model: &str)
                     missing.join(" and ")
                 ));
             }
-            if !has_onnx_parity(model) {
+            if !onnx_parity {
                 return Err(eyre!(
                     "inference backend `onnx` is pinned but model {model:?} has no ONNX parity proof; \
                      set the backend to `auto` or `candle`"
@@ -163,7 +173,18 @@ pub fn resolution_reason(requested: BackendChoice, cpu: &CpuFeatures, model: &st
 /// the reason. Callers run it once per model load, which is once per process
 /// for cortex and once per pinned model for oracle.
 pub fn resolve_backend_logged(requested: BackendChoice, cpu: &CpuFeatures, model: &str) -> Result<Backend> {
-    let resolved = resolve_backend(requested, cpu, model)?;
+    resolve_with_parity_logged(requested, cpu, model, has_onnx_parity(model))
+}
+
+/// [`resolve_with_parity`], then the same INFO line as
+/// [`resolve_backend_logged`].
+pub fn resolve_with_parity_logged(
+    requested: BackendChoice,
+    cpu: &CpuFeatures,
+    model: &str,
+    onnx_parity: bool,
+) -> Result<Backend> {
+    let resolved = resolve_with_parity(requested, cpu, model, onnx_parity)?;
     log::info!(
         "inference backend: requested={requested} resolved={resolved} model={model} ({})",
         resolution_reason(requested, cpu, model, resolved)

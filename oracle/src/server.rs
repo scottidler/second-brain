@@ -14,6 +14,7 @@ use vault::schema::{Method, NoteType, Origin, Status};
 use vault::search::{NoteRow, SearchIndex};
 
 mod pipeline;
+pub use pipeline::{PipelineRun, RerankRun};
 
 /// Default hops for graph-expansion modes when the caller omits `expand_hops`.
 const DEFAULT_EXPAND_HOPS: u8 = 1;

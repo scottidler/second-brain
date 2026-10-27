@@ -14,6 +14,32 @@ use rmcp::ErrorData as McpError;
 use tracing::{debug, warn};
 use vault::search::{NoteRow, Reranker, SearchIndex, fts_natural_query};
 
+/// Whether the rerank stage ran for one pipeline call. `sb oracle eval`
+/// reports it per target, so a rerank-on run whose stage was latched off is
+/// never scored as "rerank on".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerankRun {
+    /// `retrieval.rerank.enabled` is false.
+    Off,
+    /// The cross-encoder reordered the head of the fused list.
+    Ran,
+    /// Enabled, but this query kept the fused order (too few candidates, or
+    /// none with text to score).
+    FailedOpen,
+    /// Enabled, but rerank is latched off for the process (model load failed,
+    /// the probe errored, or the projected batch exceeded the budget); the
+    /// fused order was returned.
+    Disabled,
+}
+
+/// One configured-pipeline call: the result rows plus what the rerank stage
+/// did.
+#[derive(Debug, Clone)]
+pub struct PipelineRun {
+    pub rows: Vec<NoteRow>,
+    pub rerank: RerankRun,
+}
+
 /// Outcome of the testable rerank core (`rerank_within_budget`). `Disable`
 /// tells the caller to latch rerank off for the rest of the process (probe
 /// failure / over-budget); `FailOpen` keeps the fused order for this query only
@@ -271,8 +297,25 @@ impl OracleMcpServer {
         status: Option<&str>,
         limit: u32,
     ) -> Result<Vec<NoteRow>, McpError> {
+        self.run_configured_pipeline_traced(db, query, tags, tags_all, note_type, status, limit)
+            .map(|run| run.rows)
+    }
+
+    /// [`Self::run_configured_pipeline`], also reporting whether the rerank
+    /// stage ran. The `configured` target of `sb oracle eval` uses this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_configured_pipeline_traced(
+        &self,
+        db: &SearchIndex,
+        query: &str,
+        tags: Option<&[String]>,
+        tags_all: bool,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<PipelineRun, McpError> {
         let queries = self.transform_queries(&self.config.retrieval, query);
-        self.run_pipeline(
+        self.run_pipeline_traced(
             db,
             &self.config.retrieval,
             query,
@@ -324,6 +367,24 @@ impl OracleMcpServer {
         status: Option<&str>,
         limit: u32,
     ) -> Result<Vec<NoteRow>, McpError> {
+        self.run_pipeline_traced(db, cfg, query, queries, tags, tags_all, note_type, status, limit)
+            .map(|run| run.rows)
+    }
+
+    /// [`Self::run_pipeline`], also reporting whether the rerank stage ran.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_pipeline_traced(
+        &self,
+        db: &SearchIndex,
+        cfg: &RetrievalConfig,
+        query: &str,
+        queries: &[String],
+        tags: Option<&[String]>,
+        tags_all: bool,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<PipelineRun, McpError> {
         debug!(
             query = %query,
             vector = cfg.methods.vector.enabled,
@@ -390,7 +451,10 @@ impl OracleMcpServer {
 
         if lists.is_empty() {
             warn!("run_pipeline: no retrieval methods enabled; returning no results");
-            return Ok(Vec::new());
+            return Ok(PipelineRun {
+                rows: Vec::new(),
+                rerank: RerankRun::Off,
+            });
         }
 
         // Candidate pool kept ahead of the final truncate so the later exclude
@@ -414,10 +478,10 @@ impl OracleMcpServer {
 
         // Stage 4 - rerank (cross-encoder): reorder the top `input_k` fused
         // candidates, latency-budgeted with a fail-open probe.
-        let fused_paths = if cfg.rerank.enabled {
+        let (fused_paths, rerank) = if cfg.rerank.enabled {
             self.maybe_rerank(db, &cfg.rerank, query, fused_paths)?
         } else {
-            fused_paths
+            (fused_paths, RerankRun::Off)
         };
 
         // Stage 5 - exclude filters: drop stub (quality=low) and short-body
@@ -426,7 +490,8 @@ impl OracleMcpServer {
 
         // Stage 6 - truncate to `limit`, resolve to NoteRows in rank order.
         let final_paths: Vec<String> = kept_paths.into_iter().take(limit as usize).collect();
-        Self::resolve_note_paths(db, final_paths.iter().map(|p| p.as_str()))
+        let rows = Self::resolve_note_paths(db, final_paths.iter().map(|p| p.as_str()))?;
+        Ok(PipelineRun { rows, rerank })
     }
 
     /// Apply the post-fusion exclude filters to a ranked candidate list,
@@ -506,32 +571,33 @@ impl OracleMcpServer {
 
     /// Cross-encoder rerank of the top `input_k` fused candidates (stage 4).
     ///
+    /// The cross-encoder's backend resolves from `inference:` (the same
+    /// `backend` and `threads` query embedding uses) against the detected CPU.
     /// Latency-budgeted with a warmup probe: time one `(query, doc)` pair,
-    /// project the batch cost over the available parallelism, and if it exceeds
-    /// `latency_budget_ms` no-op the stage **for the process** (fail-open to the
-    /// fused order) with a WARN. On the AVX-only daemon host the probe is
-    /// expected to trip frequently - that is the documented baseline, not an
-    /// error (the cross-encoder is genuinely too slow there). Reranks only the
-    /// head; the tail beyond `input_k` keeps its fused order.
+    /// project the batch cost linearly (`project_batch_ms`), and if it exceeds
+    /// `latency_budget_ms` no-op the stage **for the process** (fail-open to
+    /// the fused order) with a WARN. Reranks only the head; the tail beyond
+    /// `input_k` keeps its fused order. Returns the list and what the stage
+    /// did.
     fn maybe_rerank(
         &self,
         db: &SearchIndex,
         cfg: &RerankConfig,
         query: &str,
         fused_paths: Vec<String>,
-    ) -> Result<Vec<String>, McpError> {
+    ) -> Result<(Vec<String>, RerankRun), McpError> {
         use std::sync::atomic::{AtomicBool, Ordering};
         // Once the probe trips (or the model fails to load) in a process, stay
         // off so every subsequent query does not re-pay the probe.
         static RERANK_DISABLED: AtomicBool = AtomicBool::new(false);
         if RERANK_DISABLED.load(Ordering::Relaxed) {
-            return Ok(fused_paths);
+            return Ok((fused_paths, RerankRun::Disabled));
         }
 
         // Load the production cross-encoder. Injected into the testable core
         // below so the head/tail split, probe, and budget branch are unit-
-        // testable with `MockReranker` without the candle loader.
-        let reranker = match vault::search::get_or_load_reranker(&cfg.model) {
+        // testable with `MockReranker` without a model load.
+        let reranker = match vault::search::get_or_load_reranker(&cfg.model, &self.config.inference, &self.cpu) {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -539,22 +605,22 @@ impl OracleMcpServer {
                     cfg.model
                 );
                 RERANK_DISABLED.store(true, Ordering::Relaxed);
-                return Ok(fused_paths);
+                return Ok((fused_paths, RerankRun::Disabled));
             }
         };
 
         match Self::rerank_within_budget(db, cfg, query, fused_paths, reranker.as_ref())? {
-            RerankOutcome::Reordered(paths) => Ok(paths),
-            RerankOutcome::FailOpen(paths) => Ok(paths),
+            RerankOutcome::Reordered(paths) => Ok((paths, RerankRun::Ran)),
+            RerankOutcome::FailOpen(paths) => Ok((paths, RerankRun::FailedOpen)),
             RerankOutcome::Disable(paths) => {
                 RERANK_DISABLED.store(true, Ordering::Relaxed);
-                Ok(paths)
+                Ok((paths, RerankRun::Disabled))
             }
         }
     }
 
     /// The rerank stage, pure over an injected [`Reranker`] and the DB - no
-    /// candle loader, no process-global latch. Returns the reordered list plus
+    /// model loader, no process-global latch. Returns the reordered list plus
     /// whether the caller should latch rerank off for the process (probe
     /// failure / over-budget). Unit-tested with `MockReranker`.
     fn rerank_within_budget(
@@ -588,7 +654,7 @@ impl OracleMcpServer {
             return Ok(RerankOutcome::FailOpen(fused_paths));
         }
 
-        // Warmup probe: time one pair, project the full batch over the threads.
+        // Warmup probe: time one pair, project the full batch linearly.
         let probe_doc = [items[0].1.as_str()];
         let start = std::time::Instant::now();
         if let Err(e) = reranker.score(query, &probe_doc) {

@@ -140,3 +140,27 @@ fn inference_config_rejects_unknown_key() {
         .to_string();
     assert!(err.contains("workers"), "{err}");
 }
+
+#[test]
+fn resolve_with_parity_takes_the_parity_column_from_the_caller() {
+    // A model id outside the embedding registry (a cross-encoder) resolves on
+    // the caller's parity bit, not the embedding registry's.
+    let id = "some-cross-encoder";
+    assert_eq!(
+        resolve_with_parity(BackendChoice::Auto, &avx2_fma(), id, true).expect("auto"),
+        Backend::Onnx
+    );
+    assert_eq!(
+        resolve_with_parity(BackendChoice::Auto, &avx2_fma(), id, false).expect("auto"),
+        Backend::Candle
+    );
+    let err = resolve_with_parity(BackendChoice::Onnx, &avx2_fma(), id, false)
+        .expect_err("no parity")
+        .to_string();
+    assert!(err.contains(id), "{err}");
+    // resolve_backend is the same table with the embedding registry's bit.
+    assert_eq!(
+        resolve_backend(BackendChoice::Auto, &avx2_fma(), BGE_SMALL_MODEL_VERSION).expect("auto"),
+        resolve_with_parity(BackendChoice::Auto, &avx2_fma(), BGE_SMALL_MODEL_VERSION, true).expect("auto"),
+    );
+}

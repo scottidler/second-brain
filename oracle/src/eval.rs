@@ -20,19 +20,20 @@ pub mod report;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use eyre::{Context, Result, eyre};
 use vault::search::SearchIndex;
 
 use crate::config::Config;
-use crate::server::OracleMcpServer;
+use crate::server::{OracleMcpServer, RerankRun};
 use crate::tools::SearchMode;
 
 #[cfg(test)]
 pub use judge::MockJudge;
 pub use judge::{FabricJudge, RelevanceJudge};
 pub use queries::{EvalQuery, Queries};
-pub use report::{AblationReport, CalibrationPanel, EvalReport, ModeReport};
+pub use report::{AblationReport, CalibrationPanel, EvalReport, Latency, ModeReport, RerankTally};
 
 /// Fixed hop budget for graph modes during eval: 2 so 2-hop fact paths
 /// (`seed -> hub -> fact -> hub`) are exercised — the ablation needs this too.
@@ -86,12 +87,17 @@ pub struct JudgeText {
     pub truncated: bool,
 }
 
-/// One query's retrieval result: each mode's ranked list (by label) plus the
-/// judge text of every pooled note.
+/// One query's retrieval result: each mode's ranked list (by label), the
+/// judge text of every pooled note, each mode's wall-clock retrieval time,
+/// and what the configured target's rerank stage did.
 #[derive(Debug, Clone, Default)]
 pub struct QueryRun {
     pub ranked: BTreeMap<String, Vec<String>>,
     pub texts: BTreeMap<String, JudgeText>,
+    /// Wall-clock milliseconds per label, retrieval only (no judging).
+    pub latency_ms: BTreeMap<String, f64>,
+    /// The `configured` target's rerank stage; `None` when not recorded.
+    pub rerank: Option<RerankRun>,
 }
 
 /// Outcome of `run`: either the metrics report, or the path of the calibration
@@ -172,9 +178,14 @@ pub fn fabric_judge(config: &Config, opts: &EvalOpts) -> FabricJudge {
     FabricJudge::new(opts.judge_model.clone(), config.llm.api_keys.clone())
 }
 
-/// For each query, run every mode + the fact ablation and collect the
-/// ranked lists and the judge text of every pooled note. Holds the DB lock only
-/// here — never across the (slow) judging in [`evaluate`].
+/// For each query, run every mode + the fact ablation + the configured
+/// pipeline, and collect the ranked lists, the per-target wall-clock time and
+/// the judge text of every pooled note. Holds the DB lock only here, never
+/// across the (slow) judging in [`evaluate`].
+///
+/// The first query runs once untimed before the timed pass, so the one-time
+/// model loads (query embedder, cross-encoder) are not charged to whichever
+/// target happens to run first. The latencies are steady-state.
 pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) -> Result<Vec<QueryRun>> {
     let nonfact: Vec<String> = {
         let handle = server.db_handle();
@@ -182,60 +193,18 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
         guard.edge_kinds()?.into_iter().filter(|k| k != "fact").collect()
     };
 
-    let mut runs = Vec::with_capacity(queries.queries.len());
-    for q in &queries.queries {
-        let tags = q.tags.as_deref();
-        let mut run = QueryRun::default();
+    if let Some(first) = queries.queries.first() {
         let handle = server.db_handle();
         let guard = handle.lock().map_err(|e| eyre!("db lock poisoned: {e}"))?;
-        for m in MODE_ORDER {
-            let rows = server
-                .run_search_mode(
-                    &guard,
-                    *m,
-                    &q.query,
-                    tags,
-                    false,
-                    None,
-                    None,
-                    opts.k,
-                    EVAL_EXPAND_HOPS,
-                    None,
-                    0.0,
-                )
-                .map_err(|e| eyre!("run_search_mode {:?}: {e}", m))?;
-            run.ranked.insert(
-                mode_label(*m).to_string(),
-                rows.iter().map(|r| r.path.clone()).collect(),
-            );
-        }
-        let abl = server
-            .run_search_mode(
-                &guard,
-                SearchMode::GraphHybrid,
-                &q.query,
-                tags,
-                false,
-                None,
-                None,
-                opts.k,
-                EVAL_EXPAND_HOPS,
-                Some(&nonfact),
-                0.0,
-            )
-            .map_err(|e| eyre!("run_search_mode ablation: {e}"))?;
-        run.ranked
-            .insert(ABLATION_LABEL.to_string(), abl.iter().map(|r| r.path.clone()).collect());
+        tracing::debug!(query = %first.id, "eval::retrieve: untimed warmup");
+        run_targets(server, &guard, first, &nonfact, opts)?;
+    }
 
-        // The live operator-configured pipeline (the shipped default and any
-        // rerank/transform the operator has turned on).
-        let configured = server
-            .run_configured_pipeline(&guard, &q.query, tags, false, None, None, opts.k)
-            .map_err(|e| eyre!("run_configured_pipeline: {e}"))?;
-        run.ranked.insert(
-            CONFIGURED_LABEL.to_string(),
-            configured.iter().map(|r| r.path.clone()).collect(),
-        );
+    let mut runs = Vec::with_capacity(queries.queries.len());
+    for q in &queries.queries {
+        let handle = server.db_handle();
+        let guard = handle.lock().map_err(|e| eyre!("db lock poisoned: {e}"))?;
+        let mut run = run_targets(server, &guard, q, &nonfact, opts)?;
 
         let lists: Vec<Vec<String>> = run.ranked.values().cloned().collect();
         for path in metrics::pool(&lists) {
@@ -256,6 +225,76 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, opts: &EvalOpts) ->
         runs.push(run);
     }
     Ok(runs)
+}
+
+/// Run every target once for `q`: the five modes, the fact ablation and the
+/// configured pipeline, timing each. Returns the ranked lists, the
+/// latencies and the configured target's rerank outcome; no judge text.
+fn run_targets(
+    server: &OracleMcpServer,
+    db: &SearchIndex,
+    q: &EvalQuery,
+    nonfact: &[String],
+    opts: &EvalOpts,
+) -> Result<QueryRun> {
+    let tags = q.tags.as_deref();
+    let mut run = QueryRun::default();
+
+    for m in MODE_ORDER {
+        let started = Instant::now();
+        let rows = server
+            .run_search_mode(
+                db,
+                *m,
+                &q.query,
+                tags,
+                false,
+                None,
+                None,
+                opts.k,
+                EVAL_EXPAND_HOPS,
+                None,
+                0.0,
+            )
+            .map_err(|e| eyre!("run_search_mode {:?}: {e}", m))?;
+        record(&mut run, mode_label(*m), &rows, started);
+    }
+
+    let started = Instant::now();
+    let abl = server
+        .run_search_mode(
+            db,
+            SearchMode::GraphHybrid,
+            &q.query,
+            tags,
+            false,
+            None,
+            None,
+            opts.k,
+            EVAL_EXPAND_HOPS,
+            Some(nonfact),
+            0.0,
+        )
+        .map_err(|e| eyre!("run_search_mode ablation: {e}"))?;
+    record(&mut run, ABLATION_LABEL, &abl, started);
+
+    // The live operator-configured pipeline (the shipped default and any
+    // rerank/transform the operator has turned on).
+    let started = Instant::now();
+    let configured = server
+        .run_configured_pipeline_traced(db, &q.query, tags, false, None, None, opts.k)
+        .map_err(|e| eyre!("run_configured_pipeline: {e}"))?;
+    record(&mut run, CONFIGURED_LABEL, &configured.rows, started);
+    run.rerank = Some(configured.rerank);
+    Ok(run)
+}
+
+/// Store one target's ranked paths and its elapsed time since `started`.
+fn record(run: &mut QueryRun, label: &str, rows: &[vault::search::NoteRow], started: Instant) {
+    run.latency_ms
+        .insert(label.to_string(), started.elapsed().as_secs_f64() * 1000.0);
+    run.ranked
+        .insert(label.to_string(), rows.iter().map(|r| r.path.clone()).collect());
 }
 
 /// Judge each pooled note (cache-first, blind), score each mode's
@@ -355,6 +394,8 @@ pub fn evaluate(
         .map(|label| ModeReport {
             mode: label.clone(),
             means: metrics::aggregate(&scores[label]),
+            latency: Latency::from_samples(runs.iter().filter_map(|r| r.latency_ms.get(label).copied()).collect()),
+            rerank: (label == CONFIGURED_LABEL).then(|| RerankTally::from_runs(runs.iter().filter_map(|r| r.rerank))),
         })
         .collect();
     let gh = metrics::aggregate(&scores["graph-hybrid"]);

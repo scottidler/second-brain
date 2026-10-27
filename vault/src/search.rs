@@ -368,11 +368,17 @@ mod stats;
 // The reranker port, test fake, and pure helpers are backend-independent.
 #[cfg(any(test, feature = "test-util"))]
 pub use rerank::MockReranker;
-pub use rerank::{Reranker, project_batch_ms, rerank_paths};
-// The Candle cross-encoder is local model inference, so it lands here (like the
-// embedder); gated to the Candle backend the daemon host must run.
+pub use rerank::{
+    CROSS_ENCODERS, CrossEncoderSpec, RERANK_MODEL_ID, Reranker, cross_encoder_spec, project_batch_ms, rerank_paths,
+};
+// The cross-encoders are local model inference, so they land here (like the
+// embedder), each gated to its backend.
 #[cfg(feature = "vec-candle")]
-pub use rerank::{CandleCrossEncoder, get_or_load_reranker, prefetch_reranker};
+pub use rerank::CandleCrossEncoder;
+#[cfg(feature = "vec-onnx")]
+pub use rerank::OnnxCrossEncoder;
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+pub use rerank::{get_or_load_reranker, load_reranker, prefetch_reranker, resolve_rerank_backend};
 
 /// Typed errors `SearchIndex` returns as `eyre::Report` sources (the
 /// `FabricError` pattern in `vault::fabric`): callers keep the `eyre::Result`

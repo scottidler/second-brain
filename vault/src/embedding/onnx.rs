@@ -205,7 +205,7 @@ pub fn default_thread_count() -> usize {
 /// `0` means [`default_thread_count`]; any other request is capped at the
 /// host's available parallelism, since ORT intra-op threads past the logical
 /// CPU count only contend.
-fn resolve_threads(requested: usize) -> usize {
+pub(crate) fn resolve_threads(requested: usize) -> usize {
     if requested == 0 {
         default_thread_count()
     } else {

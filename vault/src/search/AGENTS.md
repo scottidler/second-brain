@@ -17,6 +17,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - `vector::{stale_embedding_targets, upsert_embedding, upsert_embeddings_batch}` (cortex re-embed loop).
 - Graph/browse: `tag_search`, `cold_notes`, `inbound_links`, `outbound_links`.
 - Parsing: `parse_body_summary` (`## Summary`), `parse_body_claims` (`## Claims` bullets).
+- Rerank (`rerank.rs`): the `Reranker` port, the `CROSS_ENCODERS` registry (`{ id, hf_repo, onnx_parity }`), and `get_or_load_reranker(model, &InferenceConfig, &CpuFeatures)`, which resolves the backend through `embedding::backend::resolve_with_parity` with the registry's parity bit and caches one cross-encoder per process. `CandleCrossEncoder` serves every entry; `OnnxCrossEncoder` only an entry whose `onnx_parity` is proven by `search::rerank::onnx::tests::onnx_ranks_like_candle_real_model` (`otto ignored`).
 
 ## Three Modes
 

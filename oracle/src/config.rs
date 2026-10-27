@@ -359,7 +359,7 @@ fn default_rrf_k() -> usize {
 }
 
 fn default_rerank_model() -> String {
-    "ms-marco-MiniLM-L6-v2".to_string()
+    vault::search::RERANK_MODEL_ID.to_string()
 }
 
 fn default_rerank_input_k() -> u32 {

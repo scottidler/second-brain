@@ -19,19 +19,15 @@ use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use eyre::{Result, WrapErr};
 use hf_hub::api::sync::Api;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use super::Reranker;
+use super::{Reranker, cross_encoder};
 
-/// Operator-facing model id (matches the oracle config default).
-pub const RERANK_MODEL_ID: &str = "ms-marco-MiniLM-L6-v2";
-/// HF Hub repo backing that id.
-const MODEL_REPO: &str = "cross-encoder/ms-marco-MiniLM-L-6-v2";
 /// Hard token cap for a (query, doc) pair.
 const MAX_SEQ_LEN: usize = 512;
 
-/// Candle cross-encoder pinning `ms-marco-MiniLM-L-6-v2`. A single inner model
+/// Candle cross-encoder for a `super::CROSS_ENCODERS` entry. A single inner model
 /// behind a `Mutex` (Candle's tensor pipeline is not concurrency-safe on one
 /// instance); a `score` call batches all pairs into one padded forward.
 pub struct CandleCrossEncoder {
@@ -48,14 +44,13 @@ struct Inner {
 }
 
 impl CandleCrossEncoder {
-    /// Download (if needed) and load the cross-encoder. Only `RERANK_MODEL_ID`
-    /// is supported; any other id is a clear error (no silent wrong model).
+    /// Download (if needed) and load the cross-encoder. Candle is the
+    /// reference backend and serves every registry entry; an id outside the
+    /// registry is a clear error (no silent wrong model).
     pub fn load(model_id: &str) -> Result<Self> {
-        if model_id != RERANK_MODEL_ID {
-            eyre::bail!("unknown rerank model_id {model_id:?} (this binary supports {RERANK_MODEL_ID:?})");
-        }
-        log::debug!("CandleCrossEncoder::load: repo={MODEL_REPO}");
-        let (config_path, tokenizer_path, weights_path) = download_files()?;
+        let repo = cross_encoder(model_id)?.hf_repo;
+        log::debug!("CandleCrossEncoder::load: repo={repo}");
+        let (config_path, tokenizer_path, weights_path) = download_files(repo)?;
 
         let config_str = std::fs::read_to_string(&config_path).wrap_err("read cross-encoder config.json")?;
         let config: Config = serde_json::from_str(&config_str).wrap_err("parse cross-encoder config.json")?;
@@ -107,7 +102,7 @@ impl CandleCrossEncoder {
         }));
 
         log::info!(
-            "CandleCrossEncoder::load: loaded {MODEL_REPO} hidden={hidden} pooler={}",
+            "CandleCrossEncoder::load: loaded {repo} hidden={hidden} pooler={}",
             pooler.is_some()
         );
         Ok(Self {
@@ -120,6 +115,12 @@ impl CandleCrossEncoder {
             }),
             model_id: model_id.to_string(),
         })
+    }
+
+    /// Idempotent prefetch of `model_id`'s safetensors files into the hf-hub
+    /// cache, without loading the model.
+    pub fn prefetch(model_id: &str) -> Result<()> {
+        download_files(cross_encoder(model_id)?.hf_repo).map(|_| ())
     }
 }
 
@@ -196,49 +197,9 @@ impl Reranker for CandleCrossEncoder {
     }
 }
 
-type RegistryEntry = (String, Arc<CandleCrossEncoder>);
-static RERANK_REGISTRY: OnceLock<RwLock<Vec<RegistryEntry>>> = OnceLock::new();
-
-fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
-    RERANK_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
-}
-
-/// Lazy-load + cache the cross-encoder for `model_id` (process-local). Mirrors
-/// the embedding registry: the first call pays the ~model-load cost, later
-/// calls hit the cache at ~0 ms.
-pub fn get_or_load_reranker(model_id: &str) -> Result<Arc<CandleCrossEncoder>> {
-    {
-        let guard = registry()
-            .read()
-            .map_err(|_| eyre::eyre!("RERANK_REGISTRY read lock poisoned"))?;
-        if let Some(e) = guard.iter().find(|(k, _)| k == model_id) {
-            return Ok(e.1.clone());
-        }
-    }
-    let model = Arc::new(CandleCrossEncoder::load(model_id)?);
-    let mut guard = registry()
-        .write()
-        .map_err(|_| eyre::eyre!("RERANK_REGISTRY write lock poisoned"))?;
-    if let Some(e) = guard.iter().find(|(k, _)| k == model_id) {
-        return Ok(e.1.clone());
-    }
-    guard.push((model_id.to_string(), model.clone()));
-    Ok(model)
-}
-
-/// Idempotent prefetch of the cross-encoder weights into the hf-hub cache, so
-/// the first enabled query does not block on a cold download.
-pub fn prefetch_reranker(model_id: &str) -> Result<()> {
-    if model_id != RERANK_MODEL_ID {
-        eyre::bail!("unknown rerank model_id {model_id:?} (this binary supports {RERANK_MODEL_ID:?})");
-    }
-    let _ = download_files()?;
-    Ok(())
-}
-
-fn download_files() -> Result<(PathBuf, PathBuf, PathBuf)> {
+fn download_files(repo_id: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let api = Api::new().wrap_err("hf-hub Api::new")?;
-    let repo = api.model(MODEL_REPO.to_string());
+    let repo = api.model(repo_id.to_string());
     let config = repo.get("config.json").wrap_err("fetch cross-encoder config.json")?;
     let tokenizer = repo
         .get("tokenizer.json")

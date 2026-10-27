@@ -555,3 +555,50 @@ fn bm25_quotes_natural_language_queries() {
         assert_eq!(rows.len(), 1, "configured pipeline, query {query:?}");
     }
 }
+
+/// With rerank off in config, the traced pipeline reports the stage `Off`.
+#[test]
+fn traced_pipeline_reports_rerank_off_when_disabled_in_config() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed(&db, "notes/hit.md", "transformer attention mechanism");
+    let cfg = Config {
+        retrieval: bm25_only_retrieval(1.0),
+        ..Default::default()
+    };
+    let server = OracleMcpServer::new(cfg, db);
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    let run = server
+        .run_configured_pipeline_traced(&guard, "transformer", None, false, None, None, 10)
+        .expect("configured pipeline");
+    assert_eq!(run.rerank, RerankRun::Off);
+    assert_eq!(run.rows.len(), 1);
+}
+
+/// A rerank model that cannot load latches the stage off and returns the
+/// fused order; the traced run says `Disabled`, never `Ran`. The unknown id
+/// fails at the registry lookup, before any download.
+#[test]
+fn traced_pipeline_reports_rerank_disabled_when_the_model_cannot_load() {
+    let db = SearchIndex::open_memory().expect("db");
+    seed(&db, "notes/a.md", "transformer attention mechanism");
+    seed(&db, "notes/b.md", "transformer encoder stack");
+    let mut retrieval = bm25_only_retrieval(1.0);
+    retrieval.rerank = RerankConfig {
+        enabled: true,
+        model: "not-a-cross-encoder".to_string(),
+        ..rerank_cfg(5, u64::MAX)
+    };
+    let cfg = Config {
+        retrieval,
+        ..Default::default()
+    };
+    let server = OracleMcpServer::new(cfg, db);
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    let run = server
+        .run_configured_pipeline_traced(&guard, "transformer", None, false, None, None, 10)
+        .expect("configured pipeline");
+    assert_eq!(run.rerank, RerankRun::Disabled);
+    assert_eq!(run.rows.len(), 2, "fused order still returned");
+}

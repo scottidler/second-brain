@@ -91,15 +91,18 @@ tasks:
     bash: |
       # The one entry point for tests CI cannot run: five download bge-small
       # (Candle safetensors and/or ONNX export, ~133 MB each; the ONNX ones
-      # need an AVX2+FMA CPU) and one needs Scott's rkvr binary. Named
-      # exactly, so the other #[ignore]d tests (perf, etc.) stay out; the
-      # per-binary `test result:` lines must sum to `6 passed`.
+      # need an AVX2+FMA CPU), one downloads the ms-marco cross-encoder (ONNX
+      # and safetensors) to prove ONNX ranks like Candle, and one needs
+      # Scott's rkvr binary. Named exactly, so the other #[ignore]d tests
+      # (perf, etc.) stay out; the per-binary `test result:` lines must sum
+      # to `7 passed`.
       cargo test $CARGO_SCOPE -- --ignored --exact \
         embedding::candle::tests::pool_batch_matches_one_at_a_time_real_model \
         candle::parity::candle_bert_matches_sentence_transformers_reference \
         embedding::onnx::tests::pool_batch_matches_one_at_a_time_real_model \
         embedding::onnx::tests::onnx_matches_candle_real_model \
         onnx::parity::onnx_matches_sentence_transformers_reference \
+        search::rerank::onnx::tests::onnx_ranks_like_candle_real_model \
         slides::cleanup::tests::test_cleanup_orphans_end_to_end
 
   cov:

@@ -42,7 +42,7 @@ Defined as `#[tool]` methods on `OracleMcpServer` (`server.rs`); request types +
 ## Module Map
 
 - `lib.rs` — public API (serve/call/index/stats/tools) + tracing enforcement.
-- `server.rs` — `OracleMcpServer`, tool implementations, `ServerHandler` (capabilities). `run_search_mode` (legacy modes) + `run_pipeline` (configured) share the bm25/vector/graph primitives; `maybe_rerank` is stage 4.
+- `server.rs` — `OracleMcpServer`, tool implementations, `ServerHandler` (capabilities). `run_search_mode` (legacy modes) + `run_pipeline` (configured) share the bm25/vector/graph primitives; `maybe_rerank` is stage 4 (cross-encoder backend from `inference:`, like query embedding). `run_pipeline_traced` / `run_configured_pipeline_traced` also return a `RerankRun` (off / ran / failed-open / latched off), which `sb oracle eval` reports per target beside its p50/p95 wall-clock latency.
 - `tools.rs` — request types; `SearchMode` (Bm25/Vector/Hybrid/Graph/GraphHybrid); `DetailLevel` (from vault).
 - `vocab.rs` (+`vocab/`) — the canonical vocabulary: `vocabulary_path` (borg.yml `tags.canonical-path`, tilde-expanded; absent borg.yml or unset key -> `vault::paths::canonical_tags()`; present-but-unreadable/unparseable -> error, via `fs::metadata` kind), `load_canonical_tags(path) -> Result`, `resolve`.
 - `queue.rs` (+`queue/`) — `ingest_queue` client: `BorgView` (daemon address, auth-token and `tags.canonical-path` view of `borg.yml`), `load_view`, `fetch` (GET `/queue`, explicit timeout, errors name the address).

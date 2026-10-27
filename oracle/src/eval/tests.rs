@@ -61,6 +61,8 @@ fn fixture() -> (Queries, Vec<QueryRun>) {
                 ("notes/c.md", "C"),
                 ("notes/d.md", "D"),
             ]),
+            latency_ms: BTreeMap::from([("vector".to_string(), 30.0), (CONFIGURED_LABEL.to_string(), 120.0)]),
+            rerank: Some(RerankRun::Ran),
         },
         QueryRun {
             ranked: ranked(&[
@@ -72,6 +74,8 @@ fn fixture() -> (Queries, Vec<QueryRun>) {
                 (ABLATION_LABEL, &["notes/a.md", "notes/e.md"]),
             ]),
             texts: texts(&[("notes/a.md", "A"), ("notes/e.md", "E")]),
+            latency_ms: BTreeMap::from([("vector".to_string(), 10.0), (CONFIGURED_LABEL.to_string(), 80.0)]),
+            rerank: Some(RerankRun::Ran),
         },
     ];
     (queries, runs)
@@ -235,4 +239,50 @@ fn judge_errors_are_counted_and_reported() {
             .render()
             .contains(&format!("{} judge errors", report.judge_errors))
     );
+}
+
+/// Each target's latency comes from that target's own samples, and only the
+/// configured target carries a rerank tally.
+#[test]
+fn evaluate_reports_latency_and_rerank_per_target() {
+    let (queries, runs) = fixture();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
+    let row = |label: &str| report.modes.iter().find(|m| m.mode == label).expect(label);
+
+    let vector = row("vector");
+    assert_eq!(
+        (vector.latency.p50_ms, vector.latency.p95_ms, vector.latency.n),
+        (10.0, 30.0, 2)
+    );
+    assert_eq!(vector.rerank, None);
+    // bm25 has no samples in the fixture.
+    assert_eq!(row("bm25").latency.n, 0);
+
+    let configured = row(CONFIGURED_LABEL);
+    assert_eq!((configured.latency.p50_ms, configured.latency.p95_ms), (80.0, 120.0));
+    assert_eq!(
+        configured.rerank,
+        Some(RerankTally {
+            ran: 2,
+            ..RerankTally::default()
+        })
+    );
+    assert!(report.render().contains("ran 2/2"));
+}
+
+/// A rerank-on run whose stage was latched off is reported as not run, never
+/// as rerank on.
+#[test]
+fn evaluate_flags_a_latched_off_rerank() {
+    let (queries, mut runs) = fixture();
+    for run in &mut runs {
+        run.rerank = Some(RerankRun::Disabled);
+    }
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let out =
+        unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate")).render();
+    assert!(out.contains("NOT RUN 2/2"), "{out}");
+    assert!(out.contains("NOT a rerank-on result"), "{out}");
+    assert!(!out.contains("ran 2/2"), "{out}");
 }

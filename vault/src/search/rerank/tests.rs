@@ -58,3 +58,80 @@ fn project_batch_ms_is_linear_in_count() {
     // A small batch within a generous budget.
     assert_eq!(project_batch_ms(10.0, 4), 40.0);
 }
+
+#[test]
+fn registry_serves_the_oracle_default_with_an_onnx_parity_proof() {
+    let spec = cross_encoder_spec(RERANK_MODEL_ID).expect("default model in registry");
+    assert_eq!(spec.hf_repo, "cross-encoder/ms-marco-MiniLM-L6-v2");
+    assert!(spec.onnx_parity);
+    assert_eq!(cross_encoder_spec("ms-marco-MiniLM-L-12-v2"), None);
+}
+
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+mod resolution {
+    use super::super::*;
+    use crate::embedding::BackendChoice;
+
+    fn cpu(capable: bool) -> CpuFeatures {
+        CpuFeatures {
+            avx: true,
+            avx2: capable,
+            fma: capable,
+            ..CpuFeatures::default()
+        }
+    }
+
+    /// The rerank model resolves through the embedding table with the
+    /// cross-encoder registry's parity bit.
+    #[test]
+    fn rerank_backend_follows_the_resolution_table() {
+        let rows = [
+            (BackendChoice::Auto, true, Some(Backend::Onnx)),
+            (BackendChoice::Auto, false, Some(Backend::Candle)),
+            (BackendChoice::Candle, true, Some(Backend::Candle)),
+            (BackendChoice::Onnx, true, Some(Backend::Onnx)),
+            (BackendChoice::Onnx, false, None),
+        ];
+        for (requested, capable, expected) in rows {
+            let got = resolve_rerank_backend(requested, &cpu(capable), RERANK_MODEL_ID);
+            match expected {
+                Some(backend) => assert_eq!(got.expect("resolves"), backend, "{requested} capable={capable}"),
+                None => assert!(
+                    got.expect_err("must fail").to_string().contains("lacks avx2 and fma"),
+                    "{requested} capable={capable}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_rerank_model_fails_under_every_backend_choice() {
+        for requested in [BackendChoice::Auto, BackendChoice::Candle, BackendChoice::Onnx] {
+            let err = resolve_rerank_backend(requested, &cpu(true), "bogus")
+                .expect_err("unknown model")
+                .to_string();
+            assert!(err.contains("unknown rerank model"), "{requested}: {err}");
+        }
+    }
+
+    #[test]
+    fn load_and_prefetch_refuse_an_unknown_model_offline() {
+        for backend in [Backend::Candle, Backend::Onnx] {
+            assert!(load_reranker("bogus", backend, 1, &cpu(true)).is_err(), "{backend}");
+            assert!(prefetch_reranker("bogus", backend).is_err(), "{backend}");
+        }
+    }
+
+    #[test]
+    fn get_or_load_refuses_an_incapable_cpu_pinned_to_onnx() {
+        let inference = InferenceConfig {
+            backend: BackendChoice::Onnx,
+            threads: 1,
+        };
+        let err = get_or_load_reranker(RERANK_MODEL_ID, &inference, &cpu(false))
+            .err()
+            .expect("no ONNX on an AVX-only CPU")
+            .to_string();
+        assert!(err.contains("lacks avx2 and fma"), "{err}");
+    }
+}
