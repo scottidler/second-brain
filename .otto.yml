@@ -14,8 +14,7 @@ otto:
     BLOAT_MAX_LINES: "1500"
     # What check, test, and cov all build. `default-members = ["sb"]` makes a
     # bare cargo command see only sb; --workspace widens it to every crate.
-    # `--features vec` (resolves to Candle) rather than `--all-features`:
-    # vault's `vec-candle` + `vec-fastembed` are mutually exclusive.
+    # `--features vec` (resolves to Candle) rather than `--all-features`.
     CARGO_SCOPE: "--workspace --features vec"
 
 tasks:
@@ -65,8 +64,7 @@ tasks:
   check:
     help: "Run all quality checks (compile, clippy, format)"
     bash: |
-      # Scope comes from CARGO_SCOPE (see envs): `--all-features` would trip
-      # vault's mutually-exclusive vec-candle/vec-fastembed compile_error! guard.
+      # Scope comes from CARGO_SCOPE (see envs).
       echo "=== Checking compilation ==="
       cargo check $CARGO_SCOPE --all-targets
       echo ""

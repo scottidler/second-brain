@@ -13,7 +13,7 @@ The single source of truth for the Obsidian-vault note schema (NoteType / Origin
 - `vault::frontmatter::Frontmatter` — known fields extracted, unknown fields preserved in an extras map (distillers / `cortex-*` keys).
 - `vault::paths::{expand_tilde, deserialize_tilde_pathbuf, config_root, resolve_vault_root}`; `borg_stages_dir()` (swept staging) and `borg_sources_dir()` (the durable source archive) are borg's two per-trace roots. `vault::trace::dir(root, trace)` is the one per-trace path join, refusing any trace that is not a single plain component.
 - `vault::ledger` — borg's dedup log helpers; `vault::receipts::FailureStage` (the seven terminal stages).
-- `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle / fastembed, feature-gated).
+- `vault::embedding::{EmbeddingModel, load_active_model, embed_query}` (Candle, feature-gated).
 - `vault::distilled::Distilled { summary, tldr, slug, enumeration, key_ideas, claims, tags, links, kind_specific, meta, transcript }`.
 - `vault::watcher::VaultWatcher::start(vault_root, config, applying_flag)` — debounced change stream.
 - `vault::process::run(cmd, stdin, timeout, label) -> Outcome { Exited | TimedOut }`: the one subprocess primitive. Owns all three pipes (stdin `/dev/null` when `None`, never inherited), drains on threads, spawns in its own process group and SIGKILLs the group at the deadline. `kill_registered()` / `install_interrupt_handler()` cover Ctrl-C for interactive sb commands.

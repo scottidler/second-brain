@@ -97,7 +97,7 @@ impl super::SearchIndex {
         // with "trigger already exists" on the recreate path.
         self.ensure_fts5_schema()?;
 
-        #[cfg(feature = "vec")]
+        #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
         self.ensure_vec_schema()?;
 
         Ok(())
@@ -117,7 +117,7 @@ impl super::SearchIndex {
     /// Idempotent: every statement uses `IF NOT EXISTS` (or `INSERT OR
     /// IGNORE` for the config row) so existing DBs upgrade without data
     /// loss.
-    #[cfg(feature = "vec")]
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
     fn ensure_vec_schema(&self) -> Result<()> {
         // Fresh DBs get the widened CHECK immediately (`'claim'` included).
         // Existing DBs created before the claim kind keep the old
@@ -214,7 +214,7 @@ impl super::SearchIndex {
     ///   survive byte-identical.
     /// - **Indexes recreated; `embedding_config` untouched** (a separate
     ///   table the rebuild never drops).
-    #[cfg(feature = "vec")]
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
     pub(crate) fn migrate_note_embeddings_add_claim_kind(&self) -> Result<bool> {
         let stored_sql: Option<String> = super::optional_row(self.conn.query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='note_embeddings'",

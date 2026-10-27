@@ -86,8 +86,8 @@ fn corpus() -> Vec<(&'static str, &'static str, &'static str)> {
         ),
         (
             "notes/15.md",
-            "fastembed local inference",
-            "fastembed onnx local inference embedding",
+            "embedder local inference",
+            "embedder onnx local inference embedding",
         ),
         (
             "notes/16.md",
@@ -131,7 +131,7 @@ fn queries() -> Vec<&'static str> {
         "hnsw approximate nearest neighbor",
         "rrf rank fusion",
         "obsidian vault notes",
-        "fastembed onnx inference",
+        "embedder onnx inference",
         "kubernetes operator reconcile",
         "react cleanup memory leak",
         "telegram ingestion pipeline",

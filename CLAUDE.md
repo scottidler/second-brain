@@ -111,7 +111,7 @@ The workspace ships a single binary `sb` that subsumes the old `borg`, `cortex`,
 
 ```bash
 otto deploy
-# First run only: prefetch the fastembed model (~100 MB) so the
+# First run only: prefetch the embedding model (~100 MB) so the
 # next oracle/cortex invocation does not need network.
 sb cortex embed --prefetch-model
 ```
@@ -120,4 +120,4 @@ sb cortex embed --prefetch-model
 
 oracle is an MCP server launched on demand via `.mcp.json` -> `sb oracle serve`. No restart needed. Project-scoped (vault-specific). The `gslides` MCP (`mcp__gslides__*`, vault-note -> Google Slides decks) is also available but user-scoped/global, defined in `~/.claude.json` via the `mcp-servers` step in `scottidler/claude/manifest.yml`.
 
-For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/sb/` and prefetches the fastembed cache. On machines with the legacy `~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}` layout, `sb bootstrap` auto-detects and migrates them.
+For first-time setup on a new machine: `sb bootstrap` drops starter config files into `~/.config/sb/` and prefetches the embedding model cache. On machines with the legacy `~/.config/{borg,cortex,obsidian-cortex,oracle,second-brain}` layout, `sb bootstrap` auto-detects and migrates them.

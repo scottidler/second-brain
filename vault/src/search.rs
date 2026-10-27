@@ -344,10 +344,10 @@ pub enum IndexAction {
     Updated,
 }
 
-#[cfg(feature = "vec")]
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 mod vector;
 
-#[cfg(feature = "vec")]
+#[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 pub use vector::{
     BatchUpsert, EmbeddingKind, ExaminedNote, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit,
     reciprocal_rank_fusion, reciprocal_rank_fusion_weighted,

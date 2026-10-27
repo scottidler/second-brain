@@ -348,7 +348,7 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
             }
             _ = embed_interval.tick() => {
                 // Embed tick. block_in_place because the
-                // embed loop runs SQLite IO + fastembed CPU inference
+                // embed loop runs SQLite IO + embedding CPU inference
                 // (when there are stale rows); we don't want to starve
                 // the watcher or the scheduled-intel timers if the
                 // embedder is currently chewing on a batch.

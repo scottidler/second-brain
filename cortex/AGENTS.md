@@ -12,7 +12,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 
 - `classify::run` — assigns `tags` through the shared `distillers::tags` classifier and promotes inbox notes on its confidence; `--retag` re-runs it with replace semantics.
 - `sweep::run` — tag-vocabulary migration / cold-note scan (proposal-driven).
-- `embed::run` — read/infer/write loop: pull stale rows → batch-embed (fastembed) → upsert `note_embeddings`.
+- `embed::run` — read/infer/write loop: pull stale rows → batch-embed → upsert `note_embeddings`.
 - `summarize::run` — `--backfill`: walk vault, infer distill kind, invoke Fabric, rewrite legacy notes with rendered sections.
 - `migrate::run` — planned file moves + frontmatter/value transforms + `field-to-tags` / `tags-remove` tag transforms (a `field-to-tags` value outside the loaded vocabulary is dropped with a log line, never written; the dry-run flags notes that would exceed the cap and notes already carrying two or more of the migrated names).
 - `daemon::run` — long-running watcher + scheduled sweep/intel/embed ticks; systemd install/uninstall.

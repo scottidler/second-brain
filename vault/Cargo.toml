@@ -21,9 +21,9 @@ http = ["dep:reqwest"]
 # `--features vec` get a working install on any x86_64 CPU.
 vec = ["vec-candle"]
 
-# Backend-specific flags. Either pulls in `search` so a build that says
-# `--features vec-fastembed` (no `vec`) still wires up the SQL layer.
-# Enabling both is a compile error.
+# Backend-specific flags. Each pulls in `search` so a build that names only
+# one backend still wires up the SQL layer. `vec-onnx` is filled in by the
+# ONNX backend phase; until then it declares no dependencies.
 vec-candle = [
     "search",
     "dep:candle-core",
@@ -32,10 +32,7 @@ vec-candle = [
     "dep:tokenizers",
     "dep:hf-hub",
 ]
-vec-fastembed = [
-    "search",
-    "dep:fastembed",
-]
+vec-onnx = ["search"]
 
 [dependencies]
 rusqlite = { workspace = true, optional = true }
@@ -57,7 +54,6 @@ shellexpand = { workspace = true }
 unicode-normalization = { workspace = true }
 walkdir = { workspace = true }
 rayon = { workspace = true }
-fastembed = { version = "5.13.4", optional = true }
 candle-core = { version = "0.10.2", optional = true }
 candle-nn = { version = "0.10.2", optional = true }
 candle-transformers = { version = "0.10.2", optional = true }

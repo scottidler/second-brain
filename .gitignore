@@ -13,9 +13,6 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
-# fastembed-downloaded ONNX model cache (legacy backend artifacts)
-.fastembed_cache/
-
 # Signed Firefox extension artifacts. Committed so multi-machine deploys
 # (laptop + desk + servers) can install without each one needing to re-sign
 # against AMO - AMO publishes one .xpi per version and rejects re-uploads

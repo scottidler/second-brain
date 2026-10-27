@@ -531,7 +531,7 @@ fn write_transaction_for_batch_64_stays_under_200ms() {
     // This is the load-bearing invariant of the transaction discipline. If a future
     // change moves `embed_batch` between BEGIN IMMEDIATE and COMMIT
     // (or holds any other CPU-bound work inside the write transaction),
-    // the wall-clock blows past 200 ms because real fastembed inference
+    // the wall-clock blows past 200 ms because real embedding inference
     // is ~50 ms per note.
     //
     // We measure only the time spent inside the upsert_embeddings_batch

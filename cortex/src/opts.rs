@@ -207,7 +207,7 @@ pub struct EmbedOpts {
     /// the default of 64.
     pub batch_size: usize,
 
-    /// Download the model weights to the fastembed cache and exit
+    /// Download the model weights to the model cache and exit
     /// without embedding anything. Use this on install machines that
     /// have network during install but may be offline at oracle's
     /// first-query time.

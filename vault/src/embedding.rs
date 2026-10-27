@@ -17,28 +17,21 @@
 //!   need embeddings.
 //!
 //! Both processes pin `bge-small-en-v1.5` (384 dims, L2-normalized output).
-//! The active backend (Candle by default, fastembed via feature flag) is
-//! a compile-time choice; the `EmbeddingModel` trait is the shared seam.
+//! The active backend (Candle today) is a
+//! compile-time choice; the `EmbeddingModel` trait is the shared seam.
 //! The model identifier is stored in the search DB's `embedding_config`
 //! table as `active_model`; oracle and cortex read it on every dispatch so
 //! the two processes cannot drift onto different models.
 
 use eyre::Result;
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 use std::sync::{Arc, OnceLock, RwLock};
-
-#[cfg(all(feature = "vec-candle", feature = "vec-fastembed"))]
-compile_error!("Enable exactly one embedding backend, not both");
 
 #[cfg(feature = "vec-candle")]
 pub mod candle;
-#[cfg(feature = "vec-fastembed")]
-pub mod fastembed;
 
 #[cfg(feature = "vec-candle")]
 pub use candle::CandleBertModel;
-#[cfg(feature = "vec-fastembed")]
-pub use fastembed::FastEmbedModel;
 
 /// Pin: `bge-small-en-v1.5` outputs 384-dim L2-normalized vectors. Cosine
 /// similarity reduces to a plain dot product because both query and stored
@@ -47,7 +40,7 @@ pub const BGE_SMALL_EN_V15_DIM: usize = 384;
 
 /// Canonical model identifier written into `note_embeddings.model_version`
 /// and `embedding_config.active_model`. The value depends on the active
-/// backend feature: switching families (Candle ↔ fastembed) changes this
+/// backend feature: switching backend families changes this
 /// string, which triggers the existing stale-detection path in
 /// `vault::search::vector::stale_embedding_targets` to re-embed.
 ///
@@ -55,16 +48,12 @@ pub const BGE_SMALL_EN_V15_DIM: usize = 384;
 /// same string; fp32 drift across kernels is within cosine top-K tolerance.
 #[cfg(feature = "vec-candle")]
 pub const ACTIVE_MODEL_VERSION: &str = candle::CANDLE_MODEL_VERSION;
-#[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
-pub const ACTIVE_MODEL_VERSION: &str = fastembed::FASTEMBED_MODEL_VERSION;
 
 /// Type alias for the active embedding backend. Downstream crates (cortex,
 /// oracle) construct and store an `Arc<ActiveModel>` directly; the alias
 /// keeps their code free of `#[cfg]` blocks.
 #[cfg(feature = "vec-candle")]
 pub type ActiveModel = CandleBertModel;
-#[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
-pub type ActiveModel = FastEmbedModel;
 
 /// Port for the embedding model.
 ///
@@ -97,7 +86,7 @@ pub trait EmbeddingModel: Send + Sync {
     }
 }
 
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 type RegistryEntry = (String, Arc<ActiveModel>);
 
 /// Process-local registry of loaded models, keyed by `model_version`.
@@ -107,10 +96,10 @@ type RegistryEntry = (String, Arc<ActiveModel>);
 /// the `Arc<ActiveModel>` in the registry, and returns. Subsequent calls
 /// hit the registry at ~0 ms overhead. Model bumps are rare, so holding
 /// multiple models resident is acceptable.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 static MODEL_REGISTRY: OnceLock<RwLock<Vec<RegistryEntry>>> = OnceLock::new();
 
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
     MODEL_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
@@ -118,49 +107,25 @@ fn registry() -> &'static RwLock<Vec<RegistryEntry>> {
 /// Backend-agnostic active-model loader.
 ///
 /// Candle accepts a worker count for its internal replica pool; pass
-/// `0` to let it pick the platform-aware default. fastembed ignores the
-/// count (ONNX MLAS handles its own threading), so the parameter is
-/// honored only on the Candle backend.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+/// `0` to let it pick the platform-aware default.
+#[cfg(feature = "vec-candle")]
 pub fn load_active_model(workers: usize) -> Result<ActiveModel> {
     load_model_version(ACTIVE_MODEL_VERSION, workers)
 }
 
 /// Load a specific supported model by `model_version` (the A/B path).
 /// `workers == 0` means platform-default parallelism. The Candle backend
-/// supports the BERT-family registry (`candle::SUPPORTED_MODELS`); the fastembed
-/// backend pins only the default model and errors on any other version.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+/// supports the BERT-family registry (`candle::SUPPORTED_MODELS`).
+#[cfg(feature = "vec-candle")]
 pub fn load_model_version(model_version: &str, workers: usize) -> Result<ActiveModel> {
-    #[cfg(feature = "vec-candle")]
-    {
-        candle::CandleBertModel::load_version(model_version, workers)
-    }
-    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
-    {
-        let _ = workers;
-        if model_version != ACTIVE_MODEL_VERSION {
-            eyre::bail!(
-                "fastembed backend supports only {ACTIVE_MODEL_VERSION:?}, not {model_version:?}; \
-                 the multi-model registry is Candle-only"
-            );
-        }
-        fastembed::FastEmbedModel::load()
-    }
+    candle::CandleBertModel::load_version(model_version, workers)
 }
 
 /// Whether this binary's backend can load `model_version`. Lets callers
 /// validate a requested pin before re-embedding.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 pub fn is_supported_model_version(model_version: &str) -> bool {
-    #[cfg(feature = "vec-candle")]
-    {
-        candle::supported_model(model_version).is_some()
-    }
-    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
-    {
-        model_version == ACTIVE_MODEL_VERSION
-    }
+    candle::supported_model(model_version).is_some()
 }
 
 /// Idempotent backend-agnostic prefetch.
@@ -169,34 +134,18 @@ pub fn is_supported_model_version(model_version: &str) -> bool {
 /// `model.safetensors` into the hf-hub cache without instantiating the
 /// BertModel (cheap; no weight loading).
 ///
-/// fastembed: calls `FastEmbedModel::load()` because fastembed has no
-/// separate prefetch path - the model session ships alongside the
-/// download.
-///
 /// Used by `cortex embed --prefetch-model` so the first real embedding
 /// call does not pay network latency.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 pub fn prefetch_active_model() -> Result<()> {
     prefetch_model_version(ACTIVE_MODEL_VERSION)
 }
 
 /// Prefetch a specific supported model's weights into the cache (warm
-/// a candidate before re-embedding). Candle uses the registry; fastembed pins
-/// only the default model.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+/// a candidate before re-embedding). Candle uses the registry.
+#[cfg(feature = "vec-candle")]
 pub fn prefetch_model_version(model_version: &str) -> Result<()> {
-    #[cfg(feature = "vec-candle")]
-    {
-        candle::CandleBertModel::prefetch_version(model_version)
-    }
-    #[cfg(all(feature = "vec-fastembed", not(feature = "vec-candle")))]
-    {
-        if model_version != ACTIVE_MODEL_VERSION {
-            eyre::bail!("fastembed backend supports only {ACTIVE_MODEL_VERSION:?}, not {model_version:?}");
-        }
-        let _model = fastembed::FastEmbedModel::load()?;
-        Ok(())
-    }
+    candle::CandleBertModel::prefetch_version(model_version)
 }
 
 /// Lazy-load the active backend's model for `model_version` and embed `text`.
@@ -211,13 +160,13 @@ pub fn prefetch_model_version(model_version: &str) -> Result<()> {
 /// other value returns a clear error pointing at the expected string;
 /// this protects against silent misuse when a downstream caller has stale
 /// hardcoded model_version strings after a backend swap.
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 pub fn embed_query(text: &str, model_version: &str) -> Result<Vec<f32>> {
     let model = get_or_load_model(model_version)?;
     model.embed_one(text)
 }
 
-#[cfg(any(feature = "vec-candle", feature = "vec-fastembed"))]
+#[cfg(feature = "vec-candle")]
 fn get_or_load_model(model_version: &str) -> Result<Arc<ActiveModel>> {
     {
         let guard = registry()

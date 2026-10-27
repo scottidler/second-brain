@@ -647,10 +647,8 @@ fn pattern_findings() -> Vec<Finding> {
 }
 
 fn embedding_findings() -> Vec<Finding> {
-    // The active embedding backend (candle vs fastembed) is a compile-time
-    // feature on the vault crate. Both keep their downloaded weights in
-    // different XDG locations. Probe both: any populated cache means the
-    // model is available for the next inference call.
+    // The embedding weights live in the hf-hub cache; a populated cache means
+    // the model is available for the next inference call.
     let mut findings = Vec::new();
     let Some(cache_root) = dirs::cache_dir() else {
         findings.push(Finding::error(
@@ -660,31 +658,20 @@ fn embedding_findings() -> Vec<Finding> {
         return findings;
     };
 
-    // candle backend: hf-hub stores at ~/.cache/huggingface/hub/models--<owner>--<name>/
+    // hf-hub stores at ~/.cache/huggingface/hub/models--<owner>--<name>/
     let hf_hub = cache_root.join("huggingface/hub");
     let candle_models = list_model_dirs(&hf_hub, "models--");
 
-    // fastembed backend: ~/.cache/fastembed/
-    let fastembed = cache_root.join("fastembed");
-    let fastembed_present = fastembed.exists() && has_any_subdir(&fastembed);
-
     if !candle_models.is_empty() {
         findings.push(Finding::ok(format!(
-            "candle cache: {} model(s) under {}",
+            "embedding model cache: {} model(s) under {}",
             candle_models.len(),
             hf_hub.display()
         )));
     }
-    if fastembed_present {
-        findings.push(Finding::ok(format!("fastembed cache: {}", fastembed.display())));
-    }
-    if candle_models.is_empty() && !fastembed_present {
+    if candle_models.is_empty() {
         findings.push(Finding::warn(
-            format!(
-                "no embedding model cache found (checked {}, {})",
-                hf_hub.display(),
-                fastembed.display()
-            ),
+            format!("no embedding model cache found (checked {})", hf_hub.display()),
             "sb bootstrap (or sb cortex embed --prefetch-model)".to_string(),
         ));
     }
@@ -702,13 +689,6 @@ fn list_model_dirs(root: &std::path::Path, prefix: &str) -> Vec<String> {
             if name.starts_with(prefix) && e.path().is_dir() { Some(name) } else { None }
         })
         .collect()
-}
-
-fn has_any_subdir(root: &std::path::Path) -> bool {
-    let Ok(mut entries) = std::fs::read_dir(root) else {
-        return false;
-    };
-    entries.any(|e| e.is_ok_and(|entry| entry.path().is_dir()))
 }
 
 struct SystemdState {

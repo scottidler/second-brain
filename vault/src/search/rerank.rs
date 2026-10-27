@@ -20,7 +20,7 @@
 //!
 //! ## Honest status on the daemon host
 //!
-//! The daemon host (`desk`) is AVX-only; fastembed aborts there, so this is a
+//! The daemon host (`desk`) is AVX-only; the ONNX runtime aborts there, so this is a
 //! Candle scalar-backend pipeline at ~150-300 ms **per pair**. Reranking 50
 //! unbatched candidates is ~7.5-15 s - past any interactive budget. The stage
 //! is therefore **off by default** and gated by a warmup latency probe (in

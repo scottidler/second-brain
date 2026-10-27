@@ -8,7 +8,7 @@ mod tests;
 
 #[derive(clap::Args)]
 pub struct BootstrapArgs {
-    /// Skip the fastembed model prefetch (network-light bootstrap on install machines without GPU/disk budget).
+    /// Skip the embedding model prefetch (network-light bootstrap on install machines without GPU/disk budget).
     #[arg(long)]
     pub skip_prefetch_model: bool,
 

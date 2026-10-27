@@ -13,7 +13,7 @@ use vault::schema::{NoteType, Status};
 ///
 /// - `bm25`: pure FTS5 keyword search. Best for proper nouns, exact
 ///   terms, and "I know I saved that word" queries.
-/// - `vector`: pure semantic search via fastembed + brute-force cosine
+/// - `vector`: pure semantic search via the embedding model + brute-force cosine
 ///   over `note_embeddings`. Best for conceptual recall.
 /// - `hybrid`: BM25 and vector fused via reciprocal rank fusion (recovers
 ///   both behaviors).
