@@ -23,6 +23,8 @@ use teloxide::prelude::*;
 use teloxide::types::ChatId;
 
 #[cfg(test)]
+pub(crate) mod probe;
+#[cfg(test)]
 mod tests;
 
 // Per-channel notification timeouts. The Design Invariant in
@@ -113,6 +115,8 @@ impl Telegram {
     /// logs a warning and returns `Err(())`.
     #[allow(clippy::result_unit_err)] // Err(()) is a deliberate delivery-failed sentinel, not an underspecified error.
     pub async fn processing(&self, trace_id: &str, description: &str, override_chat_id: Option<i64>) -> Result<(), ()> {
+        #[cfg(test)]
+        probe::record(trace_id);
         if real_notifications_disabled() {
             log::debug!("notify::Telegram::processing: suppressed under test (trace={trace_id})");
             return Ok(());
@@ -143,6 +147,8 @@ impl Telegram {
     /// HTTPS call in a `TELEGRAM_TIMEOUT_MS` `tokio::time::timeout` per Design
     /// Invariant 2.
     pub async fn result(&self, result: &IngestResult, display_source: &str, override_chat_id: Option<i64>) {
+        #[cfg(test)]
+        probe::record(display_source);
         if real_notifications_disabled() {
             log::debug!("notify::Telegram::result: suppressed under test (display={display_source})");
             return;
@@ -305,6 +311,8 @@ impl Desktop {
     /// Returns `None` on D-Bus error or 500 ms timeout; `result(...)` then
     /// falls back to a fresh popup.
     pub async fn processing(&self, trace_id: &str, description: &str) -> Option<NotificationHandle> {
+        #[cfg(test)]
+        probe::record(trace_id);
         if real_notifications_disabled() {
             log::debug!("notify::Desktop::processing: suppressed under test (trace={trace_id})");
             return None;
@@ -363,6 +371,8 @@ impl Desktop {
     /// placeholder) we fall back to a fresh popup so the user still sees a
     /// terminal result.
     pub async fn result(&self, result: &IngestResult, display_source: &str, prior: Option<NotificationHandle>) {
+        #[cfg(test)]
+        probe::record(display_source);
         let body = format_desktop_body(result, display_source);
 
         if let Some(mut handle) = prior {

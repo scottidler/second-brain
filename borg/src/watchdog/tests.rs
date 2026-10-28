@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::pipeline::permits::TraceLeaseGuard;
-use vault::receipts::ReceiptKind;
+use vault::receipts::{FailureStage, ReceiptKind};
 use vault::schema::Method;
 
 fn backdate(conn: &Connection, trace_id: &str) {
@@ -164,4 +164,45 @@ fn the_backstop_tick_summarizes_a_seal_missing_batch_once() {
     assert_eq!(pass.summaries.len(), 1);
     assert!(pass.summaries[0].seal_missing);
     assert!(run_once_conn(&conn, 60).unwrap().summaries.is_empty());
+}
+
+/// The stranded batch: sealed, every member terminal, but the `/ingest` drain
+/// check after the last terminal write never ran (a restart, a busy DB). No
+/// row is stale, so no promotion re-checks it, and the backstop skips sealed
+/// batches; the reconciliation step summarizes it on the next pass, once.
+#[test]
+fn a_sealed_drained_batch_whose_drain_check_never_ran_is_summarized_once() {
+    let conn = receipts::open_memory().unwrap();
+    batch_member(&conn, "b1", "a");
+    batch_member(&conn, "b1", "b");
+    crate::batch::seal(&conn, "b1", &["a".to_string(), "b".to_string()]).unwrap();
+    receipts::mark_succeeded(&conn, "a", "n.md", false).unwrap();
+    receipts::mark_failed(&conn, "b", FailureStage::FetchFailed, "x").unwrap();
+
+    let pass = run_once_conn(&conn, 60).unwrap();
+    assert_eq!(pass.promoted, 0);
+    let [summary] = &pass.summaries[..] else {
+        panic!("{:?}", pass.summaries);
+    };
+    assert_eq!(
+        summary.text(),
+        "borg bulk b1: 1 succeeded (0 degraded), 1 failed (0 crashed) of 2 URL items"
+    );
+    assert!(!summary.seal_missing);
+    assert!(run_once_conn(&conn, 60).unwrap().summaries.is_empty(), "claimed once");
+}
+
+/// Reconciliation keeps the drain predicate: a sealed batch with a member
+/// still `received`, or a sealed id with no receipts row, stays held.
+#[test]
+fn reconciliation_holds_a_sealed_batch_that_has_not_drained() {
+    let conn = receipts::open_memory().unwrap();
+    batch_member(&conn, "busy", "a");
+    crate::batch::seal(&conn, "busy", &["a".to_string()]).unwrap();
+    batch_member(&conn, "gap", "c");
+    crate::batch::seal(&conn, "gap", &["c".to_string(), "no-row".to_string()]).unwrap();
+    receipts::mark_succeeded(&conn, "c", "n.md", false).unwrap();
+
+    let pass = run_once_conn(&conn, 60).unwrap();
+    assert!(pass.summaries.is_empty(), "{:?}", pass.summaries);
 }

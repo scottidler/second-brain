@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 
 use super::notifier::{self, Sink, SinkOutcome};
 use super::*;
-use crate::dispatch::pings_operator;
 use crate::notify::MessageSink;
 use crate::receipts;
 use crate::types::IngestMethod;
@@ -56,16 +55,6 @@ impl MessageSink for Counting {
     async fn send(&self, text: &str) -> std::result::Result<(), String> {
         self.sent.lock().unwrap().push(text.to_string());
         if self.fail { Err("boom".to_string()) } else { Ok(()) }
-    }
-}
-
-/// The daemon's per-item path, with counting sinks in place of the concrete
-/// ones: an ack goes to each sink exactly when `pings_operator` says so,
-/// which is the gate `/ingest` and `dispatch_ingest` apply.
-async fn per_item_ack(method: IngestMethod, desktop: &Counting, telegram: &Counting) {
-    if pings_operator(method, None) {
-        desktop.send("[trace] Processing...").await.unwrap();
-        telegram.send("[trace] Processing...").await.unwrap();
     }
 }
 
@@ -240,6 +229,70 @@ fn the_claim_is_exactly_once_under_concurrent_callers() {
     assert_eq!(wins[0].total, 3);
 }
 
+/// The claim re-checks the drain itself: a member whose intake lands after
+/// `drained` said yes but before the claim (a lost-response member) fails the
+/// claim, and the batch summarizes only once that member is terminal.
+#[test]
+fn a_member_received_between_the_drain_check_and_the_claim_blocks_the_claim() {
+    let conn = receipts::open_memory().unwrap();
+    member(&conn, "b1", "tr-1");
+    seal(&conn, "b1", &ids(1)).unwrap();
+    receipts::mark_succeeded(&conn, "tr-1", "n.md", false).unwrap();
+    assert!(drained(&conn, "b1").unwrap(), "drained before the late intake");
+
+    member(&conn, "b1", "tr-late");
+    assert_eq!(
+        claim(&conn, "b1", false).unwrap(),
+        None,
+        "claimed past a received member"
+    );
+
+    receipts::mark_succeeded(&conn, "tr-late", "n.md", false).unwrap();
+    let summary = maybe_summarize(&conn, "b1").unwrap().expect("drained now");
+    assert_eq!(summary.total, 2);
+}
+
+/// The same guard covers the sealed-id half of the drain predicate, and the
+/// backstop claim refuses a batch with a member still `received`.
+#[test]
+fn the_claim_refuses_a_missing_sealed_row_and_the_backstop_claim_a_received_member() {
+    let conn = receipts::open_memory().unwrap();
+    member(&conn, "b1", "tr-1");
+    seal(&conn, "b1", &ids(2)).unwrap();
+    receipts::mark_succeeded(&conn, "tr-1", "n.md", false).unwrap();
+    assert_eq!(
+        claim(&conn, "b1", false).unwrap(),
+        None,
+        "tr-2 is sealed but has no row"
+    );
+
+    member(&conn, "b2", "tr-9");
+    assert_eq!(claim(&conn, "b2", true).unwrap(), None, "tr-9 is still received");
+    receipts::mark_succeeded(&conn, "tr-9", "n.md", false).unwrap();
+    assert!(claim(&conn, "b2", true).unwrap().expect("drained").seal_missing);
+}
+
+/// `reconcile_sealed` summarizes a sealed, drained, unclaimed batch once and
+/// leaves unsealed and undrained batches alone.
+#[test]
+fn reconcile_sealed_claims_only_sealed_drained_batches_once() {
+    let conn = receipts::open_memory().unwrap();
+    member(&conn, "done", "tr-1");
+    seal(&conn, "done", &ids(1)).unwrap();
+    receipts::mark_succeeded(&conn, "tr-1", "n.md", false).unwrap();
+    member(&conn, "open", "tr-2");
+    receipts::mark_succeeded(&conn, "tr-2", "n.md", false).unwrap();
+    member(&conn, "busy", "tr-3");
+    seal(&conn, "busy", &["tr-3".to_string()]).unwrap();
+
+    let won = reconcile_sealed(&conn).unwrap();
+    assert_eq!(
+        won.iter().map(|s| s.batch_id.as_str()).collect::<Vec<_>>(),
+        vec!["done"]
+    );
+    assert!(reconcile_sealed(&conn).unwrap().is_empty(), "claimed once");
+}
+
 // ---- backstop -------------------------------------------------------------------
 
 #[test]
@@ -321,18 +374,19 @@ async fn deliver_reports_sent_failed_and_disabled_per_sink() {
 
 // ---- the success criteria -------------------------------------------------------
 
-/// A sealed batch of 6 CLI items sends 0 per-item acks and, once every item
-/// is terminal, exactly 1 desktop and 1 Telegram summary. A 7th member whose
+/// A sealed batch of 6 CLI items, once every item is terminal, puts exactly 1
+/// desktop and 1 Telegram message on the summary sinks. A 7th member whose
 /// POST response was lost (a row the client never sealed) holds the summary
-/// until it too is terminal.
+/// until it too is terminal. The per-item half (0 acks for a batched CLI
+/// ingest) is proved through the real `/ingest` route in `server/tests.rs`
+/// (`a_batched_cli_ingest_through_the_route_attempts_no_per_item_ping`).
 #[tokio::test]
-async fn a_sealed_bulk_of_six_sends_one_summary_per_sink_and_no_per_item_acks() {
+async fn a_sealed_bulk_of_six_sends_one_summary_per_sink() {
     let conn = receipts::open_memory().unwrap();
     let (tx, desktop, telegram, task) = counting_notifier();
 
     let sealed = ids(6);
     for id in &sealed {
-        per_item_ack(IngestMethod::Cli, &desktop, &telegram).await;
         member(&conn, "bulk", id);
     }
     // The lost response: the daemon wrote the row, the client never saw it.
@@ -365,11 +419,12 @@ async fn a_sealed_bulk_of_six_sends_one_summary_per_sink_and_no_per_item_acks() 
     assert_eq!((summaries_in(&d), summaries_in(&t)), (1, 1));
 }
 
-/// An unrelated `method: http` ingest during an open batch keeps its own ack
-/// and leaves the batch alone. After the summary is claimed, a second seal, a
-/// late terminal write of a new member, and a backstop tick each send nothing.
+/// An unrelated unbatched ingest during an open batch leaves the batch alone.
+/// After the summary is claimed, a second seal, a late terminal write of a new
+/// member, and a backstop tick each send nothing. (That the unrelated ingest
+/// keeps its own ack is proved through the real route in `server/tests.rs`.)
 #[tokio::test]
-async fn unrelated_acks_survive_and_nothing_after_the_claim_sends_again() {
+async fn an_unbatched_ingest_leaves_the_batch_alone_and_nothing_after_the_claim_sends_again() {
     let conn = receipts::open_memory().unwrap();
     let (tx, desktop, telegram, task) = counting_notifier();
     let forward = |s: Option<BatchSummary>| {
@@ -383,9 +438,7 @@ async fn unrelated_acks_survive_and_nothing_after_the_claim_sends_again() {
     }
     seal(&conn, "bulk", &ids(2)).unwrap();
 
-    // The unrelated http ingest: its ack goes out, and its terminal write
-    // touches no batch.
-    per_item_ack(IngestMethod::Http, &desktop, &telegram).await;
+    // The unrelated http ingest: its terminal write touches no batch.
     receipts::record_received(&conn, "ht-1", IngestMethod::Http, ReceiptKind::Url, "u").unwrap();
     receipts::mark_succeeded(&conn, "ht-1", "n.md", false).unwrap();
     forward(after_terminal(&conn, "ht-1").unwrap());
@@ -411,13 +464,8 @@ async fn unrelated_acks_survive_and_nothing_after_the_claim_sends_again() {
     drop(tx);
     task.await.unwrap();
     let (d, t) = (desktop.texts(), telegram.texts());
-    assert_eq!(d.iter().filter(|m| m.contains("Processing")).count(), 1, "{d:?}");
-    assert_eq!(t.iter().filter(|m| m.contains("Processing")).count(), 1, "{t:?}");
-    assert_eq!(
-        (summaries_in(&d), summaries_in(&t)),
-        (1, 1),
-        "desktop={d:?} telegram={t:?}"
-    );
+    assert_eq!((d.len(), t.len()), (1, 1), "desktop={d:?} telegram={t:?}");
+    assert_eq!((summaries_in(&d), summaries_in(&t)), (1, 1));
 }
 
 // ---- schema v9 ------------------------------------------------------------------

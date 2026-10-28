@@ -29,8 +29,8 @@ const WATCHDOG_INTERVAL_SECS: u64 = 60;
 pub const WATCHDOG_BUFFER_SECS: u64 = 60;
 
 /// What one watchdog pass did: rows promoted to crashed, and the bulk
-/// summaries it won (a promotion that drained a sealed batch, or the
-/// seal-missing backstop). The caller puts the summaries on the notifier
+/// summaries it won (a promotion that drained a sealed batch, a sealed batch
+/// whose own drain check never ran, or the seal-missing backstop). The caller puts the summaries on the notifier
 /// channel; the pass itself touches no sink.
 #[derive(Debug, Default)]
 pub struct Pass {
@@ -38,8 +38,8 @@ pub struct Pass {
     pub summaries: Vec<BatchSummary>,
 }
 
-/// One scan: promote stale `received` rows to `failed/crashed`, then run the
-/// bulk backstop.
+/// One scan: promote stale `received` rows to `failed/crashed`, then
+/// reconcile sealed bulk batches and run the seal-missing backstop.
 ///
 /// Liveness is now read from the shared receipts row's lease
 /// (`lease_owner_pid` + `lease_until`), not a process-local set: a row whose
@@ -71,7 +71,11 @@ pub fn run_once(config: &Config) -> Result<Pass> {
 ///    the SELECT and the UPDATE (the cross-process TOCTOU) makes the UPDATE
 ///    match 0 rows and the live trace is NOT reaped. A promoted batched trace
 ///    runs its batch's drain check.
-/// 3. The bulk backstop (`batch::backstop`, seal-missing only) on the same
+/// 3. Sealed-batch reconciliation (`batch::reconcile_sealed`): every sealed,
+///    unsummarized batch with no `received` member gets its drain check, so a
+///    batch whose last terminal write committed but whose `/ingest` drain check
+///    never ran (restart, DB error) is still summarized.
+/// 4. The bulk backstop (`batch::backstop`, seal-missing only) on the same
 ///    deadline. A batch error is logged and never stops the crash promotion.
 fn run_once_conn(conn: &Connection, deadline_secs: u64) -> Result<Pass> {
     // Read the clock once so `list_stale`'s SELECT and each promotion UPDATE
@@ -98,6 +102,10 @@ fn run_once_conn(conn: &Connection, deadline_secs: u64) -> Result<Pass> {
                 log::error!("watchdog: promote_single failed for trace={trace_id}: {e:#}");
             }
         }
+    }
+    match batch::reconcile_sealed(conn) {
+        Ok(summaries) => pass.summaries.extend(summaries),
+        Err(e) => log::error!("watchdog: sealed-batch reconciliation failed: {e:#}"),
     }
     match batch::backstop(conn, deadline_secs, now) {
         Ok(summaries) => pass.summaries.extend(summaries),

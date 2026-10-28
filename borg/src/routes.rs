@@ -231,8 +231,10 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
 }
 
 /// Run the batch drain check on the blocking pool and put a won summary on the
-/// notifier channel. Best-effort: a DB error is logged, and the watchdog or a
-/// later member's terminal write asks again.
+/// notifier channel. Best-effort: a DB error is logged, and the watchdog's
+/// next pass (`batch::reconcile_sealed`) runs the same check on every sealed,
+/// unsummarized batch, so a failed check or a restart before it never strands
+/// the summary.
 async fn summarize_if_drained(batch_id: String, summaries: crate::batch::SummarySender) {
     #[cfg(test)]
     let carried = crate::receipts::sandbox::carry();

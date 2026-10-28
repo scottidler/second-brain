@@ -78,7 +78,8 @@ pub fn classify_targets(
         return Err(UsageError(format!("cannot ingest: {}", bad.join("; "))));
     }
 
-    if note.is_some_and(|n| !n.trim().is_empty()) && classified.iter().any(|t| matches!(t, Target::File(_))) {
+    // Any `--note`, blank included: the flag itself is the mixed-run misuse.
+    if note.is_some() && classified.iter().any(|t| matches!(t, Target::File(_))) {
         return Err(UsageError(
             "--note applies to URL targets, not file targets".to_string(),
         ));

@@ -85,6 +85,18 @@ fn a_note_with_a_file_target_is_a_usage_error_but_not_with_urls_only() {
     assert!(classify_targets(&strings(&["https://a.example", &file]), None, None).is_ok());
 }
 
+/// The flag, not its content, conflicts with a file target: a blank or
+/// whitespace `--note` is the same usage error.
+#[test]
+fn a_blank_note_with_a_file_target_is_still_a_usage_error() {
+    let (_dir, file) = a_file();
+    for note in ["", "   "] {
+        let err = classify_targets(&strings(&["https://a.example", &file]), None, Some(note)).unwrap_err();
+        assert!(err.0.contains("--note"), "note={note:?}: {err}");
+    }
+    assert!(classify_targets(&strings(&["https://a.example"]), None, Some("")).is_ok());
+}
+
 // ---- run against a stub daemon --------------------------------------------------
 
 async fn no_file(_: PathBuf) -> Result<IngestOutcome> {

@@ -4,8 +4,9 @@
 //! A bulk's URL items carry a client batch id. Intake creates the `batches`
 //! row ([`create_if_absent`]) and stamps `receipts.batch_id`; the client seals
 //! the batch with the trace ids it saw queued ([`seal`]). After every terminal
-//! write of a batched trace, on seal, and on the watchdog's backstop tick, the
-//! daemon asks [`maybe_summarize`] / [`backstop`]: when the batch has drained,
+//! write of a batched trace, on seal, and on every watchdog tick (sealed
+//! batches through [`reconcile_sealed`], unsealed ones through [`backstop`]),
+//! the daemon asks [`maybe_summarize`]: when the batch has drained,
 //! exactly one caller wins the claim and gets a [`BatchSummary`] to put on the
 //! notifier channel ([`notifier`]). Nothing here touches a sink, so sink
 //! latency never sits inside a receipts write.
@@ -261,27 +262,45 @@ fn count(conn: &Connection, batch_id: &str, seal_missing: bool) -> Result<BatchS
     })
 }
 
-/// Count, then claim the one summary with the conditional UPDATE. Only the
-/// caller whose UPDATE changed one row gets `Some`. Counting first means a
-/// failed count leaves the claim for the next trigger instead of losing it.
+/// The non-backstop claim's guard: still sealed and unclaimed, no member
+/// `received`, and every sealed id has a receipts row. It restates
+/// [`drained`] inside the claim UPDATE, so a member whose intake lands between
+/// the drain check and the claim (a lost-response member) fails the claim
+/// instead of being summarized past.
+const CLAIM_DRAINED_SQL: &str = "UPDATE batches SET summarized_at=?1 WHERE id=?2 \
+     AND summarized_at IS NULL AND sealed_at IS NOT NULL \
+     AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id = batches.id AND r.status = 'received') \
+     AND NOT EXISTS (SELECT 1 FROM json_each(batches.sealed_trace_ids) j \
+                     WHERE NOT EXISTS (SELECT 1 FROM receipts r WHERE r.trace_id = j.value))";
+
+/// The backstop claim's guard: still unsealed (a seal landing after the
+/// backstop's SELECT is not summarized as "seal missing") and unclaimed, and
+/// no member `received`.
+const CLAIM_SEAL_MISSING_SQL: &str = "UPDATE batches SET summarized_at=?1 WHERE id=?2 \
+     AND summarized_at IS NULL AND sealed_at IS NULL \
+     AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id = batches.id AND r.status = 'received')";
+
+/// Count, then claim the one summary with the guarded UPDATE, both inside one
+/// `BEGIN IMMEDIATE` transaction so no intake or terminal write lands between
+/// the count and the claim. Only the caller whose UPDATE changed one row gets
+/// `Some`. The UPDATE re-checks the drain (or seal-missing) predicate itself,
+/// so the claim never rests on an earlier read. A failed count rolls back and
+/// leaves the claim for the next trigger.
 fn claim(conn: &Connection, batch_id: &str, seal_missing: bool) -> Result<Option<BatchSummary>> {
-    let summary = count(conn, batch_id, seal_missing)?;
-    // The backstop claim also requires the batch to still be unsealed, so a
-    // seal landing between its SELECT and this UPDATE is not summarized as
-    // "seal missing".
-    let sql = if seal_missing {
-        "UPDATE batches SET summarized_at=? WHERE id=? AND summarized_at IS NULL AND sealed_at IS NULL"
-    } else {
-        "UPDATE batches SET summarized_at=? WHERE id=? AND summarized_at IS NULL"
-    };
-    let rows = conn
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .with_context(|| format!("Failed to begin the summary claim of batch {batch_id}"))?;
+    let summary = count(&tx, batch_id, seal_missing)?;
+    let sql = if seal_missing { CLAIM_SEAL_MISSING_SQL } else { CLAIM_DRAINED_SQL };
+    let rows = tx
         .execute(sql, params![now_iso(), batch_id])
         .with_context(|| format!("Failed to claim the summary of batch {batch_id}"))?;
+    tx.commit()
+        .with_context(|| format!("Failed to commit the summary claim of batch {batch_id}"))?;
     if rows == 1 {
         log::info!("batch {batch_id}: summary claimed ({})", summary.text());
         Ok(Some(summary))
     } else {
-        log::debug!("batch::claim: batch={batch_id} already summarized (or sealed, for the backstop)");
+        log::debug!("batch::claim: batch={batch_id} not claimable (already summarized, or no longer drained)");
         Ok(None)
     }
 }
@@ -305,11 +324,46 @@ pub fn after_terminal(conn: &Connection, trace_id: &str) -> Result<Option<BatchS
     }
 }
 
+/// The watchdog's sealed-batch reconciliation: every sealed, unsummarized
+/// batch with no member still `received` gets its ordinary drain check. This
+/// is what summarizes a batch whose last terminal write committed but whose
+/// own drain check never ran or failed (a daemon restart in between, a busy
+/// DB). A sealed id with no receipts row still holds the batch, as in
+/// [`drained`]; there is no age override. One batch's error is logged and the
+/// rest are still checked.
+pub fn reconcile_sealed(conn: &Connection) -> Result<Vec<BatchSummary>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.id FROM batches b \
+             WHERE b.sealed_at IS NOT NULL AND b.summarized_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM receipts r WHERE r.batch_id = b.id AND r.status = 'received')",
+        )
+        .context("prepare sealed-batch reconciliation")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query sealed-batch reconciliation")?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .context("read sealed-batch reconciliation rows")?;
+    log::debug!("batch::reconcile_sealed: candidates={}", ids.len());
+    let mut summaries = Vec::new();
+    for batch_id in ids {
+        match maybe_summarize(conn, &batch_id) {
+            Ok(Some(summary)) => {
+                log::info!("batch {batch_id}: drained and unclaimed; summarized by the watchdog's reconciliation");
+                summaries.push(summary);
+            }
+            Ok(None) => {}
+            Err(e) => log::error!("batch {batch_id}: reconciliation drain check failed: {e:#}"),
+        }
+    }
+    Ok(summaries)
+}
+
 /// The watchdog's seal-missing backstop: every batch that is unsealed and
 /// unsummarized, has no member still `received`, and whose newest member was
 /// received more than `deadline_secs` before `now`, is claimed and summarized
 /// with `seal_missing`. A sealed batch is never touched here: its own drain
-/// check owns it.
+/// check, and [`reconcile_sealed`] behind it, own it.
 pub fn backstop(conn: &Connection, deadline_secs: u64, now: DateTime<Utc>) -> Result<Vec<BatchSummary>> {
     let cutoff = (now - chrono::Duration::seconds(deadline_secs as i64))
         .format(TIMESTAMP_FMT)

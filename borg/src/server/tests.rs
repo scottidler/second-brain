@@ -623,3 +623,155 @@ async fn health_advertises_bulk_batch() {
         "{features}"
     );
 }
+
+// ---- per-item pings through the real /ingest path ---------------------------------
+
+/// A config whose pipeline fails fast and offline: a real vault root, and a
+/// staging root under a regular file, so Stage 0 cannot write its capture and
+/// the trace goes terminal (`intake-rejected`) without any fetch. Returns the
+/// tempdirs to keep alive.
+fn offline_config() -> (Config, tempfile::TempDir, tempfile::TempDir) {
+    // Idempotent; the daemon inits this at startup.
+    crate::pipeline::permits::GENERAL_PERMITS.init(4);
+    let vault = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(vault.path().join(".obsidian")).expect("marker");
+    let blocker = tempfile::tempdir().expect("tempdir");
+    let file = blocker.path().join("not-a-dir");
+    std::fs::write(&file, b"x").expect("blocker file");
+    let mut config = Config::default();
+    config.vault.root_path = Some(vault.path().to_string_lossy().to_string());
+    config.staging.enabled = true;
+    config.staging.root = file.join("stages");
+    (config, vault, blocker)
+}
+
+/// The live sinks, built for real so the route hands them to dispatch; their
+/// sends stop at the test disable gate, and `notify::probe` records each
+/// attempt.
+fn live_sinks() -> (crate::notify::Telegram, crate::notify::Desktop) {
+    let telegram = crate::notify::Telegram::new(
+        "0:test",
+        &crate::config::TelegramConfig {
+            bot_token: String::new(),
+            allowed_chat_ids: vec![],
+            notification_chat_id: Some(1),
+            host: None,
+        },
+    )
+    .expect("telegram sink");
+    let desktop = crate::notify::Desktop::new(&crate::config::DesktopConfig {
+        enabled: true,
+        ..Default::default()
+    })
+    .expect("desktop sink");
+    (telegram, desktop)
+}
+
+/// POST one batched ingest through the real router with live sinks, seal it,
+/// and wait for the batch summary: by then the trace's processing ping (sent
+/// before the pipeline) has been attempted or skipped. Returns the trace id.
+async fn ingest_one_and_wait_for_its_summary(body: serde_json::Value, batch: &str) -> String {
+    let (config, _vault, _blocker) = offline_config();
+    let (telegram, desktop) = live_sinks();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = build_router(AppState {
+        config: Arc::new(config),
+        telegram: Some(telegram),
+        desktop: Some(desktop),
+        version: "0.0.0-test".to_string(),
+        auth_token: None,
+        batch_summaries: tx,
+    });
+    let resp = app
+        .clone()
+        .oneshot(post("/ingest", body, None))
+        .await
+        .expect("response");
+    let body = body_json(resp).await;
+    let trace = body["trace_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("queued: {body}"))
+        .to_string();
+    let sealed = app
+        .oneshot(post(
+            &format!("/batch/{batch}/seal"),
+            serde_json::json!({"trace_ids": [trace]}),
+            None,
+        ))
+        .await
+        .expect("response");
+    assert_eq!(sealed.status(), StatusCode::OK);
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
+        .await
+        .expect("the batch summary arrives")
+        .expect("channel open");
+    assert_eq!(summary.batch_id, batch);
+    assert_eq!(summary.total, 1);
+    trace
+}
+
+/// The success criterion "0 per-item sends" through production code: a
+/// batched `method: cli` ingest over the real `/ingest` route, with live
+/// sinks in `AppState`, attempts no processing or result ping, and its batch
+/// still yields its one summary. An `http` ingest down the same path does
+/// ping, which proves the probe sees what the route hands dispatch.
+#[tokio::test]
+async fn a_batched_cli_ingest_through_the_route_attempts_no_per_item_ping() {
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let cli_url = format!("https://example.com/cli-{}", uuid::Uuid::new_v4());
+        let cli = ingest_one_and_wait_for_its_summary(
+            serde_json::json!({"url": cli_url, "method": "cli", "batch": "b-cli"}),
+            "b-cli",
+        )
+        .await;
+        assert_eq!(crate::notify::probe::attempts(&cli), 0, "cli processing ping attempted");
+        assert_eq!(crate::notify::probe::attempts(&cli_url), 0, "cli result ping attempted");
+
+        let http_url = format!("https://example.com/http-{}", uuid::Uuid::new_v4());
+        let http = ingest_one_and_wait_for_its_summary(
+            serde_json::json!({"url": http_url, "method": "http", "batch": "b-http"}),
+            "b-http",
+        )
+        .await;
+        assert_eq!(
+            crate::notify::probe::attempts(&http),
+            2,
+            "http pings desktop and telegram"
+        );
+    })
+    .await;
+}
+
+/// The route's own half of the gate: an auto-remediation replay carrying a
+/// pinging method (`http`) attempts no ping. Only `/ingest` sees the replay
+/// origin, so this is the route's gate alone; `dispatch_ingest` would pass it.
+#[tokio::test]
+async fn an_auto_remediation_through_the_route_attempts_no_per_item_ping() {
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let url = format!("https://example.com/remediate-{}", uuid::Uuid::new_v4());
+        let trace = ingest_one_and_wait_for_its_summary(
+            serde_json::json!({
+                "url": url,
+                "method": "http",
+                "replay-of": "tr-original",
+                "replay-origin": "auto-remediation",
+                "batch": "b-remediate",
+            }),
+            "b-remediate",
+        )
+        .await;
+        assert_eq!(
+            crate::notify::probe::attempts(&trace),
+            0,
+            "remediation processing ping attempted"
+        );
+        assert_eq!(
+            crate::notify::probe::attempts(&url),
+            0,
+            "remediation result ping attempted"
+        );
+    })
+    .await;
+}
