@@ -83,6 +83,7 @@ use config::Config;
 pub use client::distill::{DistillRun, distill};
 pub use client::targets::{
     BatchReport, IngestRun, SealStatus, Target, TargetReport, UsageError, classify_targets, ingest_targets,
+    parse_target_list, read_target_lists,
 };
 pub use client::{
     IngestOutcome, ReingestCandidate, ReingestEntry, ReingestEntryStatus, ReingestEvent, ReingestReport, ingest,

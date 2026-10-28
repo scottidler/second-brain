@@ -149,3 +149,13 @@ Implementation audit must-fix items 1 and 2 against Phase 0, committed in `scott
 - Reconciliation re-checks held sealed batches every pass, indefinitely: a few indexed reads each, and the audit ruled holding such a batch acceptable.
 ### Open questions
 - None.
+
+## Follow-up: `--from` list files
+
+Scott's ask was "1+ items that can be urls or filepaths", and the first cut read a file path only as a file to ingest. A list of URLs had no path in except shell expansion, which is the gap the 62-URL scour hit.
+
+- `sb borg ingest --from <FILE>`: one target per line, blank and `#` lines skipped, `-` reads stdin, repeatable, appended after the positional targets.
+- `borg::read_target_lists` / `borg::parse_target_list` in `borg/src/client/targets.rs`. An unreadable or empty list is a `UsageError`, so exit 2 with nothing submitted.
+- `--clipboard` conflicts with `--from`; TARGETS is no longer required when `--from` is given.
+- The listed targets go through `classify_targets` unchanged, so bulk detection, the seal, and the summary are the same as for positional targets.
+- Tests: `parse_target_list_skips_blank_and_comment_lines`, `read_target_lists_concatenates_files_in_order`, `read_target_lists_rejects_a_missing_file`, `read_target_lists_rejects_an_empty_list`, `read_target_lists_with_no_sources_is_empty`.

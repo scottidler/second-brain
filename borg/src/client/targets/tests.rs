@@ -381,3 +381,47 @@ async fn a_run_at_the_threshold_is_not_a_bulk_and_never_asks_health() {
     assert!(posts_to(&seen, "GET /health").is_empty());
     assert!(seen.iter().all(|r| batch_field(r).is_none()));
 }
+
+// ---- --from list files --------------------------------------------------------
+
+#[test]
+fn parse_target_list_skips_blank_and_comment_lines() {
+    let text = "https://a.example\n\n  # a comment\n  https://b.example  \n./c.pdf\n";
+    assert_eq!(
+        parse_target_list(text),
+        strings(&["https://a.example", "https://b.example", "./c.pdf"])
+    );
+}
+
+#[test]
+fn read_target_lists_concatenates_files_in_order() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let one = dir.path().join("one.txt");
+    let two = dir.path().join("two.txt");
+    std::fs::write(&one, "https://a.example\nhttps://b.example\n").expect("write");
+    std::fs::write(&two, "# header\nhttps://c.example\n").expect("write");
+    assert_eq!(
+        read_target_lists(&[one, two]).expect("lists read"),
+        strings(&["https://a.example", "https://b.example", "https://c.example"])
+    );
+}
+
+#[test]
+fn read_target_lists_rejects_a_missing_file() {
+    let err = read_target_lists(&[PathBuf::from("/no/such/list.txt")]).expect_err("missing list");
+    assert!(err.0.contains("--from /no/such/list.txt"), "{err}");
+}
+
+#[test]
+fn read_target_lists_rejects_an_empty_list() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let empty = dir.path().join("empty.txt");
+    std::fs::write(&empty, "\n# nothing here\n").expect("write");
+    let err = read_target_lists(&[empty]).expect_err("empty list");
+    assert!(err.0.contains("no targets in the list"), "{err}");
+}
+
+#[test]
+fn read_target_lists_with_no_sources_is_empty() {
+    assert!(read_target_lists(&[]).expect("no sources").is_empty());
+}

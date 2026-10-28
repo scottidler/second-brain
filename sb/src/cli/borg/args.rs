@@ -34,10 +34,14 @@ pub enum Command {
     Ingest {
         /// URLs or file paths, space-separated. Put them before -t/--tags,
         /// which is greedy
-        #[arg(required_unless_present = "clipboard")]
+        #[arg(required_unless_present_any = ["clipboard", "from"])]
         targets: Vec<String>,
+        /// Read targets from a list file, one per line (`-` is stdin; blank
+        /// and `#` lines skipped). Repeatable; combines with positional targets
+        #[arg(long, value_name = "FILE")]
+        from: Vec<std::path::PathBuf>,
         /// Read one URL from the clipboard instead of taking targets
-        #[arg(long, conflicts_with = "targets")]
+        #[arg(long, conflicts_with_all = ["targets", "from"])]
         clipboard: bool,
         /// Operator tags to seed the note with (space-separated). They enter
         /// the classifier as author-side candidates, not as final tags

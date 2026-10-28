@@ -36,6 +36,38 @@ fn is_http_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// One target per line; blank lines and `#` comment lines are skipped.
+pub fn parse_target_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Read every `--from` list (`-` is stdin) into targets, in order. A list
+/// that cannot be read, or that holds no targets, is a usage error.
+pub fn read_target_lists(sources: &[PathBuf]) -> Result<Vec<String>, UsageError> {
+    let mut targets = Vec::new();
+    for source in sources {
+        let text = if source.as_os_str() == "-" {
+            std::io::read_to_string(std::io::stdin())
+        } else {
+            std::fs::read_to_string(source)
+        }
+        .map_err(|e| UsageError(format!("--from {}: {e}", source.display())))?;
+        let listed = parse_target_list(&text);
+        if listed.is_empty() {
+            return Err(UsageError(format!(
+                "--from {}: no targets in the list",
+                source.display()
+            )));
+        }
+        targets.extend(listed);
+    }
+    Ok(targets)
+}
+
 /// Classify every target (http(s) URL | existing file) and reject the shapes
 /// that would silently misfire: a tag that is really a target the greedy `-t`
 /// swallowed, and `--note` alongside a file target.
