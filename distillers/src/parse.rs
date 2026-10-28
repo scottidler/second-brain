@@ -103,13 +103,19 @@ enum RepairOutcome {
     Conflict,
 }
 
-/// Apply the bounded structural repairs in order: scoped prose-strip, then the
-/// indent-aware duplicate-key dedupe. WARNs on every repair actually applied.
+/// Apply the bounded structural repairs in order: scoped prose-strip, the
+/// double-quoted scalar repair, then the indent-aware duplicate-key dedupe.
+/// WARNs on every repair actually applied.
 fn repair_pattern_yaml(raw: &str) -> RepairOutcome {
     let (stripped, removed) = strip_prose_preamble(raw);
     let mut changed = false;
     if removed > 0 {
         log::warn!("parse_pattern_yaml: stripped {removed} leading prose line(s) before the first root-level YAML key");
+        changed = true;
+    }
+    let (stripped, requoted) = quotes::repair_double_quoted(&stripped);
+    if requoted > 0 {
+        log::warn!("parse_pattern_yaml: repaired {requoted} malformed double-quoted scalar line(s)");
         changed = true;
     }
     match dedupe_mapping_keys(&stripped) {
@@ -1064,6 +1070,8 @@ pub struct PatternYaml {
     #[serde(default)]
     pub tools: Option<Vec<PatternTool>>,
 }
+
+mod quotes;
 
 #[cfg(test)]
 mod tests;
