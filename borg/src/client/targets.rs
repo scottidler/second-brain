@@ -34,25 +34,16 @@ impl std::fmt::Display for UsageError {
 impl std::error::Error for UsageError {}
 
 /// A strict absolute http(s) URL: literal `http://`/`https://` prefix (any
-/// case), a host, and no whitespace, control character, backslash, or broken
-/// `%` escape. `Url::parse` alone is too forgiving: it percent-encodes spaces
-/// and normalizes `http:host` and backslashes instead of rejecting them.
+/// case), a host, and no whitespace, control character, or backslash.
+/// `Url::parse` alone is too forgiving: it percent-encodes spaces and
+/// normalizes `http:host` and backslashes instead of rejecting them. A bare
+/// `%` passes, as it does in a browser.
 pub fn is_http_url(s: &str) -> bool {
     let lower = s.get(..8).unwrap_or(s).to_ascii_lowercase();
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
         return false;
     }
     if s.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
-        return false;
-    }
-    let bytes = s.as_bytes();
-    let broken_escape = bytes.iter().enumerate().any(|(i, &b)| {
-        b == b'%'
-            && !(bytes
-                .get(i + 1..i + 3)
-                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)))
-    });
-    if broken_escape {
         return false;
     }
     url::Url::parse(s).is_ok_and(|u| u.host_str().is_some_and(|h| !h.is_empty()))
@@ -125,31 +116,32 @@ pub fn classify_targets(
         ));
     }
 
-    let swallowed: Vec<&String> = tags
+    let mut bad = Vec::new();
+    let swallowed: Vec<&str> = tags
         .unwrap_or_default()
         .iter()
         .filter(|t| looks_like_url(t) || vault::paths::expand_tilde(t).exists())
+        .map(String::as_str)
         .collect();
     if !swallowed.is_empty() {
-        let names: Vec<&str> = swallowed.iter().map(|t| t.as_str()).collect();
-        return Err(UsageError(format!(
+        bad.push(format!(
             "--tags swallowed what looks like a target ({}); put the targets before -t/--tags",
-            names.join(", ")
-        )));
+            swallowed.join(", ")
+        ));
     }
 
-    if items.iter().filter(|i| i.as_str() == "-").count() > 1 {
-        return Err(UsageError("`-` (stdin) can be given only once".to_string()));
+    let stdin_twice = items.iter().filter(|i| i.as_str() == "-").count() > 1;
+    if stdin_twice {
+        bad.push("`-` (stdin) can be given only once".to_string());
     }
 
     // Any `--note`, blank included: the flag itself is the mixed-run misuse.
     if note.is_some() && !files.is_empty() {
-        return Err(UsageError("--note applies to URLs, not --file content".to_string()));
+        bad.push("--note applies to URLs, not --file content".to_string());
     }
 
-    let mut read_stdin = Some(read_stdin);
+    let mut read_stdin = (!stdin_twice).then_some(read_stdin);
     let mut classified = Vec::new();
-    let mut bad = Vec::new();
     for item in items {
         if looks_like_url(item) || is_http_url(item) {
             match is_http_url(item) {
@@ -159,7 +151,7 @@ pub fn classify_targets(
             continue;
         }
         let listed = if item == "-" {
-            let read = read_stdin.take().expect("stdin is read at most once");
+            let Some(read) = read_stdin.take() else { continue };
             read()
                 .map_err(|e| UsageError(format!("-: {e}")))
                 .and_then(|text| parse_url_list(&text, "-"))

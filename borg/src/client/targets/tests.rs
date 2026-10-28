@@ -57,6 +57,11 @@ fn strict_urls_pass_and_malformed_ones_do_not() {
         "http://b.example/path?q=1#frag",
         "HTTPS://c.example/%20x",
         "https://d.example:8080/",
+        "https://bücher.de/x",
+        "http://[::1]:8080/a",
+        "http://[2001:db8::1]/",
+        "https://user:pw@example.com:8443/p?q=1#f",
+        "https://e.example/?q=100%",
     ] {
         assert!(is_http_url(good), "{good}");
     }
@@ -66,7 +71,6 @@ fn strict_urls_pass_and_malformed_ones_do_not() {
         "https://a.example/foo bar",
         "http:a.example",
         "https:\\\\a.example",
-        "https://a.example/%zz",
         "ftp://a.example",
         "a.example",
         "",
@@ -169,6 +173,28 @@ fn dash_reads_one_url_list_from_stdin_once() {
     );
     let err = classify_targets(&strings(&["-", "-"]), &[], None, None, no_stdin).unwrap_err();
     assert!(err.0.contains("only once"), "{err}");
+}
+
+#[test]
+fn every_preflight_error_is_reported_together() {
+    let files = [PathBuf::from("/no/such/a.pdf")];
+    let err = classify_targets(
+        &strings(&["https://bad host/", "-", "-"]),
+        &files,
+        Some(&strings(&["https://x.example"])),
+        Some("why"),
+        no_stdin,
+    )
+    .unwrap_err();
+    for part in [
+        "--tags swallowed",
+        "only once",
+        "--note applies",
+        "https://bad host/ (malformed URL)",
+        "--file /no/such/a.pdf (no such file)",
+    ] {
+        assert!(err.0.contains(part), "missing {part:?}: {err}");
+    }
 }
 
 #[test]
