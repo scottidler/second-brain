@@ -279,9 +279,10 @@ tasks:
         | sort -u)
       # Same reason as deploy: an old cortex running beside a new binary
       # re-pins the legacy model id after the new binary migrates oracle.db.
+      # Only running units: a host with a stopped unit (talos) keeps it stopped.
       DAEMONS=""
       for unit in borg cortex; do
-        if systemctl --user cat "$unit.service" >/dev/null 2>&1; then
+        if systemctl --user is-active --quiet "$unit.service"; then
           DAEMONS="$DAEMONS $unit"
         fi
       done
@@ -302,7 +303,7 @@ tasks:
         | jq -r '.packages[].targets[] | select(.kind[] == "bin") | .name' \
         | sort -u)
 
-      # Stop any workspace daemons whose systemd units exist BEFORE the new
+      # Stop any workspace daemons that are RUNNING before the new
       # binary lands, and start them only after install + bootstrap. A new
       # binary opening oracle.db migrates it (the backend-free embedding
       # model ids); an old cortex still running would then re-pin its old id
@@ -313,7 +314,7 @@ tasks:
       # bootstrap fails, so a failed deploy never leaves the daemons down.
       DAEMONS=""
       for unit in borg cortex; do
-        if systemctl --user cat "$unit.service" >/dev/null 2>&1; then
+        if systemctl --user is-active --quiet "$unit.service"; then
           DAEMONS="$DAEMONS $unit"
         fi
       done
