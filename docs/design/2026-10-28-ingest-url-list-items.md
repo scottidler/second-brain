@@ -2,7 +2,7 @@
 
 **Author:** Scott Idler (drafted with Claude)
 **Date:** 2026-10-28
-**Status:** In Review (the code landed ahead of this doc in 2212e14; see Implementation Plan)
+**Status:** Implemented (Phase 1 at 9ab113b; Phase 2, the release, pending)
 **Review Passes Completed:** 5/5, plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice) and round 2 (both seats)
 
 ## Summary
@@ -125,7 +125,7 @@ No change. `Target::{Url, File}`, `IngestRun`, receipts, and the batch protocol 
 
 ## Acceptance Criteria
 
-Each criterion was run on main at 2212e14 and again at bfaa703 (`target/debug/sb`, built by `otto ci` from the bfaa703 tree), with the same output both times. The fixtures are a `urls.txt` whose line 3 is `https://exa mple.com`, and a 1-byte `a.pdf`.
+Each criterion was run on main at 2212e14, at bfaa703 and at 9ab113b (`target/debug/sb`, built by `otto ci` from each tree), with the same output each time. The fixtures are a `urls.txt` whose line 3 is `https://exa mple.com`, and a 1-byte `a.pdf`.
 
 - [ ] A list with one bad line exits 2, naming `file:line`, and submits nothing.
   - `sb borg ingest urls.txt; echo $?`
