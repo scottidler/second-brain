@@ -62,6 +62,8 @@ fn looks_like_url(s: &str) -> bool {
 pub fn parse_url_list(text: &str, source: &str) -> Result<Vec<String>, UsageError> {
     let mut urls = Vec::new();
     let mut bad = Vec::new();
+    // An editor's UTF-8 byte-order mark is not whitespace to `trim`.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (idx, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -143,7 +145,7 @@ pub fn classify_targets(
     let mut read_stdin = (!stdin_twice).then_some(read_stdin);
     let mut classified = Vec::new();
     for item in items {
-        if looks_like_url(item) || is_http_url(item) {
+        if looks_like_url(item) {
             match is_http_url(item) {
                 true => classified.push(Target::Url(item.clone())),
                 false => bad.push(format!("{item} (malformed URL)")),

@@ -94,6 +94,15 @@ fn a_list_file_expands_in_place_between_urls() {
 }
 
 #[test]
+fn a_list_with_a_byte_order_mark_parses() {
+    let (_dir, list) = a_list("\u{feff}https://a.example\nhttps://b.example\n");
+    assert_eq!(
+        classify(&[&list], &[]).unwrap(),
+        url_targets(&["https://a.example", "https://b.example"])
+    );
+}
+
+#[test]
 fn one_bad_list_line_fails_the_whole_run_naming_file_and_line() {
     let (_dir, list) = a_list("https://a.example\n./c.pdf\nhttps://b.example\nnot a url\n");
     let err = classify(&["https://z.example", &list], &[]).unwrap_err();

@@ -3,7 +3,7 @@
 **Author:** Scott Idler (drafted with Claude)
 **Date:** 2026-10-28
 **Status:** In Review (the code landed ahead of this doc in 2212e14; see Implementation Plan)
-**Review Passes Completed:** 2/5 (draft, correctness against the code and the executed criteria), plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice)
+**Review Passes Completed:** 5/5, plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice) and round 2
 
 ## Summary
 
@@ -58,18 +58,22 @@ sb borg ingest [OPTIONS] [TARGETS]...
 
 ### Architecture
 
-Every TARGETS/`--file` run goes through one preflight, `borg::classify_targets` (`borg/src/client/targets.rs`). `--clipboard` skips it and checks its one URL with the same `is_http_url` before submitting. It turns every input into concrete `Target`s or returns one `UsageError`. `sb` maps that error to exit 2, so nothing reaches the daemon or the local pipeline.
+Every TARGETS/`--file` run goes through one preflight, `borg::classify_targets` (`borg/src/client/targets.rs`):
+
+- It turns every input into concrete `Target`s, or returns one `UsageError`.
+- `sb` maps that error to exit 2 before calling `ingest_targets`, so nothing reaches the daemon or the local pipeline.
+- `--clipboard` is the one path that skips it: it checks its single URL with the same `is_http_url`, then submits.
 
 Per positional item, in order:
 
-1. Contains `://` or passes `is_http_url` -> must pass `is_http_url`, else "malformed URL". A URL-shaped item never falls through to a file lookup.
-2. `-` -> read stdin once (a second `-` is an error) and parse it as a list.
+1. Contains `://` -> must pass `is_http_url`, else "malformed URL". A URL-shaped item never falls through to a file lookup. (Every http(s) URL contains `://`, so this branch catches them all.)
+2. `-` -> read stdin to EOF once and parse it as a list. A second `-` is an error. Like `cat`, a `-` with a terminal on stdin waits for input.
 3. `expand_tilde(item)` is a regular file:
    - content extension (`assets::is_{image,pdf,document,audio}_extension`) -> error "a content file; use --file".
-   - else read it as UTF-8 and parse it as a list.
+   - else read it as UTF-8 (a read or encoding error names the file) and parse it as a list.
 4. It exists but is not a file -> error. Otherwise -> "not an http(s) URL and no such file".
 
-List parsing (`parse_url_list`): trim each line, then skip blank lines and `#` lines. Every other line must pass `is_http_url`, or it is reported as `<source>:<line>: <text>`. A list with no URLs is an error. The URLs expand in place, in input order.
+List parsing (`parse_url_list`): drop a leading UTF-8 byte-order mark, trim each line (CRLF included), then skip blank lines and `#` lines. Every other line must pass `is_http_url`, or it is reported as `<source>:<line>: <text>`. A list with no URLs is an error. The URLs expand in place, in input order.
 
 Each `--file`: after `expand_tilde` it must be a regular file with a content extension, else an error.
 
@@ -101,14 +105,15 @@ No change. `Target::{Url, File}`, `IngestRun`, receipts, and the batch protocol 
 - `borg/src/lib.rs`: export `is_http_url` and `parse_url_list`; drop `read_target_lists` and `parse_target_list`.
 - `sb/src/cli/borg/args.rs`: drop `from`, add repeatable `file`, set `required_unless_present_any = ["clipboard", "file"]`, and make `clipboard` conflict with `targets` and `file`.
 - `sb/src/cli/borg.rs`: one `classify_targets` call that gets stdin through a closure.
-- Round-1 fold-in (2026-10-28): every preflight error is collected instead of three early returns; the bare-`%` rule is dropped; IDN, IPv6, userinfo and bare-`%` rows join the URL table.
+- Round-1 fold-in (2026-10-28, 66b595c): every preflight error is collected instead of three early returns; the bare-`%` rule is dropped; IDN, IPv6, userinfo and bare-`%` rows join the URL table.
+- Pass-4 fold-in (2026-10-28): a leading byte-order mark is stripped (`a_list_with_a_byte_order_mark_parses`), and the redundant `|| is_http_url(item)` in rule 1 is gone.
 - Tests: `borg/src/client/targets/tests.rs` (classification section rewritten) and `sb/tests/ingest.rs` (list expansion, a bad last line, removed `--from`).
 - Docs: `sb/AGENTS.md`, `borg/AGENTS.md`, and the follow-up section of `docs/design/2026-10-27-multi-target-ingest-implementation-notes.md`.
 - **Success criteria:**
   - `cargo test --workspace --lib client::targets` passes, including `one_bad_list_line_fails_the_whole_run_naming_file_and_line`, `a_tilde_list_path_is_expanded` and `dash_reads_one_url_list_from_stdin_once`.
   - `sb/tests/ingest.rs` `a_malformed_last_list_line_exits_2_with_zero_posts` passes.
   - `every_preflight_error_is_reported_together` passes.
-  - Proof the tests bite (2026-10-28, each file restored after): with `parse_url_list` accepting any line, `one_bad_list_line_fails_the_whole_run_naming_file_and_line` fails; with the `--note` check returning early, `every_preflight_error_is_reported_together` fails.
+  - Proof the tests bite (2026-10-28, each file restored after): with `parse_url_list` accepting any line, `one_bad_list_line_fails_the_whole_run_naming_file_and_line` fails; with the `--note` check returning early, `every_preflight_error_is_reported_together` fails; without the BOM strip, `a_list_with_a_byte_order_mark_parses` fails.
 
 #### Phase 2: Release and prove it live
 **Model:** sonnet
@@ -211,7 +216,9 @@ Each criterion was run on main at 2212e14 (`target/debug/sb`, built by `otto ci`
 | A muscle-memory `sb borg ingest x.pdf` | Med | Low | Exit 2 with "use --file <path>" in the message |
 | A list filename containing `://` | Low | Low | It is treated as a URL and errors; rename the file (a `./` prefix does not help, the name still contains `://`) |
 | A strict validator rejects a URL the daemon would have taken | Low | Low | Only whitespace, control characters and backslashes are rejected beyond `Url::parse`; the error names the URL |
-| A file changes between preflight and submit | Low | Low | The list is read once in preflight; the URLs submitted are the ones validated |
+| A file changes between preflight and submit | Low | Low | The list is read once in preflight; the URLs submitted are the ones validated. A `--file` is read later, at its ingest |
+| A `-t` tag that matches a file in the cwd (`-t rust` beside a `rust` file) | Low | Low | Exit 2 as a swallowed target, unchanged from v0.19.4; move the tags or the file |
+| A list saved by an editor with a BOM or CRLF endings | Med | Low | Both handled in `parse_url_list` and pinned by tests |
 
 ## Open Questions
 
@@ -220,5 +227,5 @@ None.
 ## References
 
 - `docs/design/2026-10-27-multi-target-ingest.md` and its implementation notes
-- Commit 2212e14 (the implementation)
-- Reviewer briefs and outputs (Fable, Architect, Staff Engineer), 2026-10-28, in this session's scratchpad
+- Commits 2212e14 (the implementation) and 66b595c (panel round-1 fold-in)
+- The three reviewers' positions (Fable, Architect, Staff Engineer) and the panel round-1 findings are recorded in Resolved Decisions; their raw outputs were session-local
