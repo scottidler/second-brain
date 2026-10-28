@@ -116,3 +116,36 @@ Landed in `scottidler/claude` as commit 02486b2 (not in this repo).
 ### Open questions
 - The Phase 3 question stands: a sealed id whose row never appears holds its batch forever (backstop is seal-missing only). Confirm acceptable.
 - Phase 0 leftovers in `scottidler/claude`: reword the `--help` carve-out comment in `intent-guard.sh` when it is committed.
+
+## Audit fix-forward: guard
+Implementation audit must-fix items 1 and 2 against Phase 0, committed in `scottidler/claude` as 072035e on top of 02486b2.
+### Design decisions
+- Redirects are stripped by a quote-aware awk, `strip_redirects` in `HOME/.claude/hooks/intent-guard.sh`, before `args` tokenises | the old `sed` took the `>` in `--note "a > b"` for a redirect, ate the closing quote, and every later target merged into one unterminated word. Probe `sb borg ingest --note "a > b" https://a https://b https://c`: deny before 02486b2, allow at 02486b2, deny now.
+- One shared `BORG_VERB_RE` (`borg`, then any `-flag [value]` pairs, then the verb) feeds the statement gate, the `reingest` op count, the `ingest` gate, and the heredoc op count | all four required `borg` adjacent to the verb, so `sb borg -c X ingest a b` and `sb borg -l warn reingest --all` skipped INGEST entirely.
+- `ingest_count` walks past borg's options generically: a bare word after a flag is its value, the first bare word that is neither is another subcommand and stops the walk | robust to options added later to `BorgCli` or sb's global `Cli`, without a table to keep in sync.
+- After the verb, `-l`/`--log-level` consumes its value | sb's `--log-level` is `global = true`, so `sb borg ingest -l warn https://a` is valid and `warn` is not a target. 02486b2 counted it and denied a one-target ingest.
+- The brace test now runs before the `http(s)://` exemption, which keeps only `*`, `?`, `[` | `https://x/{a,b}` counted 1 and the shell expands it to 2. A brace operand is unknowable, door or not, and says "brace expansion operand" in the deny reason.
+### Deviations
+- A QUOTED brace URL (`"https://x/{a,b}"`) also denies, though the shell would not expand it | `args` drops the quote characters, so `ingest_count` cannot tell the two apart. Fail closed, same as a quoted glob path already was.
+- `reingest` takes no target operand, so only the borg-options fix applies to it; no brace or redirect work was needed there.
+### Tradeoffs
+- A local awk in `intent-guard.sh` vs a new `lib.sh` mode | the strip is used by one caller; putting it in `lib.sh` widens the blast radius to every hook and its own test suite for no second consumer.
+- Generic option skipping vs an explicit `-c/--config/-l/--log-level` table | a table goes stale silently the day a borg option is added, which is the exact way this rule failed.
+### Open questions
+- `sb borg reingest --jobs 4 --all` still escapes the `--all` clause, which matches the literal `ingest --all` substring. Pre-existing and outside items 1 and 2, so left alone. Should `--all` match anywhere in an ingest or reingest statement?
+
+## Audit fix-forward: batch
+### Design decisions
+- Sealed-batch reconciliation on every watchdog pass (`borg/src/batch.rs:reconcile_sealed`, called from `borg/src/watchdog.rs:run_once_conn` after crash promotion and before the backstop). A batch whose last terminal write committed but whose `/ingest` drain check never ran (restart, busy DB) was stranded: the backstop skips sealed batches and promotion only re-checks the traces it promotes. Reconciliation runs the ordinary drain predicate, so a sealed id with no receipts row still holds the batch and there is no age override.
+- The claim UPDATE restates the drain predicate (`borg/src/batch.rs:CLAIM_DRAINED_SQL` / `CLAIM_SEAL_MISSING_SQL`, used by `claim`). A member whose intake lands after `drained` said yes now fails the claim instead of being summarized past.
+- Count and claim run in one `BEGIN IMMEDIATE` transaction (`borg/src/batch.rs:claim`), so the reported counts are the membership the claim was judged on.
+- `--note` conflicts with file targets by presence, not content (`borg/src/client/targets.rs:classify_targets`).
+- Per-item ping proof goes through production code: `borg/src/notify/probe.rs` is a test-only record written by `Telegram::processing/result` and `Desktop::processing/result`; route and dispatch tests use live sinks in `AppState`, so deleting either gate fails a test.
+### Deviations
+- None from the design. The batch tests that re-enacted the `pings_operator` gate were narrowed to summary delivery and renamed; the per-item half moved to route and dispatch tests.
+### Tradeoffs
+- Guarded UPDATE plus `BEGIN IMMEDIATE` vs a transaction around the whole drain check: the guard alone makes the claim correct; the transaction only keeps counts consistent and stays short.
+- A test-only probe in the concrete sinks vs a sink trait for per-item pings: the probe adds four `cfg(test)` lines; a trait would reshape the trait-free per-item sink design for a test.
+- Reconciliation re-checks held sealed batches every pass, indefinitely: a few indexed reads each, and the audit ruled holding such a batch acceptable.
+### Open questions
+- None.
