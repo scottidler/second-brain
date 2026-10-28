@@ -166,7 +166,7 @@ Superseded `--from` the day after it shipped. The original ask was "1+ items tha
 
 - Item grammar: each positional item is a strict `http(s)` URL, a URL-list file, or `-` (stdin, at most once). A list file expands in place; every non-blank, non-`#` line must be a URL. A path inside a list is an error, never followed.
 - Content files (image, pdf, document, audio) go through repeatable `--file <FILE>`, the v0.19.2 flag restored. A positional content file errors and points at `--file`; a non-content `--file` errors.
-- `is_http_url` is strict: literal `http://`/`https://` prefix, a host, no whitespace, control character, backslash, or broken `%` escape, then `url::Url::parse`. A `://`-shaped item that fails it is a malformed URL and never falls through to a file lookup. `--clipboard` uses the same check.
+- `is_http_url` is strict: a literal `http://`/`https://` prefix (any case), no whitespace, control character or backslash, then `url::Url::parse` with a non-empty host. A bare `%` passes. A `://`-shaped item that fails it is a malformed URL and never falls through to a file lookup. `--clipboard` uses the same check.
 - Paths go through `vault::paths::expand_tilde` before any filesystem check.
 - Any malformed item, bad list line (reported as `file:line`), unreadable or empty list, or bad `--file` exits 2 before any submit. `--note` with `--file` stays an error. The bulk threshold counts URLs after expansion.
 - `--from`, `read_target_lists` and `parse_target_list` are removed; `--from` is now a clap usage error.

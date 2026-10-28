@@ -180,8 +180,12 @@ fn dash_reads_one_url_list_from_stdin_once() {
         got,
         url_targets(&["https://a.example", "https://b.example", "https://z.example"])
     );
-    let err = classify_targets(&strings(&["-", "-"]), &[], None, None, no_stdin).unwrap_err();
+    let err = classify_targets(&strings(&["-", "-"]), &[], None, None, || Ok("not-a-url\n".to_string())).unwrap_err();
     assert!(err.0.contains("only once"), "{err}");
+    assert!(
+        err.0.contains("-:1: not-a-url"),
+        "the first `-` is still read and checked: {err}"
+    );
 }
 
 #[test]
@@ -192,7 +196,7 @@ fn every_preflight_error_is_reported_together() {
         &files,
         Some(&strings(&["https://x.example"])),
         Some("why"),
-        no_stdin,
+        || Ok("https://a.example\n".to_string()),
     )
     .unwrap_err();
     for part in [

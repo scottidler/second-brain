@@ -3,7 +3,7 @@
 **Author:** Scott Idler (drafted with Claude)
 **Date:** 2026-10-28
 **Status:** In Review (the code landed ahead of this doc in 2212e14; see Implementation Plan)
-**Review Passes Completed:** 5/5, plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice) and round 2
+**Review Passes Completed:** 5/5, plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice) and round 2 (both seats)
 
 ## Summary
 
@@ -67,7 +67,7 @@ Every TARGETS/`--file` run goes through one preflight, `borg::classify_targets` 
 Per positional item, in order:
 
 1. Contains `://` -> must pass `is_http_url`, else "malformed URL". A URL-shaped item never falls through to a file lookup. (Every http(s) URL contains `://`, so this branch catches them all.)
-2. `-` -> read stdin to EOF once and parse it as a list. A second `-` is an error. Like `cat`, a `-` with a terminal on stdin waits for input.
+2. `-` -> read stdin to EOF once and parse it as a list. A second `-` is an error, and the first is still read and checked, so its bad lines are reported too. Like `cat`, a `-` with a terminal on stdin waits for input.
 3. `expand_tilde(item)` is a regular file:
    - content extension (`assets::is_{image,pdf,document,audio}_extension`) -> error "a content file; use --file".
    - else read it as UTF-8 (a read or encoding error names the file) and parse it as a list.
@@ -153,6 +153,8 @@ Each criterion was run on main at 2212e14 and again at bfaa703 (`target/debug/sb
 - **The bulk threshold counts URLs after expansion.** All three reviewers agreed, and `is_bulk` already counts that way (plus `--file` targets).
 - **2026-10-28, panel round 1 (Staff Engineer): every preflight error is reported together.** The doc promised it and the code returned early on three checks; the code was fixed, not the doc.
 - **2026-10-28, panel round 1: a bare `%` passes.** The Staff Engineer listed it as defer. Closed instead of deferred: browsers accept `?q=100%`, Scott's "error on malformed" targets items that are not URLs, and rejecting it would break hotkey captures of real pages.
+- **2026-10-28, panel round 2 (Staff Engineer): `- -` still reads stdin once.** It used to skip stdin on a duplicate `-`, which hid the stdin list's errors and contradicted rule 2. Code fixed; `dash_reads_one_url_list_from_stdin_once` pins it.
+- **2026-10-28, panel round 2: the breaking-change list gained the `Url::parse` rejections and the tilde-expanded `-t` check.** Both were probed against v0.19.4. The `-t '~'` case is documented, not changed: a tag naming an existing path is the swallowed-target rule working.
 - **2026-10-28, panel round 1: `-t` keeps the `://` match.** A malformed URL swallowed by `-t` is still a swallowed target; documented as a breaking change rather than narrowed to `is_http_url`.
 
 ## Alternatives Considered
@@ -200,11 +202,13 @@ Each criterion was run on main at 2212e14 and again at bfaa703 (`target/debug/sb
 - **Breaking changes vs v0.19.4:**
   - `sb borg ingest report.pdf` becomes `sb borg ingest --file report.pdf`.
   - `--from` is gone.
-  - A positional non-content file (`notes.md`) used to fail as "Unsupported file type" with a junk `intake-rejected` receipt; now it is read as a URL list and fails with `file:line`, and no receipt is written.
-  - A URL with whitespace, a control character or a backslash used to be submitted and fail at the daemon; now it exits 2 (TARGETS) or 1 (`--clipboard`).
+  - A positional non-content file (`notes.md`) used to fail as "Unsupported file type" with a junk `intake-rejected` receipt; now it is read as a URL list and fails with `file:line` (or `no URLs in the list` when it holds only comments and blanks), and no receipt is written.
+  - A URL with embedded whitespace, a control character or a backslash used to be submitted and fail at the daemon; now it exits 2 (TARGETS) or 1 (`--clipboard`). `--clipboard` trims first, so surrounding whitespace still passes.
+  - A URL that `Url::parse` or the non-empty-host check rejects (`https://`, `http:///`, `https://example.com:65536/`, `https://[::1`) used to be submitted; now it exits 2.
   - A `-t` tag containing `://` (even a malformed one, like `ftp://x`) is now a swallowed target, exit 2. v0.19.4 matched only `http(s)://` tags.
+  - A `-t` tag is tilde-expanded before its exists check, so `-t '~'` (the home directory exists) is now a swallowed target, exit 2. v0.19.4 submitted it as the tag `~`.
 - Blast radius:
-  - The hotkey runs `--clipboard`, so a copied URL with whitespace or a backslash now fails with exit 1 and no toast. A normal copied URL, bare `%` included, is unaffected. The bundled script passes one literal URL.
+  - The hotkey runs `--clipboard`, so a copied URL with embedded whitespace or a backslash now fails with exit 1 and no toast. A normal copied URL, bare `%` included, is unaffected. The bundled script passes one literal URL.
   - The extension POSTs JSON straight to `/ingest`, so it is unaffected.
   - The `intent-guard.sh` INGEST rule that referenced `--from` was removed in scottidler/claude 96bfc71.
 - Ship order: this repo only.
@@ -227,5 +231,5 @@ None.
 ## References
 
 - `docs/design/2026-10-27-multi-target-ingest.md` and its implementation notes
-- Commits 2212e14 (the implementation) and 66b595c (panel round-1 fold-in)
+- Commits 2212e14 (the implementation), 66b595c (panel round-1 fold-in), bfaa703 (passes 3-5), and the panel round-2 fold-in
 - The three reviewers' positions (Fable, Architect, Staff Engineer) and the panel round-1 findings are recorded in Resolved Decisions; their raw outputs were session-local

@@ -142,7 +142,7 @@ pub fn classify_targets(
         bad.push("--note applies to URLs, not --file content".to_string());
     }
 
-    let mut read_stdin = (!stdin_twice).then_some(read_stdin);
+    let mut read_stdin = Some(read_stdin);
     let mut classified = Vec::new();
     for item in items {
         if looks_like_url(item) {
