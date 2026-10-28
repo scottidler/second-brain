@@ -125,7 +125,7 @@ No change. `Target::{Url, File}`, `IngestRun`, receipts, and the batch protocol 
 
 ## Acceptance Criteria
 
-Each criterion was run on main at 2212e14 (`target/debug/sb`, built by `otto ci`). The fixtures are a `urls.txt` whose line 3 is `https://exa mple.com`, and a 1-byte `a.pdf`.
+Each criterion was run on main at 2212e14 and again at bfaa703 (`target/debug/sb`, built by `otto ci` from the bfaa703 tree), with the same output both times. The fixtures are a `urls.txt` whose line 3 is `https://exa mple.com`, and a 1-byte `a.pdf`.
 
 - [ ] A list with one bad line exits 2, naming `file:line`, and submits nothing.
   - `sb borg ingest urls.txt; echo $?`
