@@ -2,7 +2,9 @@
 
 **Author:** Scott Idler (drafted with Claude)
 **Date:** 2026-10-28
-**Status:** Implemented (Phase 1 at 9ab113b; Phase 2, the release, pending)
+**Status:** Implemented
+
+Shipped in: v0.20.0
 **Review Passes Completed:** 5/5, plus review-panel round 1 (Staff Engineer only; the Architect seat failed twice) and round 2 (both seats)
 
 ## Summary
@@ -127,21 +129,21 @@ No change. `Target::{Url, File}`, `IngestRun`, receipts, and the batch protocol 
 
 Each criterion was run on main at 2212e14, at bfaa703 and at 9ab113b (`target/debug/sb`, built by `otto ci` from each tree), with the same output each time. The fixtures are a `urls.txt` whose line 3 is `https://exa mple.com`, and a 1-byte `a.pdf`.
 
-- [ ] A list with one bad line exits 2, naming `file:line`, and submits nothing.
+- [x] A list with one bad line exits 2, naming `file:line`, and submits nothing.
   - `sb borg ingest urls.txt; echo $?`
   - Observed on main: `Error: cannot ingest: .../ac/urls.txt:3: https://exa mple.com (not an http(s) URL; a list holds URLs only)`, then `exit=2`. Zero submits are pinned by `sb/tests/ingest.rs::a_malformed_last_list_line_exits_2_with_zero_posts` (stub daemon, `bodies` empty).
-- [ ] A positional content file exits 2 and points at `--file`.
+- [x] A positional content file exits 2 and points at `--file`.
   - `sb borg ingest a.pdf; echo $?`
   - Observed on main: `Error: cannot ingest: .../ac/a.pdf (a content file; use --file .../ac/a.pdf to ingest it as a note)`, then `exit=2`.
-- [ ] `--from` is gone.
+- [x] `--from` is gone.
   - `sb borg ingest --from urls.txt; echo $?`
   - Observed on main: `error: unexpected argument '--from' found`, then `exit=2`.
-- [ ] Help shows the new surface.
+- [x] Help shows the new surface.
   - `sb borg ingest --help | grep -E -- '--file|--from|TARGETS'`
   - Observed on main: the `[TARGETS]...` line says "http(s) URLs, or files listing one URL per line"; `--file <FILE>` says "Ingest this local file as a note (image, pdf, document, audio). Repeatable"; no line matches `--from`.
-- [ ] Live: a list file ingests every URL in it.
-  - `sb borg ingest <list>` against the deployed daemon.
-  - Not run yet: it depends on Phase 2's release.
+- [x] Live: a list file ingests every URL in it.
+  - `sb borg ingest <list>` against the deployed daemon, then `sb borg wait`.
+  - Observed on v0.20.0 (2026-10-28, ripr, `/health` reporting `"version":"v0.20.0"`): a list with a byte-order mark, CRLF endings, a `#` line and a blank line printed `-> queued` for all 3 URLs; `sb borg wait` exited 0 with `"total":3,"succeeded":3,"failed":0`.
 
 ## Resolved Decisions
 
