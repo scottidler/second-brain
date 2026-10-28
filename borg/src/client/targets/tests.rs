@@ -29,72 +29,184 @@ fn config_for(port: u16) -> Config {
 
 // ---- classification -----------------------------------------------------------
 
+fn no_stdin() -> std::io::Result<String> {
+    panic!("stdin read without a `-` item")
+}
+
+fn classify(items: &[&str], files: &[&str]) -> Result<Vec<Target>, UsageError> {
+    let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    classify_targets(&strings(items), &files, None, None, no_stdin)
+}
+
+fn url_targets(items: &[&str]) -> Vec<Target> {
+    items.iter().map(|u| Target::Url(u.to_string())).collect()
+}
+
+fn a_list(text: &str) -> (tempfile::TempDir, String) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("urls.txt");
+    std::fs::write(&path, text).expect("write");
+    let path = path.display().to_string();
+    (dir, path)
+}
+
 #[test]
-fn classifies_urls_and_existing_files() {
-    let (_dir, file) = a_file();
-    let got = classify_targets(&strings(&["https://a.example", &file, "http://b.example"]), None, None).unwrap();
+fn strict_urls_pass_and_malformed_ones_do_not() {
+    for good in [
+        "https://a.example",
+        "http://b.example/path?q=1#frag",
+        "HTTPS://c.example/%20x",
+        "https://d.example:8080/",
+    ] {
+        assert!(is_http_url(good), "{good}");
+    }
+    for bad in [
+        "https://",
+        "https://exa mple.com",
+        "https://a.example/foo bar",
+        "http:a.example",
+        "https:\\\\a.example",
+        "https://a.example/%zz",
+        "ftp://a.example",
+        "a.example",
+        "",
+    ] {
+        assert!(!is_http_url(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_list_file_expands_in_place_between_urls() {
+    let (_dir, list) = a_list("https://b.example\n\n  # a comment\n  https://c.example  \r\n");
     assert_eq!(
-        got,
-        vec![
-            Target::Url("https://a.example".to_string()),
-            Target::File(PathBuf::from(&file)),
-            Target::Url("http://b.example".to_string()),
-        ]
+        classify(&["https://a.example", &list, "https://d.example"], &[]).unwrap(),
+        url_targets(&[
+            "https://a.example",
+            "https://b.example",
+            "https://c.example",
+            "https://d.example"
+        ])
     );
 }
 
 #[test]
+fn one_bad_list_line_fails_the_whole_run_naming_file_and_line() {
+    let (_dir, list) = a_list("https://a.example\n./c.pdf\nhttps://b.example\nnot a url\n");
+    let err = classify(&["https://z.example", &list], &[]).unwrap_err();
+    assert!(err.0.contains(&format!("{list}:2: ./c.pdf")), "{err}");
+    assert!(err.0.contains(&format!("{list}:4: not a url")), "{err}");
+}
+
+#[test]
+fn an_empty_list_is_a_usage_error() {
+    let (_dir, list) = a_list("\n# nothing here\n");
+    let err = classify(&[&list], &[]).unwrap_err();
+    assert!(err.0.contains("no URLs in the list"), "{err}");
+}
+
+#[test]
+fn a_malformed_url_item_never_falls_through_to_a_file_lookup() {
+    let err = classify(&["https://exa mple.com", "https://a.example"], &[]).unwrap_err();
+    assert!(err.0.contains("https://exa mple.com (malformed URL)"), "{err}");
+}
+
+#[test]
 fn a_nonexistent_path_is_a_usage_error_naming_it() {
-    let err = classify_targets(&strings(&["https://a.example", "/no/such/file.pdf"]), None, None).unwrap_err();
-    assert!(err.0.contains("/no/such/file.pdf"), "{err}");
+    let err = classify(&["https://a.example", "/no/such/urls.txt"], &[]).unwrap_err();
+    assert!(err.0.contains("/no/such/urls.txt"), "{err}");
 }
 
 #[test]
 fn a_directory_is_a_usage_error() {
     let dir = tempfile::TempDir::new().unwrap();
-    let err = classify_targets(&strings(&[&dir.path().display().to_string()]), None, None).unwrap_err();
+    let err = classify(&[&dir.path().display().to_string()], &[]).unwrap_err();
     assert!(err.0.contains("not a file"), "{err}");
 }
 
 #[test]
+fn a_positional_content_file_points_at_file_flag() {
+    let (_dir, file) = a_file();
+    let err = classify(&[&file], &[]).unwrap_err();
+    assert!(err.0.contains(&format!("use --file {file}")), "{err}");
+}
+
+#[test]
+fn file_flag_takes_content_and_refuses_a_list_or_missing_path() {
+    let (_dir, file) = a_file();
+    assert_eq!(
+        classify(&["https://a.example"], &[&file]).unwrap(),
+        vec![
+            Target::Url("https://a.example".to_string()),
+            Target::File(PathBuf::from(&file))
+        ]
+    );
+    let (_ldir, list) = a_list("https://a.example\n");
+    let err = classify(&[], &[&list]).unwrap_err();
+    assert!(err.0.contains("unsupported content type"), "{err}");
+    let err = classify(&[], &["/no/such/a.pdf"]).unwrap_err();
+    assert!(err.0.contains("--file /no/such/a.pdf (no such file)"), "{err}");
+}
+
+#[test]
+fn a_tilde_list_path_is_expanded() {
+    let home = std::env::var("HOME").expect("HOME");
+    let dir = tempfile::TempDir::new_in(&home).expect("tempdir under HOME");
+    std::fs::write(dir.path().join("urls.txt"), "https://a.example\n").expect("write");
+    let rel = dir.path().strip_prefix(&home).unwrap().join("urls.txt");
+    let tilde = format!("~/{}", rel.display());
+    assert_eq!(classify(&[&tilde], &[]).unwrap(), url_targets(&["https://a.example"]));
+}
+
+#[test]
+fn dash_reads_one_url_list_from_stdin_once() {
+    let got = classify_targets(&strings(&["-", "https://z.example"]), &[], None, None, || {
+        Ok("https://a.example\n# c\nhttps://b.example\n".to_string())
+    })
+    .unwrap();
+    assert_eq!(
+        got,
+        url_targets(&["https://a.example", "https://b.example", "https://z.example"])
+    );
+    let err = classify_targets(&strings(&["-", "-"]), &[], None, None, no_stdin).unwrap_err();
+    assert!(err.0.contains("only once"), "{err}");
+}
+
+#[test]
 fn no_targets_is_a_usage_error() {
-    assert!(classify_targets(&[], None, None).is_err());
+    assert!(classify(&[], &[]).is_err());
 }
 
 #[test]
 fn a_tag_that_is_a_url_or_existing_path_is_a_swallowed_target() {
     let (_dir, file) = a_file();
-    let url_tag = classify_targets(
-        &strings(&["https://a.example"]),
-        Some(&strings(&["ai", "https://x.example"])),
-        None,
-    )
-    .unwrap_err();
+    let run = |tags: &[&str]| {
+        classify_targets(
+            &strings(&["https://a.example"]),
+            &[],
+            Some(&strings(tags)),
+            None,
+            no_stdin,
+        )
+    };
+    let url_tag = run(&["ai", "https://x.example"]).unwrap_err();
     assert!(url_tag.0.contains("https://x.example"), "{url_tag}");
-    let path_tag = classify_targets(&strings(&["https://a.example"]), Some(&strings(&[&file])), None).unwrap_err();
+    let malformed_tag = run(&["https://exa mple"]).unwrap_err();
+    assert!(malformed_tag.0.contains("https://exa mple"), "{malformed_tag}");
+    let path_tag = run(&[&file]).unwrap_err();
     assert!(path_tag.0.contains(&file), "{path_tag}");
-    assert!(classify_targets(&strings(&["https://a.example"]), Some(&strings(&["ai", "rust"])), None).is_ok());
+    assert!(run(&["ai", "rust"]).is_ok());
 }
 
 #[test]
-fn a_note_with_a_file_target_is_a_usage_error_but_not_with_urls_only() {
+fn a_note_with_file_content_is_a_usage_error_but_not_with_urls_only() {
     let (_dir, file) = a_file();
-    let err = classify_targets(&strings(&["https://a.example", &file]), None, Some("why")).unwrap_err();
-    assert!(err.0.contains("--note"), "{err}");
-    assert!(classify_targets(&strings(&["https://a.example"]), None, Some("why")).is_ok());
-    assert!(classify_targets(&strings(&["https://a.example", &file]), None, None).is_ok());
-}
-
-/// The flag, not its content, conflicts with a file target: a blank or
-/// whitespace `--note` is the same usage error.
-#[test]
-fn a_blank_note_with_a_file_target_is_still_a_usage_error() {
-    let (_dir, file) = a_file();
-    for note in ["", "   "] {
-        let err = classify_targets(&strings(&["https://a.example", &file]), None, Some(note)).unwrap_err();
+    let files = [PathBuf::from(&file)];
+    for note in ["why", "", "   "] {
+        let err = classify_targets(&strings(&["https://a.example"]), &files, None, Some(note), no_stdin).unwrap_err();
         assert!(err.0.contains("--note"), "note={note:?}: {err}");
     }
-    assert!(classify_targets(&strings(&["https://a.example"]), None, Some("")).is_ok());
+    assert!(classify_targets(&strings(&["https://a.example"]), &[], None, Some("why"), no_stdin).is_ok());
+    assert!(classify_targets(&strings(&["https://a.example"]), &files, None, None, no_stdin).is_ok());
 }
 
 // ---- run against a stub daemon --------------------------------------------------
@@ -380,48 +492,4 @@ async fn a_run_at_the_threshold_is_not_a_bulk_and_never_asks_health() {
     let seen = seen.lock().unwrap().clone();
     assert!(posts_to(&seen, "GET /health").is_empty());
     assert!(seen.iter().all(|r| batch_field(r).is_none()));
-}
-
-// ---- --from list files --------------------------------------------------------
-
-#[test]
-fn parse_target_list_skips_blank_and_comment_lines() {
-    let text = "https://a.example\n\n  # a comment\n  https://b.example  \n./c.pdf\n";
-    assert_eq!(
-        parse_target_list(text),
-        strings(&["https://a.example", "https://b.example", "./c.pdf"])
-    );
-}
-
-#[test]
-fn read_target_lists_concatenates_files_in_order() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let one = dir.path().join("one.txt");
-    let two = dir.path().join("two.txt");
-    std::fs::write(&one, "https://a.example\nhttps://b.example\n").expect("write");
-    std::fs::write(&two, "# header\nhttps://c.example\n").expect("write");
-    assert_eq!(
-        read_target_lists(&[one, two]).expect("lists read"),
-        strings(&["https://a.example", "https://b.example", "https://c.example"])
-    );
-}
-
-#[test]
-fn read_target_lists_rejects_a_missing_file() {
-    let err = read_target_lists(&[PathBuf::from("/no/such/list.txt")]).expect_err("missing list");
-    assert!(err.0.contains("--from /no/such/list.txt"), "{err}");
-}
-
-#[test]
-fn read_target_lists_rejects_an_empty_list() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let empty = dir.path().join("empty.txt");
-    std::fs::write(&empty, "\n# nothing here\n").expect("write");
-    let err = read_target_lists(&[empty]).expect_err("empty list");
-    assert!(err.0.contains("no targets in the list"), "{err}");
-}
-
-#[test]
-fn read_target_lists_with_no_sources_is_empty() {
-    assert!(read_target_lists(&[]).expect("no sources").is_empty());
 }

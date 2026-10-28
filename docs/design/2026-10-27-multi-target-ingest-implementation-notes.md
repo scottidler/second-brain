@@ -159,3 +159,15 @@ Scott's ask was "1+ items that can be urls or filepaths", and the first cut read
 - `--clipboard` conflicts with `--from`; TARGETS is no longer required when `--from` is given.
 - The listed targets go through `classify_targets` unchanged, so bulk detection, the seal, and the summary are the same as for positional targets.
 - Tests: `parse_target_list_skips_blank_and_comment_lines`, `read_target_lists_concatenates_files_in_order`, `read_target_lists_rejects_a_missing_file`, `read_target_lists_rejects_an_empty_list`, `read_target_lists_with_no_sources_is_empty`.
+
+## Follow-up: positional URL-list files replace `--from`
+
+Superseded `--from` the day after it shipped. The original ask was "1+ items that can be urls or filepaths ... if you get a file it has a pile of urls in there, ingest them all": a positional file is a list of URLs, not a document. Reviewed by Fable, the Architect, and the Staff Engineer; Scott picked the explicit-flag option over an extension-based split.
+
+- Item grammar: each positional item is a strict `http(s)` URL, a URL-list file, or `-` (stdin, at most once). A list file expands in place; every non-blank, non-`#` line must be a URL. A path inside a list is an error, never followed.
+- Content files (image, pdf, document, audio) go through repeatable `--file <FILE>`, the v0.19.2 flag restored. A positional content file errors and points at `--file`; a non-content `--file` errors.
+- `is_http_url` is strict: literal `http://`/`https://` prefix, a host, no whitespace, control character, backslash, or broken `%` escape, then `url::Url::parse`. A `://`-shaped item that fails it is a malformed URL and never falls through to a file lookup. `--clipboard` uses the same check.
+- Paths go through `vault::paths::expand_tilde` before any filesystem check.
+- Any malformed item, bad list line (reported as `file:line`), unreadable or empty list, or bad `--file` exits 2 before any submit. `--note` with `--file` stays an error. The bulk threshold counts URLs after expansion.
+- `--from`, `read_target_lists` and `parse_target_list` are removed; `--from` is now a clap usage error.
+

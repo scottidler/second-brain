@@ -44,8 +44,8 @@ impl BorgCli {
                 }
             }
             Some(Command::Ingest {
-                mut targets,
-                from,
+                targets,
+                file,
                 clipboard,
                 tags,
                 force,
@@ -57,9 +57,8 @@ impl BorgCli {
                         borg::ingest(config, url, tags, force, borg::types::IngestMethod::Clipboard, note).await?;
                     return print_ingest_outcome(&outcome);
                 }
-                let classified = match borg::read_target_lists(&from).and_then(|listed| {
-                    targets.extend(listed);
-                    borg::classify_targets(&targets, tags.as_deref(), note.as_deref())
+                let classified = match borg::classify_targets(&targets, &file, tags.as_deref(), note.as_deref(), || {
+                    std::io::read_to_string(std::io::stdin())
                 }) {
                     Ok(classified) => classified,
                     Err(usage) => {

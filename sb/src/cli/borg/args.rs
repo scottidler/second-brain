@@ -29,19 +29,20 @@ pub struct BorgCli {
 pub enum Command {
     /// Manage the daemon (install, start, stop, status, etc.)
     Daemon(DaemonArgs),
-    /// Ingest 1+ targets: http(s) URLs (queued on the daemon) and/or file
-    /// paths (ingested in-process on this host)
+    /// Ingest 1+ targets: http(s) URLs and URL-list files (queued on the
+    /// daemon), and --file content (ingested in-process on this host)
     Ingest {
-        /// URLs or file paths, space-separated. Put them before -t/--tags,
-        /// which is greedy
-        #[arg(required_unless_present_any = ["clipboard", "from"])]
+        /// http(s) URLs, or files listing one URL per line (blank and `#`
+        /// lines skipped; `-` reads the list from stdin). Space-separated.
+        /// Put them before -t/--tags, which is greedy
+        #[arg(required_unless_present_any = ["clipboard", "file"])]
         targets: Vec<String>,
-        /// Read targets from a list file, one per line (`-` is stdin; blank
-        /// and `#` lines skipped). Repeatable; combines with positional targets
+        /// Ingest this local file as a note (image, pdf, document, audio).
+        /// Repeatable
         #[arg(long, value_name = "FILE")]
-        from: Vec<std::path::PathBuf>,
+        file: Vec<std::path::PathBuf>,
         /// Read one URL from the clipboard instead of taking targets
-        #[arg(long, conflicts_with_all = ["targets", "from"])]
+        #[arg(long, conflicts_with_all = ["targets", "file"])]
         clipboard: bool,
         /// Operator tags to seed the note with (space-separated). They enter
         /// the classifier as author-side candidates, not as final tags
@@ -53,7 +54,7 @@ pub enum Command {
         force: bool,
         /// Why you are capturing these URLs. Rendered into each note's
         /// `## Why Captured` section and given to the distiller as the stated
-        /// interest. Applies to URL targets only; a file target with --note is an error
+        /// interest. Applies to URLs only; --note with --file is an error
         #[arg(long)]
         note: Option<String>,
     },

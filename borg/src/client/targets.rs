@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use eyre::Result;
 
 use super::{IngestOutcome, post_ingest, seal};
+use crate::assets;
 use crate::config::Config;
 use crate::types;
 
@@ -32,58 +33,102 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-fn is_http_url(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://")
-}
-
-/// One target per line; blank lines and `#` comment lines are skipped.
-pub fn parse_target_list(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_string)
-        .collect()
-}
-
-/// Read every `--from` list (`-` is stdin) into targets, in order. A list
-/// that cannot be read, or that holds no targets, is a usage error.
-pub fn read_target_lists(sources: &[PathBuf]) -> Result<Vec<String>, UsageError> {
-    let mut targets = Vec::new();
-    for source in sources {
-        let text = if source.as_os_str() == "-" {
-            std::io::read_to_string(std::io::stdin())
-        } else {
-            std::fs::read_to_string(source)
-        }
-        .map_err(|e| UsageError(format!("--from {}: {e}", source.display())))?;
-        let listed = parse_target_list(&text);
-        if listed.is_empty() {
-            return Err(UsageError(format!(
-                "--from {}: no targets in the list",
-                source.display()
-            )));
-        }
-        targets.extend(listed);
+/// A strict absolute http(s) URL: literal `http://`/`https://` prefix (any
+/// case), a host, and no whitespace, control character, backslash, or broken
+/// `%` escape. `Url::parse` alone is too forgiving: it percent-encodes spaces
+/// and normalizes `http:host` and backslashes instead of rejecting them.
+pub fn is_http_url(s: &str) -> bool {
+    let lower = s.get(..8).unwrap_or(s).to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
     }
-    Ok(targets)
+    if s.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let broken_escape = bytes.iter().enumerate().any(|(i, &b)| {
+        b == b'%'
+            && !(bytes
+                .get(i + 1..i + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)))
+    });
+    if broken_escape {
+        return false;
+    }
+    url::Url::parse(s).is_ok_and(|u| u.host_str().is_some_and(|h| !h.is_empty()))
 }
 
-/// Classify every target (http(s) URL | existing file) and reject the shapes
-/// that would silently misfire: a tag that is really a target the greedy `-t`
-/// swallowed, and `--note` alongside a file target.
+/// Shaped like a URL (`scheme://...`): it must validate as one, never fall
+/// through to a file lookup.
+fn looks_like_url(s: &str) -> bool {
+    s.contains("://")
+}
+
+/// Parse a URL list: one URL per line; blank lines and lines whose first
+/// non-blank character is `#` are skipped. Every other line must be an
+/// http(s) URL (a file path is not followed). `source` names the list in
+/// errors as `source:line`.
+pub fn parse_url_list(text: &str, source: &str) -> Result<Vec<String>, UsageError> {
+    let mut urls = Vec::new();
+    let mut bad = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if is_http_url(line) {
+            urls.push(line.to_string());
+        } else {
+            bad.push(format!(
+                "{source}:{}: {line} (not an http(s) URL; a list holds URLs only)",
+                idx + 1
+            ));
+        }
+    }
+    if !bad.is_empty() {
+        return Err(UsageError(format!("cannot ingest: {}", bad.join("; "))));
+    }
+    if urls.is_empty() {
+        return Err(UsageError(format!("{source}: no URLs in the list")));
+    }
+    Ok(urls)
+}
+
+fn is_content_file(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    assets::is_image_extension(&name)
+        || assets::is_pdf_extension(&name)
+        || assets::is_document_extension(&name)
+        || assets::is_audio_extension(&name)
+}
+
+/// Resolve every input to concrete targets before anything is submitted.
+///
+/// - `items`: each is an http(s) URL, a URL-list file (every line a URL), or
+///   `-` (a URL list on stdin, read through `read_stdin`, at most once).
+/// - `files`: `--file` paths, each a supported content file ingested as a note.
+///
+/// Any malformed item, unreadable or empty list, bad list line, or bad
+/// `--file` is a `UsageError` naming it; then nothing runs. Also rejects a tag
+/// that is really a target the greedy `-t` swallowed, and `--note` alongside
+/// `--file`. URLs come out in input order, list lines expanded in place.
 pub fn classify_targets(
-    targets: &[String],
+    items: &[String],
+    files: &[PathBuf],
     tags: Option<&[String]>,
     note: Option<&str>,
+    read_stdin: impl FnOnce() -> std::io::Result<String>,
 ) -> Result<Vec<Target>, UsageError> {
-    if targets.is_empty() {
-        return Err(UsageError("no targets given: pass 1+ URLs or file paths".to_string()));
+    if items.is_empty() && files.is_empty() {
+        return Err(UsageError(
+            "no targets given: pass 1+ URLs or URL-list files, or --file <FILE>".to_string(),
+        ));
     }
 
     let swallowed: Vec<&String> = tags
         .unwrap_or_default()
         .iter()
-        .filter(|t| is_http_url(t) || Path::new(t.as_str()).exists())
+        .filter(|t| looks_like_url(t) || vault::paths::expand_tilde(t).exists())
         .collect();
     if !swallowed.is_empty() {
         let names: Vec<&str> = swallowed.iter().map(|t| t.as_str()).collect();
@@ -93,28 +138,71 @@ pub fn classify_targets(
         )));
     }
 
-    let mut classified = Vec::with_capacity(targets.len());
-    let mut bad = Vec::new();
-    for t in targets {
-        if is_http_url(t) {
-            classified.push(Target::Url(t.clone()));
-        } else if Path::new(t).is_file() {
-            classified.push(Target::File(PathBuf::from(t)));
-        } else if Path::new(t).exists() {
-            bad.push(format!("{t} (exists but is not a file)"));
-        } else {
-            bad.push(format!("{t} (not an http(s) URL and no such file)"));
-        }
-    }
-    if !bad.is_empty() {
-        return Err(UsageError(format!("cannot ingest: {}", bad.join("; "))));
+    if items.iter().filter(|i| i.as_str() == "-").count() > 1 {
+        return Err(UsageError("`-` (stdin) can be given only once".to_string()));
     }
 
     // Any `--note`, blank included: the flag itself is the mixed-run misuse.
-    if note.is_some() && classified.iter().any(|t| matches!(t, Target::File(_))) {
-        return Err(UsageError(
-            "--note applies to URL targets, not file targets".to_string(),
-        ));
+    if note.is_some() && !files.is_empty() {
+        return Err(UsageError("--note applies to URLs, not --file content".to_string()));
+    }
+
+    let mut read_stdin = Some(read_stdin);
+    let mut classified = Vec::new();
+    let mut bad = Vec::new();
+    for item in items {
+        if looks_like_url(item) || is_http_url(item) {
+            match is_http_url(item) {
+                true => classified.push(Target::Url(item.clone())),
+                false => bad.push(format!("{item} (malformed URL)")),
+            }
+            continue;
+        }
+        let listed = if item == "-" {
+            let read = read_stdin.take().expect("stdin is read at most once");
+            read()
+                .map_err(|e| UsageError(format!("-: {e}")))
+                .and_then(|text| parse_url_list(&text, "-"))
+        } else {
+            let path = vault::paths::expand_tilde(item);
+            if path.is_file() {
+                if is_content_file(&path) {
+                    bad.push(format!(
+                        "{item} (a content file; use --file {item} to ingest it as a note)"
+                    ));
+                    continue;
+                }
+                std::fs::read_to_string(&path)
+                    .map_err(|e| UsageError(format!("{item}: {e}")))
+                    .and_then(|text| parse_url_list(&text, item))
+            } else if path.exists() {
+                Err(UsageError(format!("{item} (exists but is not a file)")))
+            } else {
+                Err(UsageError(format!("{item} (not an http(s) URL and no such file)")))
+            }
+        };
+        match listed {
+            Ok(urls) => classified.extend(urls.into_iter().map(Target::Url)),
+            Err(e) => bad.push(e.0.trim_start_matches("cannot ingest: ").to_string()),
+        }
+    }
+
+    for file in files {
+        let path = vault::paths::expand_tilde(file);
+        if !path.is_file() {
+            bad.push(format!("--file {} (no such file)", file.display()));
+        } else if !is_content_file(&path) {
+            bad.push(format!(
+                "--file {} (unsupported content type; a URL list goes in as a plain argument)",
+                file.display()
+            ));
+        } else {
+            classified.push(Target::File(path));
+        }
+    }
+
+    if !bad.is_empty() {
+        return Err(UsageError(format!("cannot ingest: {}", bad.join("; "))));
     }
     Ok(classified)
 }

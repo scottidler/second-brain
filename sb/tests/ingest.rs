@@ -126,9 +126,9 @@ fn run_ingest(port: u16, args: &[&str]) -> Run {
 #[test]
 fn a_nonexistent_path_exits_2_with_zero_posts() {
     let stub = start_stub();
-    let run = run_ingest(stub.port, &["https://a.example", "/no/such/file.pdf"]);
+    let run = run_ingest(stub.port, &["https://a.example", "/no/such/urls.txt"]);
     assert_eq!(run.code, Some(2), "{}", run.stderr);
-    assert!(run.stderr.contains("/no/such/file.pdf"), "{}", run.stderr);
+    assert!(run.stderr.contains("/no/such/urls.txt"), "{}", run.stderr);
     assert!(stub.bodies.lock().unwrap().is_empty(), "nothing submitted");
 }
 
@@ -140,7 +140,7 @@ fn a_note_with_a_file_target_exits_2_with_zero_posts() {
     std::fs::write(&file, b"x").unwrap();
     let run = run_ingest(
         stub.port,
-        &["https://a.example", file.to_str().unwrap(), "--note", "why"],
+        &["https://a.example", "--file", file.to_str().unwrap(), "--note", "why"],
     );
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     assert!(run.stderr.contains("--note"), "{}", run.stderr);
@@ -202,4 +202,43 @@ fn one_failed_post_of_three_exits_1_and_still_submits_the_rest() {
     assert!(run.stdout.contains("https://a.example -> queued"), "{}", run.stdout);
     assert!(run.stdout.contains("https://c.example -> queued"), "{}", run.stdout);
     assert!(run.stderr.contains("https://fail.example -> failed:"), "{}", run.stderr);
+}
+
+#[test]
+fn a_url_list_file_submits_every_url_in_order() {
+    let stub = start_stub();
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("urls.txt");
+    std::fs::write(&list, "# scour\nhttps://b.example\n\nhttps://c.example\n").unwrap();
+    let run = run_ingest(stub.port, &["https://a.example", list.to_str().unwrap()]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "https://a.example -> queued stub-trace-1",
+            "https://b.example -> queued stub-trace-2",
+            "https://c.example -> queued stub-trace-3",
+        ]
+    );
+}
+
+#[test]
+fn a_malformed_last_list_line_exits_2_with_zero_posts() {
+    let stub = start_stub();
+    let dir = tempfile::tempdir().unwrap();
+    let list = dir.path().join("urls.txt");
+    std::fs::write(&list, "https://a.example\nhttps://b.example\nhttps://exa mple.com\n").unwrap();
+    let run = run_ingest(stub.port, &[list.to_str().unwrap()]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(run.stderr.contains(":3: https://exa mple.com"), "{}", run.stderr);
+    assert!(stub.bodies.lock().unwrap().is_empty(), "nothing submitted");
+}
+
+#[test]
+fn the_removed_from_flag_exits_2() {
+    let stub = start_stub();
+    let run = run_ingest(stub.port, &["--from", "urls.txt"]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(stub.bodies.lock().unwrap().is_empty());
 }

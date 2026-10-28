@@ -181,8 +181,8 @@ pub fn resolve_ingest_url(url: Option<String>, clipboard: bool) -> Result<String
         if text.is_empty() {
             eyre::bail!("Clipboard is empty");
         }
-        if !text.starts_with("http://") && !text.starts_with("https://") {
-            eyre::bail!("Clipboard content is not a URL: {text}");
+        if !targets::is_http_url(&text) {
+            eyre::bail!("Clipboard content is not an http(s) URL: {text}");
         }
         return Ok(text);
     }
