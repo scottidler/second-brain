@@ -110,12 +110,22 @@ pub struct IngestRun {
     pub submits: usize,
     /// URL targets whose submit failed.
     pub failed_submits: usize,
+    /// This run is a bulk per `is_bulk`. Nothing consumes it until the batch
+    /// is wired in.
+    pub bulk: bool,
 }
 
 impl IngestRun {
     pub fn any_failed(&self) -> bool {
         self.reports.iter().any(TargetReport::failed)
     }
+}
+
+/// The bulk rule: more than `threshold` targets AND at least one URL target.
+/// Threshold 0 makes every run with a URL target a bulk. `--clipboard` is
+/// never a bulk, and a file-only run never opens a batch.
+pub fn is_bulk(url_count: usize, total_targets: usize, threshold: u32, clipboard: bool) -> bool {
+    !clipboard && url_count > 0 && total_targets > threshold as usize
 }
 
 /// Run classified targets: every URL first (so a slow file never delays the
@@ -139,12 +149,17 @@ where
     F: FnMut(PathBuf) -> Fut,
     Fut: Future<Output = Result<IngestOutcome>>,
 {
-    let multi = targets.len() > 1;
+    let multi_total = targets.len();
+    let multi = multi_total > 1;
     let quiet = |_: &str, _: &str| {};
     let per_target: &dyn Fn(&str, &str) = if multi { &quiet } else { &toast };
 
     let (urls, files): (Vec<Target>, Vec<Target>) = targets.into_iter().partition(|t| matches!(t, Target::Url(_)));
-    let mut run = IngestRun::default();
+    // `--clipboard` returns in `sb` before reaching this function.
+    let mut run = IngestRun {
+        bulk: is_bulk(urls.len(), multi_total, config.ingest.bulk_threshold, false),
+        ..IngestRun::default()
+    };
 
     for target in urls {
         let Target::Url(url) = target else { continue };

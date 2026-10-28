@@ -208,3 +208,36 @@ async fn an_all_good_multi_run_toasts_nothing_and_file_errors_fail_the_run() {
     assert_eq!(run.failed_submits, 0);
     assert!(matches!(&run.reports[1].result, Err(r) if r.contains("Failed to read file")));
 }
+
+// ---- bulk rule ----------------------------------------------------------------
+
+#[test]
+fn absent_ingest_block_defaults_bulk_threshold_to_five() {
+    let config: Config = serde_yaml::from_str("log-level: info\n").expect("parse");
+    assert_eq!(config.ingest.bulk_threshold, 5);
+    let config: Config = serde_yaml::from_str("ingest:\n  bulk-threshold: 0\n").expect("parse");
+    assert_eq!(config.ingest.bulk_threshold, 0);
+}
+
+#[test]
+fn bulk_needs_more_than_threshold_urls() {
+    assert!(!is_bulk(5, 5, 5, false));
+    assert!(is_bulk(6, 6, 5, false));
+}
+
+#[test]
+fn threshold_zero_makes_one_url_a_bulk_but_not_clipboard() {
+    assert!(is_bulk(1, 1, 0, false));
+    assert!(!is_bulk(1, 1, 0, true));
+}
+
+#[test]
+fn file_only_runs_never_open_a_batch() {
+    assert!(!is_bulk(0, 6, 5, false));
+    assert!(!is_bulk(0, 1, 0, false));
+}
+
+#[test]
+fn mixed_run_counts_files_toward_the_threshold() {
+    assert!(is_bulk(1, 6, 5, false));
+}

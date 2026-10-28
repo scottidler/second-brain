@@ -177,6 +177,8 @@ pub struct Config {
     #[serde(default)]
     pub queue: QueueConfig,
     #[serde(default)]
+    pub ingest: IngestConfig,
+    #[serde(default)]
     pub images: ImagesConfig,
     pub log_level: Option<String>,
 }
@@ -199,6 +201,21 @@ pub const DEFAULT_GITHUB_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default `ntfy.read-timeout`: 3x the 45 s keepalive ntfy.sh sends
 /// (measured; the design doc's Addendum D).
 pub const DEFAULT_NTFY_READ_TIMEOUT: Duration = Duration::from_secs(135);
+
+/// The `ingest:` block of `borg.yml`, read on the invoking host like `hotkey`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct IngestConfig {
+    /// More targets than this in one `sb borg ingest` is a bulk. 0 = every
+    /// run with a URL target is a bulk.
+    pub bulk_threshold: u32,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self { bulk_threshold: 5 }
+    }
+}
 
 /// The `queue:` block of `borg.yml`: thresholds for the ingest-queue snapshot
 /// (`borg::queue`, `GET /queue`). Durations are humantime strings (`15m`,

@@ -412,5 +412,12 @@ queue:
   # Covers clicks that arrive after an earlier fast item already finished.
   batch-gap: 2m
 
+# `sb borg ingest` (read on the invoking host, like `hotkey`).
+ingest:
+  # More targets than this in one `sb borg ingest` is a bulk: one summary
+  # toast when its URL items drain. 0 = every run with a URL target is a bulk.
+  # --clipboard is never a bulk.
+  bulk-threshold: 5
+
 # Log level: trace | debug | info | warn | error
 log-level: info
