@@ -11,6 +11,7 @@ fn test_router() -> Router {
         desktop: None,
         version: "0.0.0-test".to_string(),
         auth_token: None,
+        batch_summaries: tokio::sync::mpsc::unbounded_channel().0,
     })
 }
 
@@ -23,6 +24,7 @@ fn test_router_with_auth(config: Config, auth_token: Option<String>) -> Router {
         desktop: None,
         version: "0.0.0-test".to_string(),
         auth_token,
+        batch_summaries: tokio::sync::mpsc::unbounded_channel().0,
     })
 }
 
@@ -535,4 +537,89 @@ async fn ingest_writes_replay_of_at_intake_and_refuses_an_origin_without_it() {
         assert_eq!(total, 1, "the refused request left no row");
     })
     .await;
+}
+
+#[tokio::test]
+async fn ingest_records_the_batch_and_seal_answers_404_409_and_200() {
+    let data_home = tempfile::tempdir().expect("tempdir");
+    with_xdg_data_home(data_home.path(), || async {
+        let vault = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(vault.path().join(".obsidian")).expect("marker");
+        let app = || {
+            let mut config = Config::default();
+            config.vault.root_path = Some(vault.path().to_string_lossy().to_string());
+            test_router_with_auth(config, Some("tok".to_string()))
+        };
+
+        let refused = app()
+            .oneshot(post(
+                "/ingest",
+                serde_json::json!({"url": "https://example.com/a", "method": "cli", "batch": "../x"}),
+                Some("tok"),
+            ))
+            .await
+            .expect("response");
+        let refused = body_json(refused).await;
+        assert!(refused.get("trace_id").is_none(), "refused before intake: {refused}");
+
+        let unknown = app()
+            .oneshot(post(
+                "/batch/b-1/seal",
+                serde_json::json!({"trace_ids": ["x"]}),
+                Some("tok"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let resp = app()
+            .oneshot(post(
+                "/ingest",
+                serde_json::json!({"url": "https://example.com/a", "method": "cli", "batch": "b-1"}),
+                Some("tok"),
+            ))
+            .await
+            .expect("response");
+        let trace = body_json(resp).await["trace_id"].as_str().expect("queued").to_string();
+        let conn = crate::receipts::open_default().expect("open receipts");
+        assert_eq!(
+            crate::batch::batch_of(&conn, &trace).expect("read").as_deref(),
+            Some("b-1")
+        );
+
+        let unauthorized = app()
+            .oneshot(post("/batch/b-1/seal", serde_json::json!({"trace_ids": [trace]}), None))
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let seal = |ids: serde_json::Value| {
+            app().oneshot(post(
+                "/batch/b-1/seal",
+                serde_json::json!({"trace_ids": ids}),
+                Some("tok"),
+            ))
+        };
+        let first = seal(serde_json::json!([trace])).await.expect("response");
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(body_json(first).await["sealed"], 1);
+        let again = seal(serde_json::json!([trace])).await.expect("response");
+        assert_eq!(again.status(), StatusCode::OK, "an identical re-seal is 200");
+        let other = seal(serde_json::json!([trace, "tr-other"])).await.expect("response");
+        assert_eq!(other.status(), StatusCode::CONFLICT);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn health_advertises_bulk_batch() {
+    let resp = test_router()
+        .oneshot(Request::builder().uri("/health").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let features = body_json(resp).await["features"].clone();
+    assert!(
+        features.as_array().expect("features").iter().any(|f| f == "bulk-batch"),
+        "{features}"
+    );
 }

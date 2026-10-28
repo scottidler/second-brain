@@ -116,12 +116,24 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
             });
         }
     };
+    if let Some(batch) = request.batch.as_deref()
+        && !crate::batch::valid_id(batch)
+    {
+        log::warn!("http/ingest: refusing {}: unusable batch id {batch:?}", request.url);
+        return Json(IngestResult {
+            status: IngestStatus::Failed {
+                reason: format!("batch id {batch:?} is not 1-64 ASCII letters, digits or '-'"),
+            },
+            failure_stage: Some(FailureStage::IntakeRejected),
+            ..Default::default()
+        });
+    }
     let trace_id = trace::generate(method);
 
     // Durable intake BEFORE any pipeline dispatch. Synchronous so a write
     // failure returns Failed to the caller; everything beyond this point
     // runs on a detached task and is invisible to the client. A replay's
-    // lineage rides the same INSERT.
+    // lineage and a bulk's batch id ride the same INSERT.
     if let Err(e) = intake_log::record_replay_with_sidecar(
         &state.config,
         method,
@@ -130,6 +142,7 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         request.url.as_bytes(),
         &trace_id,
         lineage.as_ref(),
+        request.batch.as_deref(),
     ) {
         log::error!("http/ingest: failed to record intake trace={trace_id}: {e:#}");
         return Json(IngestResult {
@@ -170,6 +183,8 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         .filter(|n| !n.is_empty());
     let task_trace = trace_id.clone();
     let task_url = url.clone();
+    let batch = request.batch.clone();
+    let summaries = state.batch_summaries.clone();
     tokio::spawn(async move {
         let result = crate::dispatch::dispatch_ingest(
             ContentKind::Url {
@@ -200,6 +215,11 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
             }
             IngestStatus::Queued => {}
         }
+        // `process_content` wrote this trace's terminal row before returning,
+        // so a batched trace asks whether its batch just drained.
+        if let Some(batch_id) = batch {
+            summarize_if_drained(batch_id, summaries).await;
+        }
     });
 
     Json(IngestResult {
@@ -208,6 +228,106 @@ pub async fn ingest(State(state): State<AppState>, Json(request): Json<IngestReq
         canonical_url: Some(url),
         ..Default::default()
     })
+}
+
+/// Run the batch drain check on the blocking pool and put a won summary on the
+/// notifier channel. Best-effort: a DB error is logged, and the watchdog or a
+/// later member's terminal write asks again.
+async fn summarize_if_drained(batch_id: String, summaries: crate::batch::SummarySender) {
+    #[cfg(test)]
+    let carried = crate::receipts::sandbox::carry();
+    let id = batch_id.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _sandbox = carried.enter();
+        let conn = crate::receipts::open_default()?;
+        crate::batch::maybe_summarize(&conn, &id)
+    })
+    .await;
+    match joined {
+        Ok(Ok(Some(summary))) => crate::batch::send(&summaries, summary),
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => log::error!("batch {batch_id}: drain check failed: {e:#}"),
+        Err(e) => log::error!("batch {batch_id}: drain check task failed: {e}"),
+    }
+}
+
+/// `POST /batch/{id}/seal` - the client's "submission is over": the trace ids
+/// it saw `Queued`. 404 for a batch no member reached intake with, 409 when
+/// already sealed with a different id set, 200 for a first or identical seal.
+/// A seal can itself drain the batch (every member already terminal), so it
+/// runs the drain check too.
+pub async fn seal_batch(
+    State(state): State<AppState>,
+    Path(batch_id): Path<String>,
+    Json(request): Json<crate::batch::SealRequest>,
+) -> Response {
+    log::info!(
+        "batch {batch_id}: seal request with {} trace id(s)",
+        request.trace_ids.len()
+    );
+    if !crate::batch::valid_id(&batch_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("unknown batch {batch_id}")})),
+        )
+            .into_response();
+    }
+    #[cfg(test)]
+    let carried = crate::receipts::sandbox::carry();
+    let id = batch_id.clone();
+    let trace_ids = request.trace_ids.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _sandbox = carried.enter();
+        let conn = crate::receipts::open_default()?;
+        let outcome = crate::batch::seal(&conn, &id, &trace_ids)?;
+        let summary = match outcome {
+            crate::batch::SealOutcome::Sealed | crate::batch::SealOutcome::AlreadySealed => {
+                crate::batch::maybe_summarize(&conn, &id)?
+            }
+            crate::batch::SealOutcome::UnknownBatch | crate::batch::SealOutcome::Conflict => None,
+        };
+        Ok::<_, eyre::Report>((outcome, summary))
+    })
+    .await;
+    let sealed = match joined {
+        Ok(result) => result,
+        Err(join_err) => Err(eyre::eyre!("seal task failed: {join_err}")),
+    };
+    match sealed {
+        Ok((outcome, summary)) => {
+            if let Some(summary) = summary {
+                crate::batch::send(&state.batch_summaries, summary);
+            }
+            match outcome {
+                crate::batch::SealOutcome::Sealed | crate::batch::SealOutcome::AlreadySealed => {
+                    Json(serde_json::json!({"batch": batch_id, "sealed": crate::batch::seal_count(&request.trace_ids)}))
+                        .into_response()
+                }
+                crate::batch::SealOutcome::UnknownBatch => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("unknown batch {batch_id}")})),
+                )
+                    .into_response(),
+                crate::batch::SealOutcome::Conflict => (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!("batch {batch_id} is already sealed with a different trace id set")
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => {
+            log::error!("batch {batch_id}: seal failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("{e:#}")})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// `POST /distill` - capture a URL as a scratch run and queue it: the

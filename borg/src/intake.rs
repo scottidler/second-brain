@@ -78,13 +78,14 @@ pub fn record_received_with_sidecar(
     sidecar_bytes: &[u8],
     trace_id: &str,
 ) -> Result<()> {
-    record_replay_with_sidecar(config, method, kind, preview, sidecar_bytes, trace_id, None)
+    record_replay_with_sidecar(config, method, kind, preview, sidecar_bytes, trace_id, None, None)
 }
 
-/// [`record_received_with_sidecar`] for a door that may be handed a replay's
-/// lineage (`/ingest`'s `replay-of`). The lineage lands in the INSERT that
-/// creates the receipts row, never in a later UPDATE, so an attempt cannot
-/// exist without it.
+/// [`record_received_with_sidecar`] for `/ingest`, which may be handed a
+/// replay's lineage (`replay-of`) and a bulk's batch id (`batch`). Both land
+/// in the INSERT that creates the receipts row, never in a later UPDATE, so an
+/// attempt cannot exist without them; the `batches` row is created first.
+#[allow(clippy::too_many_arguments)]
 pub fn record_replay_with_sidecar(
     config: &Config,
     method: IngestMethod,
@@ -93,9 +94,10 @@ pub fn record_replay_with_sidecar(
     sidecar_bytes: &[u8],
     trace_id: &str,
     lineage: Option<&receipts::Lineage>,
+    batch: Option<&str>,
 ) -> Result<()> {
     log::debug!(
-        "intake::record_replay_with_sidecar: trace={trace_id} method={method} kind={kind} sidecar_bytes={} lineage={lineage:?}",
+        "intake::record_replay_with_sidecar: trace={trace_id} method={method} kind={kind} sidecar_bytes={} lineage={lineage:?} batch={batch:?}",
         sidecar_bytes.len()
     );
     let conn = receipts::open_default().context("open receipts DB for capture")?;
@@ -109,6 +111,7 @@ pub fn record_replay_with_sidecar(
         sidecar_bytes,
         trace_id,
         lineage,
+        batch,
         false,
     )
 }
@@ -131,7 +134,18 @@ pub fn record_scratch_with_sidecar(
         root.display()
     );
     let conn = receipts::open_default().context("open receipts DB for scratch capture")?;
-    record_received_with_sidecar_to(&conn, root, method, kind, preview, sidecar_bytes, trace_id, None, true)
+    record_received_with_sidecar_to(
+        &conn,
+        root,
+        method,
+        kind,
+        preview,
+        sidecar_bytes,
+        trace_id,
+        None,
+        None,
+        true,
+    )
 }
 
 /// Conn/root-injectable core of [`record_replay_with_sidecar`]. Sidecar
@@ -147,11 +161,15 @@ fn record_received_with_sidecar_to(
     sidecar_bytes: &[u8],
     trace_id: &str,
     lineage: Option<&receipts::Lineage>,
+    batch: Option<&str>,
     scratch: bool,
 ) -> Result<()> {
     intake::write_raw_input(vault_root, trace_id, sidecar_bytes).context("Failed to write intake sidecar")?;
     if scratch {
         receipts::record_received_scratch(conn, trace_id, method, receipt_kind(kind), preview)
+    } else if let Some(batch_id) = batch {
+        crate::batch::create_if_absent(conn, batch_id)?;
+        receipts::record_received_in_batch(conn, trace_id, method, receipt_kind(kind), preview, lineage, batch_id)
     } else {
         receipts::record_received_with_lineage(conn, trace_id, method, receipt_kind(kind), preview, lineage)
     }

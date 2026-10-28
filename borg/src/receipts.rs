@@ -39,7 +39,7 @@ pub const POOL_SIZE: u32 = 8;
 
 /// Schema version recorded in the `schema_version` table. Bump when the
 /// schema changes.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA_SQL: &str = include_str!("receipts/schema.sql");
 
@@ -381,6 +381,20 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE receipts ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0", [])
             .context("add scratch column")?;
     }
+    // v9: `batch_id` ties a URL item to its `sb borg ingest` bulk; the
+    // `batches` table itself comes from the baseline schema batch above. The
+    // index is created here, not in schema.sql, because on an old DB the
+    // baseline batch runs before this column exists. Same placement rule as v4.
+    if !has_column(conn, "receipts", "batch_id")? {
+        log::debug!("receipts::run_migrations: adding batch_id column (v9)");
+        conn.execute("ALTER TABLE receipts ADD COLUMN batch_id TEXT DEFAULT NULL", [])
+            .context("add batch_id column")?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_receipts_batch_id ON receipts(batch_id)",
+        [],
+    )
+    .context("create batch_id index")?;
     // MAX() over an empty table returns one row whose value is NULL, which
     // rusqlite cannot decode straight into i64; bind through Option to read
     // it cleanly.
@@ -488,7 +502,33 @@ pub fn record_received_with_lineage(
     raw_input: &str,
     lineage: Option<&Lineage>,
 ) -> Result<()> {
-    record_received_row(conn, trace_id, method, kind, raw_input, lineage, false, false)
+    record_received_row(conn, trace_id, method, kind, raw_input, lineage, None, false, false)
+}
+
+/// Like [`record_received_with_lineage`] for a URL item of a `sb borg ingest`
+/// bulk: the one INSERT that creates the row carries `batch_id`, so a member
+/// never exists without its batch. The caller creates the `batches` row first
+/// (`crate::batch::open`).
+pub fn record_received_in_batch(
+    conn: &Connection,
+    trace_id: &str,
+    method: Method,
+    kind: ReceiptKind,
+    raw_input: &str,
+    lineage: Option<&Lineage>,
+    batch_id: &str,
+) -> Result<()> {
+    record_received_row(
+        conn,
+        trace_id,
+        method,
+        kind,
+        raw_input,
+        lineage,
+        Some(batch_id),
+        false,
+        false,
+    )
 }
 
 /// Like [`record_received`] for a `sb borg distill` run: the one INSERT that
@@ -501,7 +541,7 @@ pub fn record_received_scratch(
     kind: ReceiptKind,
     raw_input: &str,
 ) -> Result<()> {
-    record_received_row(conn, trace_id, method, kind, raw_input, None, false, true)
+    record_received_row(conn, trace_id, method, kind, raw_input, None, None, false, true)
 }
 
 fn record_received_flagged(
@@ -512,9 +552,20 @@ fn record_received_flagged(
     raw_input: &str,
     expected_existing: bool,
 ) -> Result<()> {
-    record_received_row(conn, trace_id, method, kind, raw_input, None, expected_existing, false)
+    record_received_row(
+        conn,
+        trace_id,
+        method,
+        kind,
+        raw_input,
+        None,
+        None,
+        expected_existing,
+        false,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_received_row(
     conn: &Connection,
     trace_id: &str,
@@ -522,16 +573,18 @@ fn record_received_row(
     kind: ReceiptKind,
     raw_input: &str,
     lineage: Option<&Lineage>,
+    batch_id: Option<&str>,
     expected_existing: bool,
     scratch: bool,
 ) -> Result<()> {
     log::debug!(
-        "receipts::record_received: trace={} method={} kind={} raw_len={} lineage={:?} expected_existing={} scratch={}",
+        "receipts::record_received: trace={} method={} kind={} raw_len={} lineage={:?} batch={:?} expected_existing={} scratch={}",
         trace_id,
         method,
         kind,
         raw_input.len(),
         lineage,
+        batch_id,
         expected_existing,
         scratch
     );
@@ -540,8 +593,8 @@ fn record_received_row(
     let rows = conn
         .execute(
             "INSERT OR IGNORE INTO receipts \
-             (trace_id, received_at, method, kind, raw_input, status, replay_of, replay_origin, scratch) \
-             VALUES (?, ?, ?, ?, ?, 'received', ?, ?, ?)",
+             (trace_id, received_at, method, kind, raw_input, status, replay_of, replay_origin, scratch, batch_id) \
+             VALUES (?, ?, ?, ?, ?, 'received', ?, ?, ?, ?)",
             params![
                 trace_id,
                 now_iso8601(),
@@ -550,7 +603,8 @@ fn record_received_row(
                 raw_input,
                 replay_of,
                 replay_origin,
-                scratch
+                scratch,
+                batch_id
             ],
         )
         .with_context(|| format!("Failed to record received trace_id={trace_id}"))?;

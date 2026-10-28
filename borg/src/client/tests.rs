@@ -172,6 +172,7 @@ fn ingest_body_carries_the_note() {
         false,
         types::IngestMethod::Cli,
         Some("  why I saved it  "),
+        None,
     );
     assert_eq!(body["note"], "why I saved it");
     assert_eq!(body["url"], "https://example.com");
@@ -180,16 +181,25 @@ fn ingest_body_carries_the_note() {
 #[test]
 fn ingest_body_omits_a_blank_or_absent_note() {
     for note in [None, Some(""), Some("   ")] {
-        let body = ingest_body("https://example.com", None, false, types::IngestMethod::Cli, note);
+        let body = ingest_body("https://example.com", None, false, types::IngestMethod::Cli, note, None);
+        assert!(body.get("batch").is_none(), "{body}");
         assert!(body.get("note").is_none(), "{body}");
     }
 }
 
 #[test]
 fn ingest_body_deserializes_as_an_ingest_request() {
-    let body = ingest_body("https://example.com", None, true, types::IngestMethod::Cli, Some("n"));
+    let body = ingest_body(
+        "https://example.com",
+        None,
+        true,
+        types::IngestMethod::Cli,
+        Some("n"),
+        Some("b-1"),
+    );
     let req: types::IngestRequest = serde_json::from_value(body).unwrap();
     assert_eq!(req.note.as_deref(), Some("n"));
+    assert_eq!(req.batch.as_deref(), Some("b-1"));
 }
 
 /// `--jobs 4` keeps four entries in flight: four silent-daemon items finish

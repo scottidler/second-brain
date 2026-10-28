@@ -407,6 +407,14 @@ impl Desktop {
             log::debug!("notify::Desktop::show: suppressed under test ({label})");
             return Ok(());
         }
+        self.popup(body).await.map_err(|e| {
+            log::warn!("notify: {label}: {e}");
+        })
+    }
+
+    /// One fresh popup under the 500 ms desktop timeout, with no disable gate:
+    /// [`Self::show`] and [`MessageSink::send`] (behind [`announce`]) gate it.
+    async fn popup(&self, body: &str) -> std::result::Result<(), String> {
         let appname = self.appname.clone();
         let timeout = self.timeout;
         let body = body.to_string();
@@ -421,15 +429,17 @@ impl Desktop {
         };
         match tokio::time::timeout(Duration::from_millis(DESKTOP_TIMEOUT_MS), future).await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => {
-                log::warn!("notify: failed to send {label}: {e}");
-                Err(())
-            }
-            Err(_) => {
-                log::warn!("notify: {label} timed out after {DESKTOP_TIMEOUT_MS}ms");
-                Err(())
-            }
+            Ok(Err(e)) => Err(format!("desktop popup failed: {e}")),
+            Err(_) => Err(format!("desktop popup timed out after {DESKTOP_TIMEOUT_MS}ms")),
         }
+    }
+}
+
+/// The desktop as a one-message sink: the bulk summary is one fresh popup.
+#[async_trait::async_trait]
+impl MessageSink for Desktop {
+    async fn send(&self, text: &str) -> std::result::Result<(), String> {
+        self.popup(text).await
     }
 }
 

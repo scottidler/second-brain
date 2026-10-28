@@ -28,6 +28,13 @@ pub(crate) enum Behavior {
     /// An ntfy subscription: chunked headers, an `open` event, then a
     /// `keepalive` event every `every`, for 30 s.
     NtfyKeepalives { every: Duration },
+    /// A bulk-capable `/ingest` daemon: `/health` lists `features`, `/ingest`
+    /// answers `Queued` with a fresh trace id, and `POST /batch/{id}/seal`
+    /// answers `seal_status` (e.g. `200 OK`, `409 Conflict`).
+    Bulk {
+        features: Vec<String>,
+        seal_status: &'static str,
+    },
     /// A daemon with the distill routes: `/health`, `POST /distill`,
     /// `GET /trace/{id}`, `GET /distill/{id}` and `GET /distill/{id}/file/..`.
     Distill(DistillStub),
@@ -112,6 +119,10 @@ pub(crate) async fn serve(behavior: Behavior) -> (u16, Arc<Mutex<Vec<String>>>) 
                         return;
                     }
                     Behavior::Distill(stub) => distill_reply(stub, &request),
+                    Behavior::Bulk { features, seal_status } => {
+                        let n = log.lock().expect("stub log").len();
+                        bulk_reply(features, seal_status, &request, n).into_bytes()
+                    }
                     Behavior::Unauthorized => {
                         "HTTP/1.1 401 Unauthorized\r\ncontent-length: 13\r\nconnection: close\r\n\r\nunauthorized\n"
                             .as_bytes()
@@ -142,6 +153,28 @@ async fn stream_ntfy_keepalives(sock: &mut tokio::net::TcpStream, every: Duratio
         n += 1;
         tokio::time::sleep(every).await;
     }
+}
+
+fn bulk_reply(features: &[String], seal_status: &str, request: &str, n: usize) -> String {
+    let first_line = request.lines().next().unwrap_or_default();
+    if first_line.starts_with("GET /health") {
+        return json_reply(
+            "200 OK",
+            &serde_json::json!({ "status": "ok", "service": "stub", "version": "0.0.0", "features": features })
+                .to_string(),
+        );
+    }
+    if first_line.starts_with("POST /batch/") {
+        return json_reply(seal_status, r#"{"batch":"stub"}"#);
+    }
+    json_reply(
+        "200 OK",
+        &serde_json::json!({
+            "status": "Queued", "note_path": null, "title": null, "tags": [],
+            "trace_id": format!("stub-trace-{n}"),
+        })
+        .to_string(),
+    )
 }
 
 fn json_reply(status: &str, body: &str) -> String {

@@ -5,6 +5,7 @@
 use eyre::{Context, Result};
 
 pub mod distill;
+pub mod seal;
 pub mod targets;
 
 use crate::config::{self, Config};
@@ -511,13 +512,15 @@ async fn reingest_one(
 
 /// The `/ingest` body `sb borg ingest` POSTs. `note` is the existing
 /// `IngestRequest.note`; it is omitted when absent or blank so a bare capture
-/// sends exactly what it always did.
+/// sends exactly what it always did. `batch` is set only for a bulk's URL
+/// items.
 pub(crate) fn ingest_body(
     url: &str,
     tags: Option<Vec<String>>,
     force: bool,
     method: types::IngestMethod,
     note: Option<&str>,
+    batch: Option<&str>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "url": url,
@@ -527,6 +530,9 @@ pub(crate) fn ingest_body(
     });
     if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
         body["note"] = serde_json::Value::String(note.to_string());
+    }
+    if let Some(batch) = batch {
+        body["batch"] = serde_json::Value::String(batch.to_string());
     }
     body
 }
@@ -539,10 +545,21 @@ pub async fn ingest(
     method: types::IngestMethod,
     note: Option<String>,
 ) -> Result<IngestOutcome> {
-    post_ingest(&config, &url, tags, force, method, note.as_deref(), &send_notification).await
+    post_ingest(
+        &config,
+        &url,
+        tags,
+        force,
+        method,
+        note.as_deref(),
+        None,
+        &send_notification,
+    )
+    .await
 }
 
 /// POST one URL to `/ingest`. `toast` is called when the POST itself fails.
+#[allow(clippy::too_many_arguments)]
 async fn post_ingest(
     config: &Config,
     url: &str,
@@ -550,12 +567,13 @@ async fn post_ingest(
     force: bool,
     method: types::IngestMethod,
     note: Option<&str>,
+    batch: Option<&str>,
     toast: &dyn Fn(&str, &str),
 ) -> Result<IngestOutcome> {
     let host = &config.hotkey.host;
     let port = config.hotkey.port;
 
-    let body = ingest_body(url, tags, force, method, note);
+    let body = ingest_body(url, tags, force, method, note, batch);
 
     // The client sends the write-route Bearer token when one is configured, so
     // enabling server.auth-token doesn't 401 this first-party CLI path.

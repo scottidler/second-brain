@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// needs `replay-of`, `sb borg distill` needs `distill`) checks `/health`
 /// first: an older daemon drops an unknown `/ingest` field silently, which
 /// would post a remediation with no lineage, and has no `/distill` route.
-pub const DAEMON_FEATURES: &[&str] = &[FEATURE_REPLAY_OF, FEATURE_DISTILL];
+/// `sb borg ingest` checks `bulk-batch` before a bulk.
+pub const DAEMON_FEATURES: &[&str] = &[FEATURE_REPLAY_OF, FEATURE_DISTILL, FEATURE_BULK_BATCH];
 
 /// The daemon records `replay-of` and `replay-origin` at intake.
 pub const FEATURE_REPLAY_OF: &str = "replay-of";
@@ -15,6 +16,10 @@ pub const FEATURE_REPLAY_OF: &str = "replay-of";
 /// `GET /distill/{trace}/file/{*path}`: a scratch run that writes nothing to
 /// the vault.
 pub const FEATURE_DISTILL: &str = "distill";
+
+/// The daemon records `IngestRequest.batch` at intake, serves
+/// `POST /batch/{id}/seal`, and sends one summary when a sealed batch drains.
+pub const FEATURE_BULK_BATCH: &str = "bulk-batch";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {

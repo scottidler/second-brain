@@ -24,12 +24,14 @@ fn test_ingest_request_roundtrip() {
         note: Some("why I saved this".to_string()),
         replay_of: None,
         replay_origin: None,
+        batch: Some("b-1".to_string()),
     };
     let json = serde_yaml::to_string(&req).expect("serialize");
     let deserialized: IngestRequest = serde_yaml::from_str(&json).expect("deserialize");
     assert_eq!(deserialized.url, "https://youtube.com/watch?v=abc");
     assert_eq!(deserialized.tags, Some(vec!["ai".to_string(), "rust".to_string()]));
     assert_eq!(deserialized.note.as_deref(), Some("why I saved this"));
+    assert_eq!(deserialized.batch.as_deref(), Some("b-1"));
 }
 
 #[test]
@@ -41,6 +43,7 @@ fn test_ingest_request_note_defaults_to_none_when_absent() {
     assert_eq!(req.note, None);
     assert_eq!(req.replay_of, None);
     assert_eq!(req.replay_origin, None);
+    assert_eq!(req.batch, None);
 }
 
 #[test]

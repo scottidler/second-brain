@@ -332,6 +332,12 @@ pub struct IngestRequest {
     /// `replay-of` (the door refuses it alone).
     #[serde(rename = "replay-origin", default, skip_serializing_if = "Option::is_none")]
     pub replay_origin: Option<ReplayOrigin>,
+    /// The `sb borg ingest` bulk this URL belongs to (a client uuid).
+    /// Additive + optional. Intake writes it onto the receipts row and opens
+    /// the `batches` row; the daemon sends one summary when the sealed batch
+    /// drains (`crate::batch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
 }
 
 /// Who sent a replay. The receipts `replay_origin` column stores

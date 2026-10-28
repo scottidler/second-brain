@@ -56,7 +56,11 @@ CREATE TABLE IF NOT EXISTS receipts (
   replay_origin   TEXT DEFAULT NULL,
   -- 1 for a `sb borg distill` run (no note is published); set in the INSERT
   -- that creates the row. Ingest-health readers filter `scratch = 0`.
-  scratch         INTEGER NOT NULL DEFAULT 0
+  scratch         INTEGER NOT NULL DEFAULT 0,
+  -- The `sb borg ingest` bulk this URL item belongs to (`batches.id`); NULL
+  -- for every unbatched ingest. Set in the INSERT that creates the row. Its
+  -- index is created in `run_migrations`, after the column exists on old DBs.
+  batch_id        TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_status ON receipts(status);
@@ -87,6 +91,19 @@ CREATE TABLE IF NOT EXISTS remediations (
   trigger_metrics_json TEXT,
   -- Set when the POST's outcome is unknown (timeout, unreadable answer).
   post_error           TEXT
+);
+
+-- One row per `sb borg ingest` bulk (docs/design/2026-10-27-multi-target-ingest.md).
+-- Created at intake by the first member (INSERT OR IGNORE); membership is
+-- every receipts row carrying the id. The client's seal records the trace ids
+-- it saw queued (a JSON array) so the daemon knows submission is over.
+-- `summarized_at` is the exactly-once claim on the one summary.
+CREATE TABLE IF NOT EXISTS batches (
+  id               TEXT NOT NULL PRIMARY KEY,
+  created_at       TEXT NOT NULL,
+  sealed_trace_ids TEXT NULL,
+  sealed_at        TEXT NULL,
+  summarized_at    TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (

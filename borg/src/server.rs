@@ -19,7 +19,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::{self, Config};
 use crate::notify::{Desktop, Telegram};
-use crate::{ledger, retention, routes, startup, watchdog};
+use crate::{batch, ledger, retention, routes, startup, watchdog};
 
 mod transports;
 
@@ -35,6 +35,9 @@ pub struct AppState {
     /// `None` when no token is configured. Holds the literal secret, not the
     /// reference. See `routes::require_auth`.
     pub auth_token: Option<String>,
+    /// Where a won bulk summary goes: the notifier task spawned in
+    /// `serve_init` holds the receiver and the sinks.
+    pub batch_summaries: crate::batch::SummarySender,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -60,6 +63,8 @@ pub fn build_router(state: AppState) -> Router {
         // Ingest-queue snapshot (batch progress, wedged items). Auth-gated:
         // it carries source URLs and failure reasons.
         .route("/queue", get(routes::queue))
+        // `sb borg ingest` bulk: the client's seal. Auth-gated like `/trace`.
+        .route("/batch/{batch_id}/seal", post(routes::seal_batch))
         // YouTube channel search (one yt-dlp call, 8 s bound). Auth-gated:
         // it spends the daemon host's network and yt-dlp on the caller's behalf.
         .route("/channels/search", get(routes::channel_search))
@@ -252,6 +257,18 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         }
     }
 
+    // Bulk-summary notifier: the one task holding the sinks a drained batch's
+    // summary goes to. The router and the watchdog hold the senders.
+    let (batch_summaries, summary_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let desktop = desktop.clone();
+        let telegram = telegram.clone();
+        tasks.spawn(async move {
+            batch::notifier::run(summary_rx, desktop, telegram).await;
+            Err::<(), eyre::Report>(eyre::eyre!("batch notifier exited unexpectedly"))
+        });
+    }
+
     // HTTP server (always runs)
     let state = AppState {
         config: config.clone(),
@@ -259,6 +276,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
         desktop: desktop.clone(),
         version: version.clone(),
         auth_token,
+        batch_summaries: batch_summaries.clone(),
     };
     let app = build_router(state);
     let listener = TcpListener::bind(addr).await.context("Failed to bind to address")?;
@@ -275,7 +293,7 @@ pub async fn serve_init(config: Config, version: String) -> Result<(ServerStartu
     {
         let cfg = config.clone();
         tasks.spawn(async move {
-            watchdog::run(cfg).await;
+            watchdog::run(cfg, batch_summaries).await;
             Err::<(), eyre::Report>(eyre::eyre!("watchdog exited unexpectedly"))
         });
     }

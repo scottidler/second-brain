@@ -521,3 +521,25 @@ fn target_lines_render_queued_ingested_and_failed() {
     );
     assert_eq!(line(Err("no daemon".into())), "t -> failed: no daemon");
 }
+
+#[test]
+fn batch_lines_render_sealed_seal_failed_and_nothing_queued() {
+    let line = |seal| {
+        render_batch_line(&borg::BatchReport {
+            id: "b1".to_string(),
+            seal,
+        })
+    };
+    assert_eq!(
+        line(borg::SealStatus::Sealed { items: 6 }),
+        "batch b1: sealed 6 URL items; one summary when they drain"
+    );
+    assert_eq!(
+        line(borg::SealStatus::Failed("HTTP 409".into())),
+        "batch b1: seal failed (HTTP 409); the watchdog will summarize as \"seal missing\""
+    );
+    assert_eq!(
+        line(borg::SealStatus::NothingQueued),
+        "batch b1: no URL item was queued; nothing to seal"
+    );
+}

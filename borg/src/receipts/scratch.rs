@@ -62,7 +62,7 @@ fn v8_migration_keeps_every_v7_row_and_marks_none_scratch() {
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .expect("max version");
     assert_eq!(v, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 8);
+    assert_eq!(SCHEMA_VERSION, 9);
     drop(conn);
     let again = open_at(&path).expect("second open is idempotent");
     assert_eq!(row_count(&again).expect("count"), 2);

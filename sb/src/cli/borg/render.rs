@@ -520,6 +520,20 @@ pub(super) fn render_target_line(report: &borg::TargetReport) -> String {
     }
 }
 
+/// A bulk's final line: the seal, or why there is none.
+pub(super) fn render_batch_line(batch: &borg::BatchReport) -> String {
+    let id = &batch.id;
+    match &batch.seal {
+        borg::SealStatus::Sealed { items } => {
+            format!("batch {id}: sealed {items} URL items; one summary when they drain")
+        }
+        borg::SealStatus::Failed(reason) => {
+            format!("batch {id}: seal failed ({reason}); the watchdog will summarize as \"seal missing\"")
+        }
+        borg::SealStatus::NothingQueued => format!("batch {id}: no URL item was queued; nothing to seal"),
+    }
+}
+
 /// Format and emit a borg `IngestOutcome`. Failed outcomes write to stderr
 /// and exit with code 1 to preserve the prior shell contract.
 pub(super) fn print_ingest_outcome(outcome: &borg::IngestOutcome) -> Result<()> {

@@ -77,7 +77,13 @@ impl BorgCli {
                         false => println!("{}", render_target_line(report)),
                     },
                 )
-                .await;
+                .await?;
+                if let Some(batch) = &run.batch {
+                    match &batch.seal {
+                        borg::SealStatus::Failed(_) => eprintln!("{}", render_batch_line(batch)),
+                        _ => println!("{}", render_batch_line(batch)),
+                    }
+                }
                 match run.any_failed() {
                     true => Err(crate::error::ExitWith(1).into()),
                     false => Ok(()),

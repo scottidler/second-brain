@@ -17,6 +17,7 @@ fn router(auth_token: Option<&str>) -> Router {
         desktop: None,
         version: "0.0.0-test".to_string(),
         auth_token: auth_token.map(str::to_string),
+        batch_summaries: tokio::sync::mpsc::unbounded_channel().0,
     })
 }
 

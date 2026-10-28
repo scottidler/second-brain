@@ -14,6 +14,7 @@ pub mod assets;
 pub mod audit;
 pub mod backfill;
 pub mod backoff;
+pub mod batch;
 pub mod blocklist;
 pub mod byline;
 pub mod channels;
@@ -80,7 +81,9 @@ use config::Config;
 // re-exported so the public API (`borg::daemon`, `borg::DaemonOutcome`) is
 // unchanged for sb's CLI dispatch.
 pub use client::distill::{DistillRun, distill};
-pub use client::targets::{IngestRun, Target, TargetReport, UsageError, classify_targets, ingest_targets};
+pub use client::targets::{
+    BatchReport, IngestRun, SealStatus, Target, TargetReport, UsageError, classify_targets, ingest_targets,
+};
 pub use client::{
     IngestOutcome, ReingestCandidate, ReingestEntry, ReingestEntryStatus, ReingestEvent, ReingestReport, ingest,
     ingest_file, note, reingest, resolve_ingest_url, resolve_note_text, send_notification,

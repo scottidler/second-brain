@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use eyre::Result;
 
-use super::{IngestOutcome, post_ingest};
+use super::{IngestOutcome, post_ingest, seal};
 use crate::config::Config;
 use crate::types;
 
@@ -102,6 +102,24 @@ impl TargetReport {
     }
 }
 
+/// What happened to a bulk's seal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealStatus {
+    /// The daemon accepted the seal of this many queued URL items.
+    Sealed { items: usize },
+    /// The seal POST failed; the watchdog will summarize as "seal missing".
+    Failed(String),
+    /// No URL item came back `Queued`, so there was nothing to seal.
+    NothingQueued,
+}
+
+/// A bulk's batch: its id and its seal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchReport {
+    pub id: String,
+    pub seal: SealStatus,
+}
+
 /// The whole run, in execution order (URL targets, then file targets).
 #[derive(Debug, Default)]
 pub struct IngestRun {
@@ -110,14 +128,23 @@ pub struct IngestRun {
     pub submits: usize,
     /// URL targets whose submit failed.
     pub failed_submits: usize,
-    /// This run is a bulk per `is_bulk`. Nothing consumes it until the batch
-    /// is wired in.
+    /// This run is a bulk per `is_bulk`.
     pub bulk: bool,
+    /// Set for a bulk: the batch its URL items carried and how its seal went.
+    pub batch: Option<BatchReport>,
 }
 
 impl IngestRun {
+    /// Any target failed, or the bulk's seal failed: `sb` exits 1.
     pub fn any_failed(&self) -> bool {
         self.reports.iter().any(TargetReport::failed)
+            || matches!(
+                self.batch,
+                Some(BatchReport {
+                    seal: SealStatus::Failed(_),
+                    ..
+                })
+            )
     }
 }
 
@@ -131,10 +158,16 @@ pub fn is_bulk(url_count: usize, total_targets: usize, threshold: u32, clipboard
 /// Run classified targets: every URL first (so a slow file never delays the
 /// daemon's queue), then each file through `ingest_file`.
 ///
+/// A bulk (`is_bulk`) first refuses a daemon without `bulk-batch` (an `Err`,
+/// nothing submitted), sends a fresh batch id on every URL POST, and seals the
+/// batch with the queued trace ids before any file target runs. A failed seal
+/// is reported in `IngestRun.batch`; file targets still run.
+///
 /// `toast` is the desktop-toast seam. A single target keeps the per-failure
 /// toast (hotkey/clipboard shape); a multi-target run suppresses it per target
 /// and sends at most one `<k> of <n> submits failed` toast. `on_report` fires
 /// as each target finishes so `sb` can print live.
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_targets<F, Fut>(
     config: &Config,
     targets: Vec<Target>,
@@ -144,7 +177,7 @@ pub async fn ingest_targets<F, Fut>(
     toast: impl Fn(&str, &str),
     mut ingest_file: F,
     mut on_report: impl FnMut(&TargetReport),
-) -> IngestRun
+) -> Result<IngestRun>
 where
     F: FnMut(PathBuf) -> Fut,
     Fut: Future<Output = Result<IngestOutcome>>,
@@ -160,7 +193,20 @@ where
         bulk: is_bulk(urls.len(), multi_total, config.ingest.bulk_threshold, false),
         ..IngestRun::default()
     };
+    let batch_id = if run.bulk {
+        seal::require_bulk_feature(config).await?;
+        Some(uuid::Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+    log::debug!(
+        "ingest_targets: urls={} files={} bulk={} batch={batch_id:?}",
+        urls.len(),
+        files.len(),
+        run.bulk
+    );
 
+    let mut queued = Vec::new();
     for target in urls {
         let Target::Url(url) = target else { continue };
         let result = post_ingest(
@@ -170,11 +216,15 @@ where
             force,
             types::IngestMethod::Cli,
             note.as_deref(),
+            batch_id.as_deref(),
             per_target,
         )
         .await
         .map_err(|e| format!("{e:#}"));
         run.submits += 1;
+        if let Ok(IngestOutcome::Queued { trace_id }) = &result {
+            queued.push(trace_id.clone());
+        }
         let report = TargetReport {
             target: url,
             is_url: true,
@@ -185,6 +235,21 @@ where
         }
         on_report(&report);
         run.reports.push(report);
+    }
+
+    if let Some(id) = batch_id {
+        let seal = if queued.is_empty() {
+            SealStatus::NothingQueued
+        } else {
+            match seal::seal_batch(config, &id, &queued).await {
+                Ok(()) => SealStatus::Sealed { items: queued.len() },
+                Err(e) => {
+                    log::warn!("ingest_targets: seal of batch {id} failed: {e:#}");
+                    SealStatus::Failed(format!("{e:#}"))
+                }
+            }
+        };
+        run.batch = Some(BatchReport { id, seal });
     }
 
     for target in files {
@@ -205,7 +270,7 @@ where
             "see the terminal for each target's reason",
         );
     }
-    run
+    Ok(run)
 }
 
 #[cfg(test)]

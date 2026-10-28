@@ -24,7 +24,7 @@ fn run_once_conn_promotes_stale_received_to_crashed() {
     receipts::record_received(&conn, "old", Method::Http, ReceiptKind::Url, "u").unwrap();
     backdate(&conn, "old");
 
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 1);
     assert_eq!(status_of(&conn, "old"), "failed");
     let r = receipts::get(&conn, "old").unwrap().unwrap();
@@ -45,7 +45,7 @@ fn run_once_conn_skips_freshly_leased_traces() {
         .to_string();
     receipts::write_lease(&conn, "busy", 4242, &until).unwrap();
 
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 0);
     assert_eq!(status_of(&conn, "busy"), "received");
 }
@@ -55,7 +55,7 @@ fn run_once_conn_skips_freshly_leased_traces() {
 fn run_once_conn_skips_fresh_rows() {
     let conn = receipts::open_memory().unwrap();
     receipts::record_received(&conn, "fresh", Method::Http, ReceiptKind::Url, "u").unwrap();
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 0);
     assert_eq!(status_of(&conn, "fresh"), "received");
 }
@@ -69,7 +69,7 @@ fn run_once_conn_skips_terminal_rows() {
     receipts::mark_succeeded(&conn, "done", "inbox/n.md", false).unwrap();
     backdate(&conn, "done");
 
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 0);
     assert_eq!(status_of(&conn, "done"), "succeeded");
 }
@@ -90,7 +90,7 @@ fn run_once_conn_does_not_reap_a_freshly_leased_trace() {
     // A live owner (stand-in for a separate harvest process) holds the lease.
     let guard = TraceLeaseGuard::acquire_with_conn(receipts::open_at(&path).unwrap(), "live", 1800).unwrap();
 
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 0, "a freshly-leased trace must not be reaped");
     assert_eq!(status_of(&conn, "live"), "received");
 
@@ -111,14 +111,57 @@ fn run_once_conn_reaps_a_trace_whose_guard_dropped_without_cancel() {
     {
         let _guard = TraceLeaseGuard::acquire_with_conn(receipts::open_at(&path).unwrap(), "dead", 1800).unwrap();
         // Leased -> the concurrent scan leaves it alone.
-        assert_eq!(run_once_conn(&conn, 60).unwrap(), 0);
+        assert_eq!(run_once_conn(&conn, 60).unwrap().promoted, 0);
         assert_eq!(status_of(&conn, "dead"), "received");
         // guard dropped here WITHOUT cancel() -> lease cleared
     }
 
-    let promoted = run_once_conn(&conn, 60).unwrap();
+    let promoted = run_once_conn(&conn, 60).unwrap().promoted;
     assert_eq!(promoted, 1, "an orphan whose lease was cleared on Drop IS reaped");
     assert_eq!(status_of(&conn, "dead"), "failed");
     let r = receipts::get(&conn, "dead").unwrap().unwrap();
     assert_eq!(r.failure_stage.as_deref(), Some("crashed"));
+}
+
+fn batch_member(conn: &Connection, batch_id: &str, trace_id: &str) {
+    crate::batch::create_if_absent(conn, batch_id).unwrap();
+    receipts::record_received_in_batch(conn, trace_id, Method::Cli, ReceiptKind::Url, "u", None, batch_id).unwrap();
+}
+
+/// Crashing the last in-flight member of a sealed batch drains it: the pass
+/// carries the one summary, and the next pass carries none.
+#[test]
+fn a_crash_promotion_that_drains_a_sealed_batch_returns_its_summary() {
+    let conn = receipts::open_memory().unwrap();
+    batch_member(&conn, "b1", "done");
+    batch_member(&conn, "b1", "lost");
+    receipts::mark_succeeded(&conn, "done", "n.md", false).unwrap();
+    crate::batch::seal(&conn, "b1", &["done".to_string(), "lost".to_string()]).unwrap();
+    backdate(&conn, "lost");
+
+    let pass = run_once_conn(&conn, 60).unwrap();
+    assert_eq!(pass.promoted, 1);
+    let [summary] = &pass.summaries[..] else {
+        panic!("{:?}", pass.summaries);
+    };
+    assert_eq!(
+        summary.text(),
+        "borg bulk b1: 1 succeeded (0 degraded), 1 failed (1 crashed) of 2 URL items"
+    );
+    assert!(run_once_conn(&conn, 60).unwrap().summaries.is_empty());
+}
+
+/// An unsealed batch whose members are all terminal and idle past the
+/// deadline is summarized by the backstop as "seal missing", once.
+#[test]
+fn the_backstop_tick_summarizes_a_seal_missing_batch_once() {
+    let conn = receipts::open_memory().unwrap();
+    batch_member(&conn, "b1", "a");
+    receipts::mark_succeeded(&conn, "a", "n.md", false).unwrap();
+    backdate(&conn, "a");
+    let pass = run_once_conn(&conn, 60).unwrap();
+    assert_eq!(pass.promoted, 0);
+    assert_eq!(pass.summaries.len(), 1);
+    assert!(pass.summaries[0].seal_missing);
+    assert!(run_once_conn(&conn, 60).unwrap().summaries.is_empty());
 }

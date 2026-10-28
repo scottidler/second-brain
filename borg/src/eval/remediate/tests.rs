@@ -629,6 +629,7 @@ async fn an_applied_remediation_lands_lineage_on_the_daemons_receipts_row() {
             desktop: None,
             version: "0.0.0-test".to_string(),
             auth_token: None,
+            batch_summaries: tokio::sync::mpsc::unbounded_channel().0,
         });
 
         let stages = data_home.path().join("stages");

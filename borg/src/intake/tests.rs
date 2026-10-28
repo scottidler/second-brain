@@ -20,6 +20,7 @@ fn capture_writes_sidecar_and_received_row() {
         url.as_bytes(),
         "tr-cap",
         None,
+        None,
         false,
     )
     .unwrap();
@@ -56,6 +57,7 @@ fn capture_writes_the_replay_lineage_onto_the_received_row() {
         url.as_bytes(),
         "tr-remediation",
         Some(&lineage),
+        None,
         false,
     )
     .unwrap();
@@ -63,6 +65,35 @@ fn capture_writes_the_replay_lineage_onto_the_received_row() {
     assert_eq!(r.status, "received");
     assert_eq!(r.replay_of.as_deref(), Some("tr-original"));
     assert_eq!(r.replay_origin.as_deref(), Some("auto-remediation"));
+}
+
+/// A bulk member's capture creates the `batches` row and stamps the batch id
+/// on its receipts row in the INSERT that creates it; a second member of the
+/// same batch reuses the row.
+#[test]
+fn capture_writes_the_batch_id_and_creates_the_batch_row_once() {
+    let conn = receipts::open_memory().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    for trace in ["tr-b1", "tr-b2"] {
+        record_received_with_sidecar_to(
+            &conn,
+            tmp.path(),
+            IngestMethod::Cli,
+            IntakeKind::Url,
+            "https://example.com/a",
+            b"https://example.com/a",
+            trace,
+            None,
+            Some("bulk-1"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(crate::batch::batch_of(&conn, trace).unwrap().as_deref(), Some("bulk-1"));
+    }
+    let batches: i64 = conn
+        .query_row("SELECT COUNT(*) FROM batches WHERE id='bulk-1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(batches, 1);
 }
 
 /// A harvest session candidate maps to the honest `ReceiptKind::Session`
@@ -83,6 +114,7 @@ fn capture_maps_session_kind_to_receipt_kind_session() {
         body,
         body.as_bytes(),
         "tr-session",
+        None,
         None,
         false,
     )
@@ -110,6 +142,7 @@ fn capture_propagates_sidecar_write_failure() {
         "https://x.com",
         b"https://x.com",
         "tr-fail",
+        None,
         None,
         false,
     );
