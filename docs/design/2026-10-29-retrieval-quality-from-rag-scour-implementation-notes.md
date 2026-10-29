@@ -22,3 +22,29 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
 - The 17 masked notes: the live index serves 163 chunk vectors whose transcript the system can no longer produce (12 traces have no `sources/` or `stages/` dir, 5 have a `distilled.yml` with no transcript). Phase 3's recipe drain hits the same path: the stale clause selects them, the read finds no source, the sentinel is written, and the old recipe-1 rows stay forever, which breaks the acceptance criterion "exactly one recipe per kind". Should a no-source examination delete that note's existing rows of the kind (my recommendation: yes, in Phase 3, with a test), or should those rows be kept as the only surviving trace of the transcript?
 - Should `--drop-kind` also clear the kind's `embedding_examined` sentinels? Today it leaves a state where a backfill silently skips notes. Phase 3 makes `--drop-kind` a rollback-only lever, but the sentinel mask still bites any operator who uses it.
 - Criterion 1 needs a DB-path log line to be checkable as worded. Add it in the first code phase that touches `cortex::embed` (Phase 3), or reword the criterion to accept the `/proc` fd proof?
+
+## Phase 1: Operator query set
+
+### Design decisions
+- The curated set is `~/repos/scottidler/obsidian/system/eval/oracle-queries.yml`, written from the Phase-0 `mined-queries.yml` (331 queries) with the `mined-<fnv>` ids untouched, so every cached judgment for a kept query carries over. Same schema as `config/eval/queries.yml`. Nothing mined entered the second-brain repo; the vault git repo was not touched (Syncthing carries it).
+- Curation, 331 -> 249: 53 dropped as one-word (fewer than 2 whitespace tokens), 29 dropped as session-specific or personal (Slack thread ids, `CLAUDE_PLUGIN_ROOT`/`CLAUDE_SKILL_DIR` tool internals, orchestration-session artifacts, contact-list/phone-number/youth-football roster lookups, internal host/network and personal-project queries), 0 dropped as duplicates (the miner already dedupes case- and whitespace-insensitively).
+- The 20 `calibration: {}` queries are evenly spaced across the curated file (index `floor(i * 249 / 20)`), so the panel spans topics instead of clustering on the first themes mined.
+- `oracle/AGENTS.md` now names the vault path as the operator set (path only, no counts or line numbers).
+
+### Deviations
+- `sb oracle eval --emit-calibration` judges every query in the set (all 249), not just the 20 calibration queries, because the sheet rows are emitted inside the per-query judging loop and the early return comes after it. So the first emit is the full LLM judging bill; it fills the judgment cache, which makes the criterion-1 full run mostly cache hits. Same effect as the doc, a different cost profile than the doc implies.
+- The emitted sheet carries the LLM judge score in each row (`judge`) next to the empty `human` slot. Scott sees the judge's score while labelling, which weakens the "blind 0-3" property the committed 4 calibration queries had. Not changed here (code); see open questions.
+
+### Tradeoffs
+- Dropped by explicit substring list rather than a classifier: the list is auditable and the drop counts are reproducible, at the cost of a hand-picked list that fits this mined set only.
+- Kept near-duplicate rephrasings (e.g. several "Karpathy autoresearch ..." variants): they are distinct queries with distinct ids and the eval wants ranking behavior on paraphrase; deduping them would also invalidate cached ids.
+
+### Open questions
+- Should `--emit-calibration` omit the judge score from the sheet so labelling is blind (the committed set's labels were blind)? That is a code change in `oracle/src/eval.rs` and belongs to Phase 2, where the calibration panel is re-run on the Phase-1 labels.
+- `cortex::daemon::tests::test_duration_until_weekly_all_days` is wall-clock dependent: at 12:10 PDT on Thu 2026-10-29 it failed `otto ci` (the next `Thu 12:00` is 7 days + 1 hour minus the elapsed 10 minutes because DST ends 2026-11-01, which exceeds the test's 7-day bound). It passed on the rerun an hour later, and `otto ci` was green at commit. Untouched here; should the test be made clock-independent?
+
+### Evidence (Phase 1, run on ripr 2026-10-29)
+- Criterion 1: `sb oracle eval --queries ~/repos/scottidler/obsidian/system/eval/oracle-queries.yml` exit 0, `relevance eval @ K=10  (249 queries ...)`. Baseline on the operator set: vector nDCG@10 0.7633, hybrid 0.7798, configured 0.7634, graph-hybrid 0.5534, bm25 0.2731; `judgments: 4317 total, 0 from truncated bodies, 1 judge errors (pairs skipped)`. That 1 judge error is exactly the silent-low-score class the design names in problem 6.
+- Calibration sheet: `~/repos/scottidler/obsidian/system/eval/oracle-calibration-sheet.yml`, 326 rows over 20 queries, every `human: null`. Criterion 2 (trust gate on > 67 labelled pairs) is PENDING-SCOTT: 326 > 67, so the pair count is sufficient once labelled.
+- The first `--emit-calibration` run took about 80 minutes of fabric judging (the full pool of all 249 queries); the follow-up full run had only cache hits.
+- There is no copy-back subcommand: the sheet's `human` values must be transcribed into each calibration query's `calibration:` map (note-path -> 0..3) in `oracle-queries.yml`. The gate is then read from the `calibration:` line of `sb oracle eval --queries <set>`.
