@@ -30,24 +30,49 @@ pub fn flatten_wikilinks(s: &str) -> String {
     out
 }
 
-/// Prepare the note text the judge sees: prefer the bounded distilled `summary`;
-/// fall back to the body only when there is no summary. Flatten wikilinks and
-/// truncate to `max_chars`. Returns `(text, truncated)` where `truncated` is true
-/// only when the *body fallback* had to be cut (a low-confidence judgment, since
-/// the judge may not have seen a deep match).
-pub fn prepare_note_text(summary: &str, body: &str, max_chars: usize) -> (String, bool) {
+/// Prepare the note text the judge sees: the distilled `summary`, then a blank
+/// line, then the note's `claims` one per `- ` line, capped at `max_chars` with
+/// the summary first. Claims are cut at a claim boundary: a claim that does not
+/// fit whole is dropped along with every claim after it. A summary longer than
+/// the budget is cut at `max_chars` and carries no claims. The body is the
+/// fallback only when there is no summary. Wikilinks are flattened throughout.
+///
+/// The text is a function of the note alone, never of the target or arm that
+/// surfaced it, so one note scores the same in every arm of a paired eval.
+/// Returns `(text, truncated)` where `truncated` is true only when the *body
+/// fallback* had to be cut (a low-confidence judgment, since the judge may not
+/// have seen a deep match); a summary is bounded and dropped trailing claims
+/// leave the summary intact, so neither counts as a truncation hazard.
+pub fn prepare_note_text(summary: &str, claims: &[String], body: &str, max_chars: usize) -> (String, bool) {
     if !summary.trim().is_empty() {
-        // Summaries are bounded; flatten and (defensively) cap, but a summary
-        // does not count as a truncation hazard.
         let flat = flatten_wikilinks(summary);
-        let capped: String = flat.chars().take(max_chars).collect();
-        return (capped, false);
+        let mut text: String = flat.chars().take(max_chars).collect();
+        let mut used = text.chars().count();
+        let mut separator = CLAIMS_SEPARATOR;
+        for claim in claims
+            .iter()
+            .map(|c| flatten_wikilinks(c.trim()))
+            .filter(|c| !c.is_empty())
+        {
+            let line = format!("{separator}- {claim}");
+            let len = line.chars().count();
+            if used + len > max_chars {
+                break;
+            }
+            text.push_str(&line);
+            used += len;
+            separator = "\n";
+        }
+        return (text, false);
     }
     let flat = flatten_wikilinks(body);
     let truncated = flat.chars().count() > max_chars;
     let capped: String = flat.chars().take(max_chars).collect();
     (capped, truncated)
 }
+
+/// Between the summary and the first claim.
+const CLAIMS_SEPARATOR: &str = "\n\n";
 
 /// Cohen's kappa over graded `(human, judge)` pairs on the `0..=MAX_SCORE`
 /// scale. Returns 0.0 for fewer than 2 pairs or when agreement equals chance.

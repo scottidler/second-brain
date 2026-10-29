@@ -258,7 +258,7 @@ pub fn retrieve(server: &OracleMcpServer, queries: &Queries, k: u32) -> Result<V
             else {
                 continue;
             };
-            let (note_text, _) = calc::prepare_note_text("", &note.body, NOTE_TEXT_MAX_CHARS);
+            let (note_text, _) = calc::prepare_note_text("", &[], &note.body, NOTE_TEXT_MAX_CHARS);
             hits.push(Hit {
                 note_hash: cache::stable_hash(&format!("{}\n{}", note.title, note_text)),
                 path: note.path,

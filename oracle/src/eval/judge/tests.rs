@@ -45,3 +45,22 @@ fn parse_score_errors_without_integer() {
     let err = parse_score("no number here").expect_err("must error");
     assert!(format!("{err}").contains("no integer score"));
 }
+
+#[test]
+fn judge_input_budget_leaves_the_full_note_budget_after_framing() {
+    let note = "n".repeat(8_000);
+    let input = format!("# QUERY\nq\n\n# NOTE TITLE\nt\n\n# NOTE\n{note}\n");
+    let budget = judge_input_budget(&input, &note, 8_000);
+    assert_eq!(budget, input.chars().count(), "a note at the cap reaches fabric whole");
+    // A note over the cap is still cut by fabric.
+    let long = "n".repeat(9_000);
+    let input = format!("# QUERY\nq\n\n# NOTE\n{long}\n");
+    assert!(judge_input_budget(&input, &long, 8_000) < input.chars().count());
+}
+
+#[test]
+fn mock_judge_failing_pair_errors() {
+    let j = MockJudge::new(2).failing("q", "T");
+    assert!(j.judge("q", "T", "x").is_err());
+    assert_eq!(j.judge("q", "U", "x").unwrap(), 2);
+}

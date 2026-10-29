@@ -103,7 +103,7 @@ fn evaluate_produces_all_mode_rows_and_graph_lift() {
     let (queries, runs) = fixture();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let opts = EvalOpts::default();
-    let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &opts).expect("evaluate"));
+    let report = unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &opts).expect("evaluate"));
 
     assert_eq!(report.total_queries, 2);
     // five standard modes + ablation + the live configured pipeline
@@ -136,7 +136,8 @@ fn evaluate_produces_all_mode_rows_and_graph_lift() {
 fn evaluate_reports_fact_ablation_coverage() {
     let (queries, runs) = fixture();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
-    let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
+    let report =
+        unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
     // only q1's graph-hybrid differs from its ablation -> 1 of 2 queries touched.
     assert_eq!(report.ablation.queries_touching_fact, 1);
     assert_eq!(report.ablation.total_queries, 2);
@@ -149,7 +150,8 @@ fn evaluate_reports_fact_ablation_coverage() {
 fn evaluate_computes_calibration_panel() {
     let (queries, runs) = fixture();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
-    let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
+    let report =
+        unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
     let c = report.calibration.expect("calibration present (q2 has a label)");
     assert_eq!(c.pairs, 1); // one labeled pair: human 3 vs judge 3
     assert!((c.exact_pct - 1.0).abs() < 1e-9);
@@ -162,11 +164,11 @@ fn evaluate_caches_judgments_across_runs() {
     let cache = cache::JudgmentCache::open_memory().expect("cache");
     let opts = EvalOpts::default();
     // First run populates the cache.
-    let _ = evaluate(&queries, &runs, &cache, &judge(), &opts).expect("run1");
+    let _ = evaluate(&queries, &runs, None, &cache, &judge(), &opts).expect("run1");
     // Second run with a judge that would return different scores; cache should win
     // (so the report matches the first run's judgments, not the new judge).
     let other = MockJudge::new(0); // everything irrelevant if consulted
-    let report = unwrap_report(evaluate(&queries, &runs, &cache, &other, &opts).expect("run2"));
+    let report = unwrap_report(evaluate(&queries, &runs, None, &cache, &other, &opts).expect("run2"));
     // graph lift still present because cached judgments (D=2 etc.) were reused.
     assert!(report.lift_ndcg > 0.0, "cache should preserve first-run judgments");
 }
@@ -180,7 +182,7 @@ fn emit_calibration_writes_sheet_and_short_circuits() {
         emit_calibration: Some(tmp.path().to_path_buf()),
         ..EvalOpts::default()
     };
-    match evaluate(&queries, &runs, &cache, &judge(), &opts).expect("evaluate") {
+    match evaluate(&queries, &runs, None, &cache, &judge(), &opts).expect("evaluate") {
         EvalOutcome::CalibrationSheet(p) => assert_eq!(p, tmp.path()),
         EvalOutcome::Report(_) => panic!("expected a calibration sheet"),
     }
@@ -226,19 +228,33 @@ impl RelevanceJudge for BrokenJudge {
     }
 }
 
+/// A judge failure fails the run instead of being skipped (which scored the
+/// note 0 on every list that held it). Inverts the old
+/// `judge_errors_are_counted_and_reported`.
 #[test]
-fn judge_errors_are_counted_and_reported() {
+fn judge_errors_fail_the_run() {
     let (queries, runs) = fixture();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
-    let outcome = evaluate(&queries, &runs, &cache, &BrokenJudge, &EvalOpts::default()).expect("evaluate");
-    let report = unwrap_report(outcome);
-    assert_eq!(report.total_judgments, 0);
-    assert!(report.judge_errors > 0);
-    assert!(
-        report
-            .render()
-            .contains(&format!("{} judge errors", report.judge_errors))
-    );
+    let err = match evaluate(&queries, &runs, None, &cache, &BrokenJudge, &EvalOpts::default()) {
+        Ok(_) => panic!("a judge failure must fail the run"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("6 pooled note(s) have no judgment"), "{err}");
+    assert!(err.contains("no key"), "the judge's error is named: {err}");
+}
+
+/// A pooled note with no judge text (in neither arm's index) is a missing
+/// judgment too.
+#[test]
+fn pooled_note_without_judge_text_fails_the_run() {
+    let (queries, mut runs) = fixture();
+    runs[0].texts.remove("notes/d.md");
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let err = match evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()) {
+        Ok(_) => panic!("an unjudgeable pooled note must fail the run"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("q1 / notes/d.md: no judge text"), "{err}");
 }
 
 /// Each target's latency comes from that target's own samples, and only the
@@ -247,7 +263,8 @@ fn judge_errors_are_counted_and_reported() {
 fn evaluate_reports_latency_and_rerank_per_target() {
     let (queries, runs) = fixture();
     let cache = cache::JudgmentCache::open_memory().expect("cache");
-    let report = unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
+    let report =
+        unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
     let row = |label: &str| report.modes.iter().find(|m| m.mode == label).expect(label);
 
     let vector = row("vector");
@@ -280,9 +297,196 @@ fn evaluate_flags_a_latched_off_rerank() {
         run.rerank = Some(RerankRun::Disabled);
     }
     let cache = cache::JudgmentCache::open_memory().expect("cache");
-    let out =
-        unwrap_report(evaluate(&queries, &runs, &cache, &judge(), &EvalOpts::default()).expect("evaluate")).render();
+    let out = unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()).expect("evaluate"))
+        .render();
     assert!(out.contains("NOT RUN 2/2"), "{out}");
     assert!(out.contains("NOT a rerank-on result"), "{out}");
     assert!(!out.contains("ran 2/2"), "{out}");
+}
+
+// ---- paired A/B ----------------------------------------------------------
+
+fn paired_opts() -> EvalOpts {
+    EvalOpts {
+        compare_config: Some(PathBuf::from("/arm/b.yml")),
+        ..EvalOpts::default()
+    }
+}
+
+fn unwrap_paired(outcome: EvalOutcome) -> (EvalReport, PairedReport) {
+    let report = unwrap_report(outcome);
+    let paired = report.paired.clone().expect("a paired run carries the paired table");
+    (report, paired)
+}
+
+/// Six queries so both splits hold several; each runs `vector` and `configured`.
+/// Arm A puts the relevant note `r` second; `b_first` decides, per query,
+/// whether arm B lifts it to first.
+fn paired_fixture(b_first: &[bool]) -> (Queries, Vec<QueryRun>, Vec<QueryRun>) {
+    let n = b_first.len();
+    let queries = Queries {
+        queries: (0..n)
+            .map(|i| EvalQuery {
+                id: format!("p{i}"),
+                query: format!("query {i}"),
+                tags: None,
+                calibration: None,
+            })
+            .collect(),
+    };
+    let arm = |lift: &dyn Fn(usize) -> bool| -> Vec<QueryRun> {
+        (0..n)
+            .map(|i| {
+                let configured: &[&str] = if lift(i) {
+                    &["notes/r.md", "notes/x.md"]
+                } else {
+                    &["notes/x.md", "notes/r.md"]
+                };
+                QueryRun {
+                    ranked: ranked(&[
+                        ("vector", &["notes/x.md", "notes/r.md"]),
+                        (CONFIGURED_LABEL, configured),
+                    ]),
+                    texts: BTreeMap::new(),
+                    latency_ms: BTreeMap::from([("vector".to_string(), 10.0), (CONFIGURED_LABEL.to_string(), 50.0)]),
+                    rerank: Some(RerankRun::Off),
+                }
+            })
+            .collect()
+    };
+    let mut a = arm(&|_| false);
+    let b = arm(&|i| b_first[i]);
+    for run in &mut a {
+        run.texts = texts(&[("notes/r.md", "R"), ("notes/x.md", "X"), ("notes/z.md", "Z")]);
+    }
+    (queries, a, b)
+}
+
+/// Relevant `r` (3), irrelevant `x`, and `z`, which only an added target
+/// surfaces, also relevant.
+fn paired_judge(n: usize) -> MockJudge {
+    (0..n).fold(MockJudge::new(0), |j, i| {
+        let q = format!("query {i}");
+        j.with(&q, "R", 3).with(&q, "X", 0).with(&q, "Z", 3)
+    })
+}
+
+fn row<'a>(p: &'a PairedReport, target: &str, split: Split) -> &'a PairedRow {
+    p.rows
+        .iter()
+        .find(|r| r.target == target && r.split == split)
+        .unwrap_or_else(|| panic!("no {target}/{} row", split.label()))
+}
+
+#[test]
+fn compare_same_arm_zero_delta() {
+    let lifts = [true, false, true, true, false, true];
+    let (queries, a, _) = paired_fixture(&lifts);
+    let b = a.clone();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let outcome = evaluate(
+        &queries,
+        &a,
+        Some(&b),
+        &cache,
+        &paired_judge(lifts.len()),
+        &paired_opts(),
+    )
+    .expect("evaluate");
+    let (_, paired) = unwrap_paired(outcome);
+    assert_eq!(paired.rows.len(), mode_labels().len() * 2, "every target, both splits");
+    for r in &paired.rows {
+        assert_eq!(r.delta, 0.0, "{} {}", r.target, r.split.label());
+        assert_eq!(r.ci, (0.0, 0.0), "{} {}", r.target, r.split.label());
+        assert_eq!(r.verdict, Verdict::Insufficient, "zero variance never ships");
+    }
+    let rendered = paired.render();
+    assert!(rendered.contains("+0.0000"), "{rendered}");
+}
+
+#[test]
+fn compare_target_set_does_not_rebase() {
+    let lifts = [true, false, true, true, false, true, true, false];
+    let n = lifts.len();
+    let (queries, a, b) = paired_fixture(&lifts);
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let base = evaluate(&queries, &a, Some(&b), &cache, &paired_judge(n), &paired_opts()).expect("base");
+    let (base_report, base_paired) = unwrap_paired(base);
+
+    // Add a target (`graph`) on both arms that surfaces a relevant note no
+    // other target holds.
+    let add = |runs: &[QueryRun]| -> Vec<QueryRun> {
+        runs.iter()
+            .cloned()
+            .map(|mut r| {
+                r.ranked.insert("graph".into(), vec!["notes/z.md".into()]);
+                r
+            })
+            .collect()
+    };
+    let (a2, b2) = (add(&a), add(&b));
+    let grown = evaluate(&queries, &a2, Some(&b2), &cache, &paired_judge(n), &paired_opts()).expect("grown");
+    let (grown_report, grown_paired) = unwrap_paired(grown);
+
+    for split in Split::ALL {
+        for target in ["vector", CONFIGURED_LABEL] {
+            let (before, after) = (row(&base_paired, target, split), row(&grown_paired, target, split));
+            assert_eq!(
+                (before.ndcg_a, before.ndcg_b, before.delta, before.ci, before.n),
+                (after.ndcg_a, after.ndcg_b, after.delta, after.ci, after.n),
+                "{target}/{} paired numbers moved when a target was added",
+                split.label()
+            );
+        }
+    }
+    assert!(
+        row(&base_paired, CONFIGURED_LABEL, Split::of("p0")).delta > 0.0,
+        "the fixture's configured target has a real delta to protect"
+    );
+
+    // The legacy single-arm report shares one pool across targets, so the
+    // added target's relevant note re-bases every other target.
+    let legacy = |r: &EvalReport, label: &str| r.modes.iter().find(|m| m.mode == label).expect(label).means.ndcg;
+    for target in ["vector", CONFIGURED_LABEL] {
+        assert!(
+            legacy(&grown_report, target) < legacy(&base_report, target),
+            "legacy {target} should re-base: {} -> {}",
+            legacy(&base_report, target),
+            legacy(&grown_report, target)
+        );
+    }
+}
+
+#[test]
+fn compare_missing_judgment_fails() {
+    let lifts = [true, false, true, true];
+    let (queries, a, mut b) = paired_fixture(&lifts);
+    // A note only arm B surfaces, so only the paired pool holds it.
+    b[1].ranked.insert("vector".into(), vec!["notes/z.md".into()]);
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let judge = paired_judge(lifts.len()).failing("query 1", "Z");
+    let err = match evaluate(&queries, &a, Some(&b), &cache, &judge, &paired_opts()) {
+        Ok(_) => panic!("a dropped judgment must fail the paired run"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("1 pooled note(s) have no judgment"), "{err}");
+    assert!(err.contains("p1 / notes/z.md"), "{err}");
+}
+
+#[test]
+fn compare_target_on_one_arm_only_fails() {
+    let (queries, a, mut b) = paired_fixture(&[true, false]);
+    b[0].ranked.remove("vector");
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    assert!(evaluate(&queries, &a, Some(&b), &cache, &paired_judge(2), &paired_opts()).is_err());
+}
+
+#[test]
+fn single_arm_run_has_no_paired_table() {
+    let (queries, runs) = fixture();
+    let cache = cache::JudgmentCache::open_memory().expect("cache");
+    let report =
+        unwrap_report(evaluate(&queries, &runs, None, &cache, &judge(), &EvalOpts::default()).expect("evaluate"));
+    assert!(report.paired.is_none());
+    assert!(!report.render().contains("paired A/B"));
 }

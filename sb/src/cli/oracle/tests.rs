@@ -146,6 +146,36 @@ fn mine_queries_stands_alone_but_a_default_target_does_not_conflict() {
 }
 
 #[test]
+fn compare_flags_define_arm_b_and_reach_the_eval_opts() {
+    let a = parse_eval(&[
+        "--compare-db",
+        "/arm/oracle.db",
+        "--compare-config",
+        "~/arm.yml",
+        "--latency-budget-ms",
+        "1500",
+    ])
+    .unwrap();
+    let opts = oracle::eval::EvalOpts::from(&a);
+    assert!(opts.is_paired());
+    assert_eq!(opts.compare_db, Some(PathBuf::from("/arm/oracle.db")));
+    assert_eq!(
+        opts.compare_config,
+        Some(vault::paths::expand_tilde(PathBuf::from("~/arm.yml")))
+    );
+    assert_eq!(opts.latency_budget_ms, Some(1500));
+    assert!(!oracle::eval::EvalOpts::from(&parse_eval(&[]).unwrap()).is_paired());
+}
+
+#[test]
+fn compare_flags_conflict_with_calibration_and_mining() {
+    assert!(parse_eval(&["--compare-config", "/b.yml", "--emit-calibration", "/c.yml"]).is_err());
+    assert!(parse_eval(&["--compare-db", "/b.db", "--emit-calibration", "/c.yml"]).is_err());
+    assert!(parse_eval(&["--compare-db", "/b.db", "--mine-queries", "/q.yml"]).is_err());
+    assert!(parse_eval(&["--latency-budget-ms", "9", "--mine-queries", "/q.yml"]).is_err());
+}
+
+#[test]
 fn the_staged_source_reader_maps_borgs_staging_outcomes() {
     use oracle::eval::answerability::{SourceReader, SourceText};
     let tmp = tempfile::tempdir().unwrap();

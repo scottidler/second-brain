@@ -3,6 +3,7 @@
 //! target's rerank stage ran — plus a plain-text renderer for `sb` to print.
 
 use crate::eval::metrics::MetricMeans;
+use crate::eval::paired::PairedReport;
 use crate::server::RerankRun;
 
 /// Metrics for one search mode (or the ablation variant).
@@ -72,14 +73,14 @@ impl RerankTally {
         tally
     }
 
-    fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.ran + self.off + self.failed_open + self.disabled
     }
 
     /// The table cell: `off` when the stage is not enabled, `ran N/T` when it
     /// ran on every query, and `NOT RUN` with the counts otherwise, so a
     /// latched-off stage can never read as a rerank-on result.
-    fn cell(&self) -> String {
+    pub(crate) fn cell(&self) -> String {
         let total = self.total();
         if self.off == total {
             "off".to_string()
@@ -131,10 +132,11 @@ pub struct EvalReport {
     pub lift_mrr: f64,
     pub truncated_judgments: usize,
     pub total_judgments: usize,
-    /// Pairs whose judge call failed: skipped, never scored.
-    pub judge_errors: usize,
     pub ablation: AblationReport,
     pub calibration: Option<CalibrationPanel>,
+    /// The paired A/B table; `None` for a single-arm run. The rows above are
+    /// always arm A on its own all-target pool.
+    pub paired: Option<PairedReport>,
 }
 
 impl EvalReport {
@@ -147,6 +149,9 @@ impl EvalReport {
             self.total_queries,
             if self.judge_model.is_empty() { "<fabric default>" } else { &self.judge_model },
         ));
+        if self.paired.is_some() {
+            o.push_str("single-arm rows below are arm A on its all-target pool; the paired table follows them\n\n");
+        }
 
         o.push_str(&format!(
             "{:<22} {:>8} {:>10} {:>8}   {:>14} {:>9} {:>9}   {}\n",
@@ -209,8 +214,8 @@ impl EvalReport {
         }
 
         o.push_str(&format!(
-            "\njudgments: {} total, {} from truncated bodies (low-confidence), {} judge errors (pairs skipped)\n",
-            self.total_judgments, self.truncated_judgments, self.judge_errors,
+            "\njudgments: {} total, {} from truncated bodies (low-confidence)\n",
+            self.total_judgments, self.truncated_judgments,
         ));
 
         match &self.calibration {
@@ -232,6 +237,9 @@ impl EvalReport {
                     "\ncalibration: UNCALIBRATED - no hand labels; judge unvalidated. Run --emit-calibration.\n",
                 );
             }
+        }
+        if let Some(paired) = &self.paired {
+            o.push_str(&paired.render());
         }
         o
     }

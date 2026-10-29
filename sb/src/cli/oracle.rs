@@ -102,9 +102,20 @@ pub struct EvalArgs {
         conflicts_with = "emit_calibration"
     )]
     pub target: EvalTarget,
+    /// Arm B's oracle index DB for a paired A/B run (default: arm A's DB).
+    /// Every target runs on both arms and is scored on its own A∪B pool
+    #[arg(long, value_name = "PATH", conflicts_with = "emit_calibration")]
+    pub compare_db: Option<PathBuf>,
+    /// Arm B's oracle.yml for a paired A/B run (default: arm A's config)
+    #[arg(long, value_name = "PATH", conflicts_with = "emit_calibration")]
+    pub compare_config: Option<PathBuf>,
+    /// Arm B's p95 retrieval budget (ms) a `ship` verdict must meet; without
+    /// it, latency is reported but does not gate the verdict
+    #[arg(long, value_name = "MS")]
+    pub latency_budget_ms: Option<u64>,
     /// Mine the `knowledge_search` queries of every personal-scope session in
     /// clyde's catalog into a query set at this path, and measure nothing
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["target", "emit_calibration", "report", "rebuild_cache"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["target", "emit_calibration", "report", "rebuild_cache", "compare_db", "compare_config", "latency_budget_ms"])]
     pub mine_queries: Option<PathBuf>,
 }
 
@@ -133,6 +144,9 @@ impl From<&EvalArgs> for oracle::eval::EvalOpts {
             judge_model: a.judge_model.clone(),
             rebuild_cache: a.rebuild_cache,
             emit_calibration: a.emit_calibration.as_ref().map(vault::paths::expand_tilde),
+            compare_db: a.compare_db.as_ref().map(vault::paths::expand_tilde),
+            compare_config: a.compare_config.as_ref().map(vault::paths::expand_tilde),
+            latency_budget_ms: a.latency_budget_ms,
         }
     }
 }
@@ -194,7 +208,13 @@ impl OracleCli {
                     return Ok(());
                 }
                 let opts = oracle::eval::EvalOpts::from(&a);
+                if opts.latency_budget_ms.is_some() && !opts.is_paired() {
+                    eyre::bail!("--latency-budget-ms needs --compare-db or --compare-config");
+                }
                 if a.target == EvalTarget::Answerability {
+                    if opts.is_paired() {
+                        eyre::bail!("--compare-db and --compare-config apply to --target lift only");
+                    }
                     // Borg owns the staging root: read it from borg.yml, the
                     // same `staging.root` ingest writes through.
                     let borg_config = borg::config::load_config::<borg::config::Config>(None)

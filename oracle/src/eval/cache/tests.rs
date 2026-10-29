@@ -17,6 +17,14 @@ fn stable_hash_is_deterministic_and_distinct() {
 }
 
 #[test]
+fn fnv1a_is_the_number_behind_stable_hash() {
+    // The FNV-1a reference value for the empty string is the offset basis.
+    assert_eq!(fnv1a(""), 0xcbf29ce484222325);
+    assert_eq!(fnv1a("a"), 0xaf63dc4c8601ec8c);
+    assert_eq!(stable_hash("a"), format!("{:016x}", fnv1a("a")));
+}
+
+#[test]
 fn put_then_get_round_trips() {
     let c = JudgmentCache::open_memory().expect("open");
     let k = key("q1", "qh", "notes/a.md", "ch", "m");

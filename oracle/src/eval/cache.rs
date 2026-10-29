@@ -24,12 +24,18 @@ const FNV_PRIME: u64 = 0x100000001b3;
 /// invalidate the entire judgment cache (re-buying every LLM judgment). FNV-1a
 /// is a fixed spec, so the cache survives toolchain upgrades.
 pub fn stable_hash(s: &str) -> String {
+    format!("{:016x}", fnv1a(s))
+}
+
+/// The FNV-1a (64-bit) hash behind [`stable_hash`], as a number. The paired
+/// eval splits queries on `fnv1a(id) % 2`.
+pub fn fnv1a(s: &str) -> u64 {
     let mut h = FNV_OFFSET_BASIS;
     for byte in s.as_bytes() {
         h ^= *byte as u64;
         h = h.wrapping_mul(FNV_PRIME);
     }
-    format!("{h:016x}")
+    h
 }
 
 /// The full identity of a cached judgment.

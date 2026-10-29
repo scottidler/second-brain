@@ -29,7 +29,7 @@ fn flatten_wikilinks_handles_unclosed_brackets() {
 
 #[test]
 fn prepare_note_text_prefers_summary_without_truncation_flag() {
-    let (text, truncated) = prepare_note_text("short summary", "very long body....", 5);
+    let (text, truncated) = prepare_note_text("short summary", &[], "very long body....", 5);
     assert!(text.starts_with("short"));
     assert!(!truncated, "summary path is never a truncation hazard");
 }
@@ -37,16 +37,50 @@ fn prepare_note_text_prefers_summary_without_truncation_flag() {
 #[test]
 fn prepare_note_text_falls_back_to_body_and_flags_truncation() {
     let body = "abcdefghij"; // 10 chars
-    let (text, truncated) = prepare_note_text("", body, 4);
+    let (text, truncated) = prepare_note_text("", &[], body, 4);
     assert_eq!(text, "abcd");
     assert!(truncated);
 }
 
 #[test]
 fn prepare_note_text_body_under_budget_not_truncated() {
-    let (text, truncated) = prepare_note_text("", "abc", 10);
+    let (text, truncated) = prepare_note_text("", &[], "abc", 10);
     assert_eq!(text, "abc");
     assert!(!truncated);
+}
+
+fn claims(list: &[&str]) -> Vec<String> {
+    list.iter().map(|c| c.to_string()).collect()
+}
+
+#[test]
+fn prepare_note_text_appends_claims_after_the_summary() {
+    let (text, truncated) = prepare_note_text("The summary.", &claims(&["one", "two [[x|X]]"]), "body", 100);
+    assert_eq!(text, "The summary.\n\n- one\n- two X");
+    assert!(!truncated);
+}
+
+#[test]
+fn prepare_note_text_cuts_claims_at_a_claim_boundary() {
+    // "S" + "\n\n- aaaa" (8) = 9 chars; "\n- bbbb" (7) would make 16 > 12.
+    let (text, truncated) = prepare_note_text("S", &claims(&["aaaa", "bbbb", "c"]), "body", 12);
+    assert_eq!(
+        text, "S\n\n- aaaa",
+        "a claim that does not fit whole is dropped with every later one"
+    );
+    assert!(!truncated);
+}
+
+#[test]
+fn prepare_note_text_summary_over_budget_carries_no_claims() {
+    let (text, _) = prepare_note_text("abcdefghij", &claims(&["claim"]), "body", 4);
+    assert_eq!(text, "abcd");
+}
+
+#[test]
+fn prepare_note_text_ignores_claims_on_the_body_fallback() {
+    let (text, _) = prepare_note_text("  ", &claims(&["claim"]), "the body", 100);
+    assert_eq!(text, "the body", "body fallback is unchanged when the summary is empty");
 }
 
 #[test]

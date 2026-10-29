@@ -33,6 +33,7 @@ pub trait RelevanceJudge {
 #[derive(Debug, Clone, Default)]
 pub struct MockJudge {
     scores: HashMap<(String, String), u8>,
+    failing: std::collections::HashSet<(String, String)>,
     default: u8,
 }
 
@@ -42,8 +43,16 @@ impl MockJudge {
     pub fn new(default: u8) -> Self {
         Self {
             scores: HashMap::new(),
+            failing: std::collections::HashSet::new(),
             default: default.min(MAX_SCORE),
         }
+    }
+
+    /// Make the `(query, title)` pair's judge call fail (builder style), the
+    /// way a fabric error or an unparseable reply does.
+    pub fn failing(mut self, query: &str, title: &str) -> Self {
+        self.failing.insert((query.to_string(), title.to_string()));
+        self
     }
 
     /// Override the score for a specific `(query, title)` pair (builder style).
@@ -57,6 +66,9 @@ impl MockJudge {
 #[cfg(test)]
 impl RelevanceJudge for MockJudge {
     fn judge(&self, query: &str, note_title: &str, _note_text: &str) -> Result<u8> {
+        if self.failing.contains(&(query.to_string(), note_title.to_string())) {
+            bail!("mock judge dropped ({query:?}, {note_title:?})");
+        }
         let score = self
             .scores
             .get(&(query.to_string(), note_title.to_string()))
@@ -80,7 +92,8 @@ pub struct FabricJudge {
     pub api_keys: ApiKeys,
     /// Fabric pattern name (resolved under `~/.config/sb/patterns/`).
     pub pattern: String,
-    /// Truncation budget (chars) for the note text sent to the judge.
+    /// Truncation budget (chars) for the note text sent to the judge. The
+    /// query/title framing rides on top of it ([`judge_input_budget`]).
     pub max_chars: usize,
     /// Per-call fabric timeout.
     pub timeout_secs: u64,
@@ -114,10 +127,19 @@ impl FabricJudge {
 impl RelevanceJudge for FabricJudge {
     fn judge(&self, query: &str, note_title: &str, note_text: &str) -> Result<u8> {
         let input = format!("# QUERY\n{query}\n\n# NOTE TITLE\n{note_title}\n\n# NOTE\n{note_text}\n");
-        let reply =
-            vault::fabric::run_command(self.command(), &self.pattern, &input, self.max_chars, self.timeout_secs)?;
+        let budget = judge_input_budget(&input, note_text, self.max_chars);
+        let reply = vault::fabric::run_command(self.command(), &self.pattern, &input, budget, self.timeout_secs)?;
         parse_score(&reply)
     }
+}
+
+/// The fabric input budget for one judge call: `max_chars` of note text plus
+/// the query/title framing around it. Capping the whole input at `max_chars`
+/// instead cut the tail of every note text near the cap, which splits the last
+/// claim that `calc::prepare_note_text` had kept whole.
+pub fn judge_input_budget(input: &str, note_text: &str, max_chars: usize) -> usize {
+    let framing = input.chars().count().saturating_sub(note_text.chars().count());
+    max_chars + framing
 }
 
 /// Parse a graded score from a judge reply: the first integer token, clamped to
