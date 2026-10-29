@@ -117,3 +117,17 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
   - Paired n is smaller than the legacy n (215 per mode) because a paired pool holds only that target's two lists: a query whose own A∪B pool has no relevant note is excluded. bm25's n of 47/45 is that effect at its strongest.
 - Single-arm table (arm A, all-target pool, summary + claims judge text, 248 queries): vector 0.7561, hybrid 0.7751, configured 0.7563, graph-hybrid 0.5439, bm25 0.2678; `judgments: 5662 total, 0 from truncated bodies`. Phase 1's summary-only numbers on 249 queries were vector 0.7633, hybrid 0.7798, configured 0.7634; the absolute shift is the judge-text change the risk table predicts, and decisions use paired deltas only.
 - `otto ci` green at commit. Arm B config, both reports and the run logs stay in the session scratchpad (`rerank3-report.txt` is the final report); nothing but `.md` under `docs/`.
+
+## Phase 2 follow-up: judge refusal
+
+### Design decisions
+- Scott chose (2026-10-29) to drop query `mined-736d308b04a79ca1` ("Pluto Security function hooks credentials") from the vault operator set, over a fallback judge model. `claude-sonnet-5` refuses the pair with that query and `notes/mini-shai-hulud-worm-compromises-tanstack-mistral-ai-guardrails-ai-more-packages.md` (`stop_reason: refusal`, `category: cyber`), 3 of 3 attempts. The set is now 248 queries. A future refusal fails the run loudly, by design.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Dropping one query vs a fallback judge: a fallback mixes two judge models into one calibration.
+
+### Open questions
+- None.
