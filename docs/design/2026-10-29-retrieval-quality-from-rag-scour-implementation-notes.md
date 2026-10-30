@@ -392,3 +392,17 @@ What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,
 - Then the recipe-2 drain: `transcript-chunk` has about 2,161 notes (29,630 chunk rows in arm C, against 19,679 live) re-embedded a tick at a time, each note swapped atomically while old rows serve; 17 notes whose transcript source is gone lose their 163 stale rows (`mark_nothing_to_embed_batch`). `claim` is recipe 2 too but off by default, so it is inert. Summary rows stay at recipe 1. The Phase-3 stale-query index also removes the 10-23 s batch-boundary stall.
 - Rollback is a forward recipe bump plus a re-drain; an older binary restores nothing. With both verdicts `hold`, deploying changes the live index to a result the eval cannot distinguish from today's.
 - `otto ci` green at commit; arm directories, reports, logs and the scratch tool stay in `$P5`.
+
+## Phase 5 follow-up: deploy override
+
+### Design decisions
+- Scott chose (2026-10-29) to deploy Phases 4+5 to ripr despite `hold` on both paired verdicts. Override recorded in the design doc's Resolved Decisions. Basis: correctness fix (over512 17,849 -> 0), no measured regression vs live, and Phase 5's root cause shows the judge (summary + claims only) grades the new transcript-surfaced notes lower, so the eval is likely blind to transcript recall.
+
+### Deviations
+- The pre-registered ship rule is overridden for this one index change only.
+
+### Tradeoffs
+- Deploy vs hold: hold leaves 24% of transcript tokens unembedded and acceptance criteria 1-2 unreachable.
+
+### Open questions
+- None.
