@@ -79,6 +79,8 @@ fn rerank_reorders_head_preserves_tail() {
     }
 }
 
+/// Rerank is pinned off: it is on by default, and whether it reorders
+/// depends on the host loading the cross-encoder within budget.
 fn bm25_only_retrieval(weight: f32) -> RetrievalConfig {
     RetrievalConfig {
         methods: MethodsConfig {
@@ -93,7 +95,15 @@ fn bm25_only_retrieval(weight: f32) -> RetrievalConfig {
             },
             ..Default::default()
         },
+        rerank: rerank_off(),
         ..Default::default()
+    }
+}
+
+fn rerank_off() -> RerankConfig {
+    RerankConfig {
+        enabled: false,
+        ..RerankConfig::default()
     }
 }
 
@@ -631,6 +641,7 @@ fn retrieval_with(vector: bool, bm25: bool, graph: bool) -> RetrievalConfig {
                 ..Default::default()
             },
         },
+        rerank: rerank_off(),
         ..Default::default()
     }
 }
