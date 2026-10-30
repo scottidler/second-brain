@@ -61,7 +61,29 @@ impl EmbeddingKind {
             EmbeddingKind::Claim => "claim",
         }
     }
+
+    /// This kind's embed recipe: the version of everything that decides the
+    /// text a row embeds (assembly, chunker, its window and overlap). Every
+    /// write stamps it; `stale_embedding_targets` re-selects any row or
+    /// sentinel stamped lower. Bump the kind's constant whenever its embedded
+    /// text changes, and that kind (only) re-embeds by construction.
+    pub fn recipe(&self) -> i64 {
+        match self {
+            EmbeddingKind::Summary => SUMMARY_RECIPE,
+            EmbeddingKind::TranscriptChunk => TRANSCRIPT_CHUNK_RECIPE,
+            EmbeddingKind::Claim => CLAIM_RECIPE,
+        }
+    }
 }
+
+/// Recipe of the `summary` kind: title + capture note + summary
+/// (`cortex::embed::summary_embed_text`).
+pub const SUMMARY_RECIPE: i64 = 1;
+/// Recipe of the `transcript-chunk` kind: the transcript chunker and its
+/// window constants (`cortex::embed::transcript`).
+pub const TRANSCRIPT_CHUNK_RECIPE: i64 = 1;
+/// Recipe of the `claim` kind: claim grouping (`cortex::embed::claim`).
+pub const CLAIM_RECIPE: i64 = 1;
 
 /// One row of input to [`SearchIndex::upsert_embeddings_batch`].
 ///
@@ -162,6 +184,42 @@ pub(crate) fn encode_embedding_bytes(vector: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+/// What [`SearchIndex::drop_embedding_kind`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DroppedKind {
+    /// `note_embeddings` rows deleted.
+    pub rows: usize,
+    /// `embedding_examined` sentinels deleted.
+    pub sentinels: usize,
+}
+
+/// Write one [`BatchUpsert`] row stamped with its kind's recipe. `verb` is
+/// `INSERT OR REPLACE` (upsert) or `INSERT` (after a swap's DELETE).
+fn insert_batch_item(tx: &rusqlite::Transaction<'_>, item: &BatchUpsert<'_>, verb: &str) -> Result<()> {
+    let bytes = encode_embedding_bytes(item.embedding);
+    tx.execute(
+        &format!(
+            "{verb} INTO note_embeddings (
+                note_path, kind, chunk_index, text, embedding, dim,
+                model_version, produced_at, source_modified_at, recipe
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+        ),
+        params![
+            item.note_path,
+            item.kind.as_str(),
+            item.chunk_index as i64,
+            item.text,
+            bytes,
+            item.embedding.len() as i64,
+            item.model_version,
+            chrono::Utc::now().timestamp(),
+            item.source_modified_at,
+            item.kind.recipe(),
+        ],
+    )?;
+    Ok(())
 }
 
 /// Zero-allocation dot product between a query vector (already in
@@ -445,8 +503,8 @@ impl SearchIndex {
         self.conn.execute(
             "INSERT OR REPLACE INTO note_embeddings (
                 note_path, kind, chunk_index, text, embedding, dim,
-                model_version, produced_at, source_modified_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                model_version, produced_at, source_modified_at, recipe
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 note_path,
                 kind.as_str(),
@@ -457,6 +515,7 @@ impl SearchIndex {
                 model_version,
                 now,
                 source_modified_at,
+                kind.recipe(),
             ],
         )?;
         Ok(())
@@ -479,24 +538,33 @@ impl SearchIndex {
         // the lock up front and hid a SQL error).
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for item in items {
-            let bytes = encode_embedding_bytes(item.embedding);
-            tx.execute(
-                "INSERT OR REPLACE INTO note_embeddings (
-                    note_path, kind, chunk_index, text, embedding, dim,
-                    model_version, produced_at, source_modified_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    item.note_path,
-                    item.kind.as_str(),
-                    item.chunk_index as i64,
-                    item.text,
-                    bytes,
-                    item.embedding.len() as i64,
-                    item.model_version,
-                    chrono::Utc::now().timestamp(),
-                    item.source_modified_at,
-                ],
-            )?;
+            insert_batch_item(&tx, item, "INSERT OR REPLACE")?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Per-note atomic swap for a batch, in ONE short write transaction
+    /// (`BEGIN IMMEDIATE` -> per note: DELETE its rows of the item's kind and
+    /// model -> INSERTs -> `COMMIT`). The summary kind's writer: a note's old
+    /// rows serve until this transaction replaces all of them, the same
+    /// guarantee [`swap_kind_chunks`](Self::swap_kind_chunks) gives chunks,
+    /// and no row of an older shape or recipe survives beside the new one.
+    /// The DELETE is scoped to the item's `model_version`, so another model's
+    /// rows (an A/B flip) are left alone, as `upsert_embeddings_batch` leaves
+    /// them.
+    pub fn swap_embeddings_batch(&mut self, items: &[BatchUpsert<'_>]) -> Result<()> {
+        log::debug!("search::swap_embeddings_batch: items={}", items.len());
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut cleared: std::collections::HashSet<(&str, &str, &str)> = std::collections::HashSet::new();
+        for item in items {
+            if cleared.insert((item.note_path, item.kind.as_str(), item.model_version)) {
+                tx.execute(
+                    "DELETE FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+                    params![item.note_path, item.kind.as_str(), item.model_version],
+                )?;
+            }
+            insert_batch_item(&tx, item, "INSERT")?;
         }
         tx.commit()?;
         Ok(())
@@ -558,8 +626,8 @@ impl SearchIndex {
             tx.execute(
                 "INSERT INTO note_embeddings (
                     note_path, kind, chunk_index, text, embedding, dim,
-                    model_version, produced_at, source_modified_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    model_version, produced_at, source_modified_at, recipe
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     note_path,
                     kind.as_str(),
@@ -570,6 +638,7 @@ impl SearchIndex {
                     model_version,
                     now,
                     source_modified_at,
+                    kind.recipe(),
                 ],
             )?;
         }
@@ -577,16 +646,24 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Delete every embedding row of a single `kind`, returning the number
-    /// of rows removed. This is the first-class rollback verb behind
-    /// `sb cortex embed --drop-kind claim`: reverting cortex code
-    /// does NOT stop oracle reading claim rows, because `search_vector`
-    /// scans all kinds, so removing the rows is the only real rollback.
-    pub fn delete_embeddings_of_kind(&self, kind: EmbeddingKind) -> Result<usize> {
-        let n = self
-            .conn
-            .execute("DELETE FROM note_embeddings WHERE kind = ?1", params![kind.as_str()])?;
-        Ok(n)
+    /// Delete every embedding row AND every examined sentinel of a single
+    /// `kind` (all models), in one transaction. This is the first-class
+    /// rollback verb behind `sb cortex embed --drop-kind claim`: reverting
+    /// cortex code does NOT stop oracle reading claim rows, because
+    /// `search_vector` scans all kinds, so removing the rows is the only real
+    /// rollback.
+    ///
+    /// The sentinels go too: a sentinel left behind masks its note from
+    /// `stale_embedding_targets`, so a drop + backfill silently skipped every
+    /// sentinelled note that still had rows before the drop (the index-arm
+    /// spike in `2026-10-29-retrieval-quality-from-rag-scour`).
+    pub fn drop_embedding_kind(&mut self, kind: EmbeddingKind) -> Result<DroppedKind> {
+        log::debug!("search::drop_embedding_kind: kind={kind:?}");
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = tx.execute("DELETE FROM note_embeddings WHERE kind = ?1", params![kind.as_str()])?;
+        let sentinels = tx.execute("DELETE FROM embedding_examined WHERE kind = ?1", params![kind.as_str()])?;
+        tx.commit()?;
+        Ok(DroppedKind { rows, sentinels })
     }
 
     /// Update `embedding_config.active_model` and `active_dim` inside a
@@ -649,6 +726,15 @@ impl SearchIndex {
     /// mtime), exactly like the `note_embeddings.source_modified_at` staleness
     /// watermark above it.
     ///
+    /// **Embed recipe** (`2026-10-29-retrieval-quality-from-rag-scour`). A row
+    /// stamped with a recipe below its kind's
+    /// [`EmbeddingKind::recipe`] is stale, and a sentinel stamped below it no
+    /// longer masks the note, so bumping one kind's recipe constant re-embeds
+    /// that kind (only) through this query, with no model-id change and no
+    /// `--drop-kind` gap. The LEFT JOIN yields one row per stale chunk, so the
+    /// note key is made DISTINCT before the `LIMIT`: a note with 9 stale chunk
+    /// rows takes one slot of the batch, not 9.
+    ///
     /// Claim rows: every note with non-empty `notes.claims` is a
     /// candidate. The claim text is carried in the `summary` field of the
     /// returned `StaleTarget` (no file I/O); cortex groups it into
@@ -671,7 +757,7 @@ impl SearchIndex {
             // + summary. Notes without a capture note carry '' and the
             // assembled text stays byte-identical to the older form.
             EmbeddingKind::Summary => {
-                "SELECT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note, n.trace
+                "SELECT DISTINCT n.path, n.note_type, n.modified_at, n.summary, n.title, n.capture_note, n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -684,15 +770,17 @@ impl SearchIndex {
                  WHERE (n.summary IS NOT NULL AND n.summary != '')
                    AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
-                        OR e.source_modified_at < n.modified_at)
+                        OR e.source_modified_at < n.modified_at
+                        OR e.recipe < ?4)
                    AND (x.note_path IS NULL
-                        OR x.examined_at < n.modified_at)
+                        OR x.examined_at < n.modified_at
+                        OR x.recipe < ?4)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
                     .to_string()
             }
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT n.path, n.note_type, n.modified_at, '', n.title, '', n.trace
+                "SELECT DISTINCT n.path, n.note_type, n.modified_at, '', n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -705,9 +793,11 @@ impl SearchIndex {
                  WHERE n.note_type IN ({transcript_eligible_in_clause})
                    AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
-                        OR e.source_modified_at < n.modified_at)
+                        OR e.source_modified_at < n.modified_at
+                        OR e.recipe < ?4)
                    AND (x.note_path IS NULL
-                        OR x.examined_at < n.modified_at)
+                        OR x.examined_at < n.modified_at
+                        OR x.recipe < ?4)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
             ),
@@ -717,7 +807,7 @@ impl SearchIndex {
             // newline-joined claims into token-window-sized chunks before
             // embedding so a note's tail claims are never dropped by silent
             // model-side truncation (the defect claim chunking fixes).
-            EmbeddingKind::Claim => "SELECT n.path, n.note_type, n.modified_at, n.claims, n.title, '', n.trace
+            EmbeddingKind::Claim => "SELECT DISTINCT n.path, n.note_type, n.modified_at, n.claims, n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -730,9 +820,11 @@ impl SearchIndex {
                  WHERE (n.claims IS NOT NULL AND n.claims != '')
                    AND (n.superseded_by IS NULL OR n.superseded_by = '')
                    AND (e.id IS NULL
-                        OR e.source_modified_at < n.modified_at)
+                        OR e.source_modified_at < n.modified_at
+                        OR e.recipe < ?4)
                    AND (x.note_path IS NULL
-                        OR x.examined_at < n.modified_at)
+                        OR x.examined_at < n.modified_at
+                        OR x.recipe < ?4)
                  ORDER BY n.modified_at DESC
                  LIMIT ?3"
                 .to_string(),
@@ -740,17 +832,20 @@ impl SearchIndex {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(params![kind.as_str(), model_version, limit as i64], |row| {
-                Ok(StaleTarget {
-                    note_path: row.get(0)?,
-                    note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    modified_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    capture_note: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                    trace: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                })
-            })?
+            .query_map(
+                params![kind.as_str(), model_version, limit as i64, kind.recipe()],
+                |row| {
+                    Ok(StaleTarget {
+                        note_path: row.get(0)?,
+                        note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        modified_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        title: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        capture_note: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        trace: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    })
+                },
+            )?
             .filter_map(warn_row)
             .collect();
         Ok(rows)
@@ -758,7 +853,13 @@ impl SearchIndex {
 
     /// Record that a batch of notes were examined for `kind` embedding and
     /// found to have nothing to embed (e.g. a transcript-eligible note with no
-    /// `## Transcript` section). Each item is `(note_path, examined_at)` where
+    /// `## Transcript` section), and delete each note's existing `kind` rows
+    /// for `model_version` in the same transaction. A note with no source text
+    /// now cannot keep serving vectors of text the system can no longer
+    /// produce, and those rows cannot stay at an old recipe forever behind a
+    /// current sentinel (a decision recorded in
+    /// `2026-10-29-retrieval-quality-from-rag-scour`). The sentinel is stamped
+    /// with the kind's recipe. Each item is `(note_path, examined_at)` where
     /// `examined_at` is the note's indexed `notes.modified_at` at examine time;
     /// [`stale_embedding_targets`](Self::stale_embedding_targets) then excludes
     /// the note until its indexed `modified_at` advances past that value.
@@ -770,14 +871,14 @@ impl SearchIndex {
     /// only writer; oracle only reads the exclusion in `stale_embedding_targets`
     /// (which oracle does not call). An `ON CONFLICT` upsert keeps re-examining
     /// the same note idempotent (the watermark advances to the latest value).
-    pub fn mark_embedding_examined_batch(
+    pub fn mark_nothing_to_embed_batch(
         &mut self,
         kind: EmbeddingKind,
         model_version: &str,
         items: &[(String, i64)],
     ) -> Result<()> {
         log::debug!(
-            "search::mark_embedding_examined_batch: kind={:?} model_version={} count={}",
+            "search::mark_nothing_to_embed_batch: kind={:?} model_version={} count={}",
             kind,
             model_version,
             items.len(),
@@ -787,12 +888,22 @@ impl SearchIndex {
         }
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (note_path, examined_at) in items {
+            let cleared = tx.execute(
+                "DELETE FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+                params![note_path, kind.as_str(), model_version],
+            )?;
+            if cleared > 0 {
+                log::info!(
+                    "search::mark_nothing_to_embed_batch: {note_path} has no {} text now; cleared {cleared} old row(s)",
+                    kind.as_str()
+                );
+            }
             tx.execute(
-                "INSERT INTO embedding_examined (note_path, kind, model_version, examined_at)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO embedding_examined (note_path, kind, model_version, examined_at, recipe)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(note_path, kind, model_version)
-                 DO UPDATE SET examined_at = excluded.examined_at",
-                params![note_path, kind.as_str(), model_version, examined_at],
+                 DO UPDATE SET examined_at = excluded.examined_at, recipe = excluded.recipe",
+                params![note_path, kind.as_str(), model_version, examined_at, kind.recipe()],
             )?;
         }
         tx.commit()?;
@@ -825,11 +936,12 @@ impl SearchIndex {
              WHERE x.kind = ?1
                AND x.model_version = ?2
                AND x.examined_at >= n.modified_at
+               AND x.recipe >= ?3
                AND (n.superseded_by IS NULL OR n.superseded_by = '')
              ORDER BY n.path",
         )?;
         let rows = stmt
-            .query_map(params![kind.as_str(), model_version], |row| {
+            .query_map(params![kind.as_str(), model_version, kind.recipe()], |row| {
                 Ok(ExaminedNote {
                     note_path: row.get(0)?,
                     note_type: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -845,7 +957,7 @@ impl SearchIndex {
     /// Drop the examined sentinel for `note_paths` under `kind`/`model_version`,
     /// so `stale_embedding_targets` selects them again on the next read. One
     /// short `BEGIN IMMEDIATE` transaction, like
-    /// [`mark_embedding_examined_batch`](Self::mark_embedding_examined_batch).
+    /// [`mark_nothing_to_embed_batch`](Self::mark_nothing_to_embed_batch).
     pub fn clear_embedding_examined_batch(
         &mut self,
         kind: EmbeddingKind,
@@ -976,6 +1088,49 @@ impl SearchIndex {
         self.conn
             .execute("UPDATE notes SET trace = ?2 WHERE path = ?1", params![path, trace])?;
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    /// Set the `notes.modified_at` column for a test row: re-modifies a note
+    /// so its embeddings and sentinels read as stale.
+    pub fn set_test_modified_at(&self, path: &str, modified_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notes SET modified_at = ?2 WHERE path = ?1",
+            params![path, modified_at],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    /// Restamp every row and sentinel of `kind` with `recipe`. Stamping them
+    /// one below [`EmbeddingKind::recipe`] is exactly what a recipe bump looks
+    /// like to the stale query, so tests use it to simulate one.
+    pub fn set_test_recipe(&self, kind: EmbeddingKind, recipe: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE note_embeddings SET recipe = ?2 WHERE kind = ?1",
+            params![kind.as_str(), recipe],
+        )?;
+        self.conn.execute(
+            "UPDATE embedding_examined SET recipe = ?2 WHERE kind = ?1",
+            params![kind.as_str(), recipe],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    /// The distinct recipes stamped on `kind`'s rows and on its sentinels,
+    /// each ascending.
+    pub fn test_recipes(&self, kind: EmbeddingKind) -> Result<(Vec<i64>, Vec<i64>)> {
+        let read = |table: &str| -> Result<Vec<i64>> {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT DISTINCT recipe FROM {table} WHERE kind = ?1 ORDER BY recipe"
+            ))?;
+            let out = stmt
+                .query_map(params![kind.as_str()], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(out)
+        };
+        Ok((read("note_embeddings")?, read("embedding_examined")?))
     }
 
     /// Note paths whose newest `summary` embedding (for the active model) was

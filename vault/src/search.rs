@@ -349,8 +349,8 @@ mod vector;
 
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 pub use vector::{
-    BatchUpsert, EmbeddingKind, ExaminedNote, FusedHit, K_RRF_INPUT, RRF_K, StaleTarget, VectorHit,
-    reciprocal_rank_fusion, reciprocal_rank_fusion_weighted,
+    BatchUpsert, CLAIM_RECIPE, DroppedKind, EmbeddingKind, ExaminedNote, FusedHit, K_RRF_INPUT, RRF_K, SUMMARY_RECIPE,
+    StaleTarget, TRANSCRIPT_CHUNK_RECIPE, VectorHit, reciprocal_rank_fusion, reciprocal_rank_fusion_weighted,
 };
 
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]

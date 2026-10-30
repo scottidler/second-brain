@@ -678,3 +678,62 @@ fn backend_free_migration_leaves_unowned_ids_alone() {
     );
     assert_eq!(pin(&index), "mock-model");
 }
+
+fn table_has_column(index: &SearchIndex, table: &str, col: &str) -> bool {
+    let mut stmt = index
+        .conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .expect("table_info");
+    stmt.query_map([], |r| r.get::<_, String>(1))
+        .expect("query")
+        .map(|r| r.expect("col"))
+        .any(|c| c == col)
+}
+
+/// Recipe versioning (`2026-10-29-retrieval-quality-from-rag-scour`):
+/// a DB that predates both the claim kind and the recipe column gains
+/// `recipe` on both tables, every existing row and sentinel reads recipe 1,
+/// the stale-join index exists, and a second run changes nothing.
+#[test]
+fn recipe_migration_adds_columns_reading_one_and_is_idempotent() {
+    let conn = Connection::open_in_memory().expect("open");
+    conn.execute_batch(OLD_SCHEMA).expect("old schema");
+    conn.execute_batch(
+        "CREATE TABLE embedding_examined (
+            note_path TEXT NOT NULL, kind TEXT NOT NULL, model_version TEXT NOT NULL,
+            examined_at INTEGER NOT NULL, PRIMARY KEY (note_path, kind, model_version));",
+    )
+    .expect("old examined");
+    insert_old_row(&conn, "notes/a.md", "summary", 0, "alpha", &[1u8, 2, 3, 4]);
+    insert_old_row(&conn, "notes/c.md", "transcript-chunk", 0, "chunk", &[5u8, 6, 7, 8]);
+    let index = SearchIndex { conn };
+    insert_examined(&index, "notes/b.md", "transcript-chunk", "mock-model", 100);
+
+    index.migrate_note_embeddings_add_claim_kind().expect("claim migrate");
+    assert!(!table_has_column(&index, "note_embeddings", "recipe"));
+    let before = dump_rows(&index);
+
+    index.ensure_recipe_columns().expect("recipe migrate");
+    for table in ["note_embeddings", "embedding_examined"] {
+        assert!(table_has_column(&index, table, "recipe"), "{table}.recipe added");
+        let recipes: Vec<i64> = {
+            let mut stmt = index
+                .conn
+                .prepare(&format!("SELECT recipe FROM {table}"))
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .map(|r| r.expect("recipe"))
+                .collect()
+        };
+        assert!(
+            !recipes.is_empty() && recipes.iter().all(|&r| r == 1),
+            "{table}: {recipes:?}"
+        );
+    }
+    assert_eq!(before, dump_rows(&index), "existing rows otherwise untouched");
+    assert!(index_names(&index).contains(&"idx_note_embeddings_note_kind_model".to_string()));
+
+    index.ensure_recipe_columns().expect("second run");
+    assert_eq!(before, dump_rows(&index), "idempotent");
+}

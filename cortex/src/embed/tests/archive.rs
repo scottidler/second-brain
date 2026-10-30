@@ -1,6 +1,7 @@
 //! Archive-first transcript resolution and the archive-driven sentinel revival.
 
 use super::*;
+use crate::embed::source::read_source_transcript;
 
 #[test]
 fn process_transcript_batch_resolves_from_archive_after_staging_is_swept() {

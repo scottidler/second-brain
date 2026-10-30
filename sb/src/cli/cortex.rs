@@ -403,8 +403,8 @@ pub struct EmbedArgs {
     /// the config-enabled kinds
     #[arg(long)]
     pub kind: Option<String>,
-    /// Rollback verb: delete every embedding row of this kind
-    /// (summary | transcript-chunk | claim) and exit.
+    /// Rollback verb: delete every embedding row and examined sentinel of
+    /// this kind (summary | transcript-chunk | claim) and exit.
     #[arg(long)]
     pub drop_kind: Option<String>,
     /// Embedding model override. Default: the model pinned in embedding_config
@@ -674,8 +674,11 @@ impl CortexCli {
                     let resolved = cortex::embed::prefetch(opts_struct.model.as_deref(), config.embed.backend)?;
                     println!("Prefetched embedding model {resolved}.");
                 } else if let Some(kind) = opts_struct.drop_kind.as_deref() {
-                    let deleted = cortex::embed::drop_kind(&config, kind)?;
-                    println!("dropped {deleted} embedding rows for kind={kind}");
+                    let dropped = cortex::embed::drop_kind(&config, kind)?;
+                    println!(
+                        "dropped {} embedding rows and {} examined sentinels for kind={kind}",
+                        dropped.rows, dropped.sentinels
+                    );
                 } else {
                     let stats = cortex::embed::run(&vault_root, &config, &opts_struct)?;
                     println!(

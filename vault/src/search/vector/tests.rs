@@ -3,6 +3,8 @@ use crate::embedding::{EmbeddingModel, MockEmbedder};
 use crate::search::SearchIndex;
 use rusqlite::params;
 
+mod recipe;
+
 fn insert_note(index: &SearchIndex, path: &str, note_type: &str, modified_at: i64) {
     index
         .conn
@@ -541,7 +543,7 @@ fn stale_transcript_targets_exclude_examined_until_modified_at_bumps() {
 
     // Mark skip.md examined at its current indexed modified_at (100).
     index
-        .mark_embedding_examined_batch(
+        .mark_nothing_to_embed_batch(
             EmbeddingKind::TranscriptChunk,
             m.model_version(),
             &[("notes/skip.md".to_string(), 100)],
@@ -593,7 +595,7 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
     // sentinel.md: examined (side-table row) but NO note_embeddings row.
     insert_note(&index, "notes/sentinel.md", "article", 100);
     index
-        .mark_embedding_examined_batch(
+        .mark_nothing_to_embed_batch(
             EmbeddingKind::TranscriptChunk,
             m.model_version(),
             &[("notes/sentinel.md".to_string(), 100)],
@@ -615,7 +617,7 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
 }
 
 #[test]
-fn mark_embedding_examined_batch_upsert_advances_watermark() {
+fn mark_nothing_to_embed_batch_upsert_advances_watermark() {
     // Re-examining the same note is idempotent: the watermark advances to the
     // latest examined_at rather than erroring on the PK conflict.
     let mut index = SearchIndex::open_memory().expect("open");
@@ -623,14 +625,14 @@ fn mark_embedding_examined_batch_upsert_advances_watermark() {
     insert_note(&index, "notes/a.md", "article", 100);
 
     index
-        .mark_embedding_examined_batch(
+        .mark_nothing_to_embed_batch(
             EmbeddingKind::TranscriptChunk,
             m.model_version(),
             &[("notes/a.md".into(), 100)],
         )
         .expect("first mark");
     index
-        .mark_embedding_examined_batch(
+        .mark_nothing_to_embed_batch(
             EmbeddingKind::TranscriptChunk,
             m.model_version(),
             &[("notes/a.md".into(), 250)],
@@ -646,7 +648,7 @@ fn mark_embedding_examined_batch_upsert_advances_watermark() {
     );
     // An empty batch is a no-op (no transaction, no error).
     index
-        .mark_embedding_examined_batch(EmbeddingKind::TranscriptChunk, m.model_version(), &[])
+        .mark_nothing_to_embed_batch(EmbeddingKind::TranscriptChunk, m.model_version(), &[])
         .expect("empty batch is a no-op");
 }
 
@@ -661,7 +663,7 @@ fn sentinelled_notes_lists_only_currently_excluded_rows_and_clear_requalifies() 
         .execute("UPDATE notes SET trace = 'tr-held' WHERE path = 'notes/held.md'", [])
         .expect("trace");
     index
-        .mark_embedding_examined_batch(
+        .mark_nothing_to_embed_batch(
             EmbeddingKind::TranscriptChunk,
             m.model_version(),
             &[("notes/held.md".into(), 100), ("notes/bumped.md".into(), 200)],
@@ -1073,7 +1075,7 @@ fn stale_claim_targets_skips_when_claim_row_current() {
 }
 
 #[test]
-fn delete_embeddings_of_kind_removes_only_that_kind() {
+fn drop_embedding_kind_removes_only_that_kind() {
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-drop-test");
     index
@@ -1102,8 +1104,8 @@ fn delete_embeddings_of_kind_removes_only_that_kind() {
         .upsert_embedding("notes/a.md", EmbeddingKind::Claim, 0, "cl", &v, m.model_version(), 100)
         .expect("claim");
 
-    let deleted = index.delete_embeddings_of_kind(EmbeddingKind::Claim).expect("drop");
-    assert_eq!(deleted, 1, "exactly the one claim row is deleted");
+    let dropped = index.drop_embedding_kind(EmbeddingKind::Claim).expect("drop");
+    assert_eq!(dropped.rows, 1, "exactly the one claim row is deleted");
     assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 0);
     assert_eq!(
         index.count_embeddings(Some(EmbeddingKind::Summary)).expect("count"),

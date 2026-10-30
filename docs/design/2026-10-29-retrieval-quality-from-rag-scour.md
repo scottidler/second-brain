@@ -199,10 +199,16 @@ sb cortex embed ...   unchanged surface; recipe drift drains through the normal 
 **Model:** opus
 - Decompose `cortex/src/embed.rs` first (1449 lines against the 1500-line bloat gate).
 - Schema migration on both tables, recipe stamping at all four write sites, stale clause + sentinel clause, `DISTINCT` before `LIMIT`, per-note summary swap.
+- A re-embed that finds no source text for a kind on a note (empty or missing transcript) deletes that note's existing rows of that kind in the same transaction that writes the sentinel. Phase 0 found 17 notes / 163 chunk rows stuck behind a current sentinel with no source; without this they keep recipe 1 forever and the "exactly one recipe per kind" acceptance criterion cannot pass after the recipe-2 drain.
+- `sb cortex embed --drop-kind <K>` also clears kind `K`'s `embedding_examined` sentinels, so a drop plus a backfill cannot silently skip notes (Phase 0's coverage failure).
+- `cortex::embed::run` logs the resolved oracle DB path at DEBUG, visible under `-v` (Phase 0's unmet criterion 1).
 - **Success criteria:**
   - `recipe_bump_marks_only_that_kind_stale`: bumping one kind's `RECIPE` makes every row of that kind stale, including notes with a current-recipe-less sentinel, and no row of any other kind
   - `recipe_reembed_is_not_stale_next_tick`: after a drain, `stale_embedding_targets` returns nothing for that kind
   - `stale_targets_distinct`: a note with 9 stale chunk rows appears once
+  - `empty_source_clears_old_rows`: a re-embed that finds no transcript leaves the note with zero rows of that kind and a current sentinel
+  - `drop_kind_clears_that_kinds_sentinels`: after `--drop-kind`, a note sentinelled for that kind is selected by `stale_embedding_targets` again, and other kinds' sentinels stay
+  - the stale query on a migrated copy of the live DB is no slower than before the change (Phase 0 saw 18 s per batch boundary)
 
 #### Phase 4: Token-accurate chunker
 **Model:** opus
@@ -286,6 +292,7 @@ print("rows",len(L),"over512",sum(l>512 for l in L))' cortex/tests/fixtures/bge-
 - 2026-10-29: Scott approving this doc approves the decision rule, which is the provenance for flipping rerank and claim defaults that the 2026-10-27 doc left to him. (Panel R1 #17.)
 - 2026-10-29: rollback is a forward recipe bump plus a re-drain; an older binary restores no vectors. (Panel R1 #5.)
 - 2026-10-29: talos is out of scope (Scott's no-sb-on-talos ruling, same day).
+- 2026-10-29 (after Phase 0): a no-source re-embed deletes the note's rows of that kind in the sentinel's transaction (Scott, option A over keeping the rows as the transcript's only trace); `--drop-kind` also clears that kind's sentinels; `cortex::embed::run` logs the DB path at DEBUG. All three land in Phase 3.
 - 2026-10-29: rerank and kind offsets interact (rerank reorders the top 50 by summary text). Phase 7 runs on the Phase-6 state, so the shipped composition is what gets measured.
 
 ## Alternatives Considered

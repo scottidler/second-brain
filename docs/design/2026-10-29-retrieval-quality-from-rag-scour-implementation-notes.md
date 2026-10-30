@@ -131,3 +131,66 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
 
 ### Open questions
 - None.
+
+## Phase 3: Recipe versioning
+
+### Design decisions
+- `cortex/src/embed.rs` went from 1449 to ~630 lines before any recipe work: one file per kind (`embed/summary.rs`, `embed/transcript.rs`, `embed/claim.rs`), plus `embed/allowance.rs` (`ChunkAllowance`, `cap_work_by_chunks`, `TranscriptWork`), `embed/inference.rs` (the dedicated pool, `embed_in_sub_batches`) and `embed/lock.rs`. The cap and allowance tests moved to the sibling `embed/allowance/tests.rs`, which brought `embed/tests.rs` from 1499 back to ~1390 lines. Pure move: the embed test count was 58 before and after the split.
+- The recipe constants live in vault: `vault::search::{SUMMARY_RECIPE, TRANSCRIPT_CHUNK_RECIPE, CLAIM_RECIPE}`, all 1, read through `EmbeddingKind::recipe()`. Every write path stamps `kind.recipe()` itself (`upsert_embedding`, `upsert_embeddings_batch` and `swap_embeddings_batch` through `insert_batch_item`, `swap_kind_chunks`, `mark_nothing_to_embed_batch`), and `stale_embedding_targets` / `sentinelled_notes` compare against the same call. No caller passes a recipe, so a writer and the stale query cannot disagree.
+- Stale clause `OR e.recipe < ?4` and sentinel clause `OR x.recipe < ?4` on all three arms; `SELECT DISTINCT` on the note columns before `ORDER BY ... LIMIT` (`vault/src/search/vector.rs:stale_embedding_targets`). `sentinelled_notes` only reports sentinels at the current recipe, so the archive revival never clears a sentinel the stale query already ignores.
+- Schema: `recipe INTEGER NOT NULL DEFAULT 1` in both `CREATE TABLE`s, plus `ensure_recipe_columns` (`vault/src/search/schema.rs`) for existing DBs, the same `PRAGMA table_info` + `ALTER ADD COLUMN` pattern as the notes-column migrations. It runs after the claim-kind rebuild, whose copy lists the pre-recipe columns.
+- Per-note summary swap: new `swap_embeddings_batch` (`vector.rs`), one `BEGIN IMMEDIATE` transaction, DELETE each note's rows of the item's kind and model, then INSERT. `process_summary_batch` writes through it. The 200 ms transaction test now times this writer, since it is the one production uses.
+- Scott's option A: `mark_embedding_examined_batch` is renamed `mark_nothing_to_embed_batch` and deletes the note's rows of that kind and model in the sentinel's transaction, logging INFO with the count when it clears any. The old name described half of what it now does.
+- `--drop-kind`: `SearchIndex::delete_embeddings_of_kind` is renamed `drop_embedding_kind` and deletes the kind's rows and its `embedding_examined` sentinels (all models) in one transaction, returning `DroppedKind { rows, sentinels }`. Sentinels are kind-keyed (`PRIMARY KEY (note_path, kind, model_version)`), so only that kind's go. `sb cortex embed --drop-kind` prints both counts.
+- `cortex::embed::run` logs `cortex::embed::run: oracle db=<path>` at DEBUG; `drop_kind` logs the same at DEBUG. Phase 0 had to prove arm isolation from `/proc/<pid>/fd` because the path was never logged; it is now in the `-v` output (evidence below).
+- New index `idx_note_embeddings_note_kind_model ON note_embeddings(note_path, kind, model_version)`, created by `ensure_recipe_columns`. It is the root cause fix for Phase 0's 18 s batch boundary (see Tradeoffs and Evidence).
+
+### Deviations
+- Recipe constants sit in `vault::search`, not `cortex::embed` (the doc's Architecture names both crates). Same effect, correct seam: the four write sites and the stale query are vault code, so the constant they compare against lives beside them. Phase 4's chunker constants are also vault constants per the doc. A change to `cortex::embed::summary_embed_text` must bump `SUMMARY_RECIPE` in vault; the constant's doc comment names that function.
+- The stale-join index is not in the doc. Without it the DISTINCT query is as slow as the old one (21-22 s vs 23-24 s on the snapshot); with it both are ~20 ms. Adding a column without fixing the query it feeds would ship the doc's DISTINCT with the same 18-24 s boundary Phase 0 measured.
+- `swap_embeddings_batch` deletes only the item's `model_version`, while `swap_kind_chunks` deletes every model's chunk rows. The summary path never deleted another model's row (it was `INSERT OR REPLACE`), and keeping it that way leaves an A/B model flip's summaries alone. `upsert_embeddings_batch` stays (stamped) for the bench and regression fixtures; no production path calls it.
+- Two renames the doc does not name: `mark_embedding_examined_batch` -> `mark_nothing_to_embed_batch`, `delete_embeddings_of_kind` -> `drop_embedding_kind`. Both functions changed behavior; the old names would have lied.
+- A recipe bump in tests is simulated by restamping stored rows and sentinels one below the constant (test-util `SearchIndex::set_test_recipe`), because the constants are compile-time. The stale query sees exactly that state after a real bump.
+- Stamping cannot be observed in a test while every constant equals the column default (1): an unstamped write lands at 1 either way. `recipe_reembed_is_not_stale_next_tick` asserts every row carries `kind.recipe()`, so it fails on an unstamped write site the moment Phase 4 sets transcript-chunk or claim to 2. The sentinel stamp is observable now (its `ON CONFLICT DO UPDATE` keeps the old value if unstamped) and is mutation-tested.
+
+### Tradeoffs
+- `SELECT DISTINCT` (the doc's form) vs `EXISTS` subqueries. Measured on the snapshot without the index: old 24.0 s, DISTINCT 21.4 s, EXISTS 19.5 s (11.8 s bumped). With the index all three are 10-30 ms, so the doc's form stays.
+- One transaction for the summary swap (DELETE + INSERT per note) vs one `swap_kind_chunks` call per note. One transaction keeps the summary batch's single short write, which the 200 ms test pins.
+- Deleting no-source rows scoped to the sentinel's model vs every model. Scoped: the sentinel itself is per model, and another model's rows are not served under this pin.
+
+### Open questions
+- Superseded notes are outside `stale_embedding_targets` (`superseded_by` filter), so their rows never re-embed. The snapshot has exactly 1 such row (a summary). A future `SUMMARY_RECIPE` bump would leave it at the old recipe and break "exactly one recipe per kind" for summary. Phases 4-5 bump only transcript-chunk and claim, so the acceptance criterion is unaffected. `search_vector` does not filter on `superseded_by`, so those rows are still served. Should a superseded note's rows be deleted?
+- The 17 Phase-0 notes on live: their sentinels are current today, so nothing touches them until the Phase-5 recipe-2 drain, when the old-recipe sentinel stops masking them, the read finds no source, and `mark_nothing_to_embed_batch` deletes their 163 rows. That is the intended path; it means the live index keeps serving those 163 vectors until Phase 5 deploys.
+- The live daemon on ripr pays roughly 10 s (summary) + 23 s (transcript-chunk) of stale query per embed batch until a binary with the new index is deployed. No deploy here; Phase 5 is the deploy. Worth shipping earlier?
+
+### Evidence (Phase 3, ripr 2026-10-29)
+- Tests, all green in `otto ci`:
+  - `vault/src/search/vector/tests/recipe.rs`: `recipe_bump_marks_only_that_kind_stale`, `stale_targets_distinct`, `nothing_to_embed_clears_that_kinds_rows_only`, `drop_kind_clears_that_kinds_sentinels`, `summary_swap_replaces_the_notes_rows_for_that_model_only`, `sentinelled_notes_skip_an_old_recipe_sentinel`
+  - `cortex/src/embed/tests/recipe.rs`: `recipe_reembed_is_not_stale_next_tick` (summary and transcript-chunk, a no-source note included), `empty_source_clears_old_rows`
+  - `vault/src/search/schema/tests.rs`: `recipe_migration_adds_columns_reading_one_and_is_idempotent`
+  - `drop_embedding_kind_removes_only_that_kind` is the renamed `delete_embeddings_of_kind_removes_only_that_kind`, asserting `dropped.rows`.
+- Shown failing with the change reverted (vector.rs / schema.rs backed up, mutated, tested, restored, `cmp` clean):
+
+  | mutation | fails |
+  |---|---|
+  | A: drop `OR e.recipe < ?4` | `recipe_bump_marks_only_that_kind_stale`, `recipe_reembed_is_not_stale_next_tick` |
+  | B: drop `OR x.recipe < ?4` | `recipe_bump_marks_only_that_kind_stale`, `recipe_reembed_is_not_stale_next_tick` |
+  | C: drop `DISTINCT` | `stale_targets_distinct` (+ 3 others that count targets) |
+  | D: no row DELETE in the sentinel write | `empty_source_clears_old_rows`, `nothing_to_embed_clears_that_kinds_rows_only` |
+  | E: no sentinel DELETE in the drop | `drop_kind_clears_that_kinds_sentinels` |
+  | F: sentinel upsert keeps the old recipe | `recipe_reembed_is_not_stale_next_tick` |
+  | G: summary swap without its DELETE | `summary_swap_replaces_the_notes_rows_for_that_model_only` |
+  | H: `sentinelled_notes` without the recipe filter | `sentinelled_notes_skip_an_old_recipe_sentinel` |
+  | I: no stale-join index | `recipe_migration_adds_columns_reading_one_and_is_idempotent` |
+
+- Migration on a copy of the Phase-0 snapshot (`scratchpad/phase3/arm3/sb/oracle/oracle.db`), real binary, same bwrap shape as Phase 0 (live oracle dir read-only): `sb cortex embed -v --drop-kind claim` exit 0, 0.7 s wall including the migration, log `adding note_embeddings.recipe (existing rows read as recipe 1)` and the same for `embedding_examined`. Census after: `summary|1|4922`, `transcript-chunk|1|19663`, sentinels `transcript-chunk|1|1598`. Live `oracle.db` mtime unchanged across both runs (1793318879).
+- DB path at `-v`: `sb cortex embed -v --kind summary` on the same arm logged `[DEBUG] cortex::embed: cortex::embed::run: oracle db=.../scratchpad/phase3/arm3/sb/oracle/oracle.db`, exit 0, `scanned=0`, 0.9 s total.
+- Stale query timing, sqlite3 `.timer`, LIMIT 64, live model id; old SQL on the pre-migration copy vs new SQL on the migrated copy:
+
+  | kind | old | new, recipe current | new, recipe bumped (64 distinct of 64) |
+  |---|---|---|---|
+  | summary | 9.913 s | 0.014 s | 0.001 s |
+  | transcript-chunk | 23.066 s | 0.023 s | 0.032 s |
+  | claim | 0.001 s | 0.002 s | 0.001 s |
+
+  Plan before: `SEARCH e USING INDEX idx_note_embeddings_kind_model (kind=? AND model_version=?)`, i.e. every chunk row of the model visited once per candidate note. After: `SEARCH e USING INDEX idx_note_embeddings_note_kind_model (note_path=? AND kind=? AND model_version=?)`. `search_vector`'s scan plan is unchanged (`SCAN e`, 22-23 ms full-row read on both copies).

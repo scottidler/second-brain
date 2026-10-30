@@ -154,6 +154,7 @@ impl super::SearchIndex {
                 model_version TEXT NOT NULL,
                 produced_at INTEGER NOT NULL,
                 source_modified_at INTEGER NOT NULL,
+                recipe INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE,
                 UNIQUE (note_path, kind, chunk_index, model_version)
             );",
@@ -193,6 +194,7 @@ impl super::SearchIndex {
                 kind          TEXT NOT NULL,
                 model_version TEXT NOT NULL,
                 examined_at   INTEGER NOT NULL,
+                recipe        INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (note_path, kind, model_version),
                 FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE
             );
@@ -204,12 +206,50 @@ impl super::SearchIndex {
             INSERT OR IGNORE INTO embedding_config (key, value)
                 VALUES ('active_dim', '384');",
         )?;
+        self.ensure_recipe_columns()?;
         // Before the seed below: a pre-existing `-candle` pin is renamed in
         // place, and a fresh DB has no pin for the seed to collide with.
         self.migrate_backend_free_model_ids()?;
         self.conn.execute(
             "INSERT OR IGNORE INTO embedding_config (key, value) VALUES ('active_model', ?1)",
             rusqlite::params![crate::embedding::ACTIVE_MODEL_VERSION],
+        )?;
+        Ok(())
+    }
+
+    /// Add `recipe` to `note_embeddings` and `embedding_examined` on DBs
+    /// created before embed-recipe versioning
+    /// (`docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`),
+    /// and the `(note_path, kind, model_version)` index the stale query joins on.
+    ///
+    /// Existing rows read as recipe 1, the recipe every kind had before the
+    /// column existed. Same idempotent `PRAGMA table_info` probe + single
+    /// `ALTER ADD COLUMN` pattern as `ensure_trace_columns`. Runs after
+    /// `migrate_note_embeddings_add_claim_kind`, whose rebuild copies an
+    /// explicit pre-recipe column list.
+    ///
+    /// The index is load-bearing for latency, not correctness: without it the
+    /// planner joins `note_embeddings` per note through
+    /// `idx_note_embeddings_kind_model`, whose `(kind, model_version)` prefix
+    /// matches every chunk row, and one stale read on the live DB took 18-24 s.
+    #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
+    pub(crate) fn ensure_recipe_columns(&self) -> Result<()> {
+        for table in ["note_embeddings", "embedding_examined"] {
+            let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(warn_row)
+                .collect();
+            if !columns.iter().any(|c| c == "recipe") {
+                log::info!("search::migrate: adding {table}.recipe (existing rows read as recipe 1)");
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN recipe INTEGER NOT NULL DEFAULT 1;"
+                ))?;
+            }
+        }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_note_embeddings_note_kind_model
+                ON note_embeddings(note_path, kind, model_version);",
         )?;
         Ok(())
     }
