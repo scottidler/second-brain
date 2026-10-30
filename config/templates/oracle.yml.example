@@ -75,10 +75,16 @@ retrieval:
       enabled: false    # wikilink-expansion; off by default (no top-k ranking lift)
       top-k: 50
       weight: 0.0       # demoted out of the fused result even if enabled
-      hops: 2
-      hop-decay: 0.5
+      hops: 2           # bfs only
+      hop-decay: 0.5    # bfs only
       min-edge-weight: 0.0
       edge-kinds: [wikilink]
+      # Scorer: bfs (hop-limited expansion) or ppr (personalized PageRank by
+      # forward push, seeded from the bm25+vector fused list by reciprocal rank).
+      algorithm: bfs
+      ppr-alpha: 0.15         # ppr only: teleport probability back to the seeds
+      ppr-epsilon: 0.0001     # ppr only: residual threshold per unit of weighted degree
+      ppr-max-pushes: 20000   # ppr only: work cap; reaching it returns the estimate with a WARN
 
   # --- 2. Fusion. Consulted only when more than one retriever is enabled. ---
   fusion:

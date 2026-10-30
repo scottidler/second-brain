@@ -8,7 +8,7 @@
 //! reach `server.rs`'s private consts and sibling helper methods directly.
 
 use super::{GRAPH_HOP_DECAY, OracleMcpServer, RERANK_TEXT_MAX_CHARS};
-use crate::config::{ExcludeConfig, RerankConfig, RetrievalConfig};
+use crate::config::{ExcludeConfig, GraphAlgorithm, RerankConfig, RetrievalConfig};
 use crate::tools::SearchMode;
 use rmcp::ErrorData as McpError;
 use tracing::{debug, warn};
@@ -131,6 +131,28 @@ impl OracleMcpServer {
         min_weight: f32,
         hop_decay: f32,
     ) -> Result<Vec<String>, McpError> {
+        let scored = Self::bfs_scores(db, seed_paths, hops, edge_kinds, min_weight, hop_decay)?;
+        let mut graph_paths: Vec<String> = Vec::new();
+        for (path, _) in scored {
+            if Self::note_matches_filters(db, &path, tags, tags_all, note_type, status)? {
+                graph_paths.push(path);
+            }
+        }
+        Ok(graph_paths)
+    }
+
+    /// The BFS scorer behind [`Self::expand_to_graph_paths`]: every reached
+    /// neighbor with its expansion score, by score descending then path
+    /// ascending (without the tiebreak, tied neighbors fall back to random
+    /// HashMap order). No schema filter is applied here.
+    fn bfs_scores(
+        db: &SearchIndex,
+        seed_paths: &[String],
+        hops: u8,
+        edge_kinds: Option<&[String]>,
+        min_weight: f32,
+        hop_decay: f32,
+    ) -> Result<Vec<(String, f32)>, McpError> {
         let seed_rank: std::collections::HashMap<&str, usize> =
             seed_paths.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
 
@@ -146,17 +168,53 @@ impl OracleMcpServer {
             *scores.entry(reach.path.clone()).or_insert(0.0) += w_seed * reach.weight * decay;
         }
 
-        // Sort by expansion score desc, then path asc as a stable tiebreaker
-        // (without it, tied neighbors fall back to random HashMap order).
         let mut scored: Vec<(String, f32)> = scores.into_iter().collect();
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
+        Ok(scored)
+    }
+
+    /// PPR counterpart of [`Self::expand_to_graph_paths`]: personalized
+    /// PageRank from `seed_paths`, each seed weighted by reciprocal rank
+    /// (`1/(rank+1)`, the same weight BFS gives its seeds), then the non-seed
+    /// notes by PPR score, filtered to the schema filters. Seeds are left out
+    /// as in BFS, so the graph list only adds notes the seeds did not hold.
+    #[allow(clippy::too_many_arguments)]
+    fn ppr_graph_paths(
+        &self,
+        db: &SearchIndex,
+        seed_paths: &[String],
+        tags: Option<&[String]>,
+        tags_all: bool,
+        note_type: Option<&str>,
+        status: Option<&str>,
+        edge_kinds: Option<&[String]>,
+        min_weight: f32,
+        params: &vault::search::PprParams,
+    ) -> Result<Vec<String>, McpError> {
+        let seeds: Vec<(String, f64)> = seed_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), 1.0 / (i as f64 + 1.0)))
+            .collect();
+        let ppr = db
+            .personalized_pagerank(&seeds, edge_kinds, min_weight, params)
+            .map_err(Self::err)?;
+        debug!(
+            pushes = ppr.pushes,
+            capped = ppr.capped,
+            scored = ppr.scores.len(),
+            "ppr_graph_paths"
+        );
+        let seed_set: std::collections::HashSet<&str> = seed_paths.iter().map(|p| p.as_str()).collect();
         let mut graph_paths: Vec<String> = Vec::new();
-        for (path, _) in scored {
-            if Self::note_matches_filters(db, &path, tags, tags_all, note_type, status)? {
+        for (path, _) in ppr.scores {
+            if !seed_set.contains(path.as_str())
+                && Self::note_matches_filters(db, &path, tags, tags_all, note_type, status)?
+            {
                 graph_paths.push(path);
             }
         }
@@ -539,8 +597,10 @@ impl OracleMcpServer {
 
     /// Build the graph retriever's ranked list for the configured pipeline:
     /// seed from the hybrid (bm25 + vector) fused order - mirroring the legacy
-    /// graph modes - then expand with the operator-configured graph params and
-    /// cap at the method's `top-k`. Off by default, so this runs only when the
+    /// graph modes - then score the graph with the configured `algorithm`
+    /// (`bfs` expansion or `ppr`) and cap at the method's `top-k`. Both
+    /// algorithms get the same seed list, so they differ only in the scorer.
+    /// The legacy `graph`/`graph-hybrid` modes always use BFS. Off by default, so this runs only when the
     /// operator explicitly enables graph; it re-runs bm25/vector for the seed.
     #[allow(clippy::too_many_arguments)]
     fn pipeline_graph_paths(
@@ -559,20 +619,34 @@ impl OracleMcpServer {
         let vec = self.vector_paths(db, query, tags, tags_all, note_type, status, depth)?;
         let seed = vault::search::reciprocal_rank_fusion(&[&bm25, &vec], cfg.fusion.k, depth as usize);
         let seed_paths: Vec<String> = seed.iter().map(|h| h.note_path.clone()).collect();
-        let mut g = self.expand_to_graph_paths(
-            db,
-            &seed_paths,
-            tags,
-            tags_all,
-            note_type,
-            status,
-            // Honor the same hard cap as the per-call graph modes: a misconfigured
-            // `retrieval.methods.graph.hops` must not bypass the traversal-cost bound.
-            cfg.methods.graph.hops.min(super::MAX_EXPAND_HOPS),
-            Some(&cfg.methods.graph.edge_kinds),
-            cfg.methods.graph.min_edge_weight,
-            cfg.methods.graph.hop_decay,
-        )?;
+        let graph = &cfg.methods.graph;
+        let mut g = match graph.algorithm {
+            GraphAlgorithm::Bfs => self.expand_to_graph_paths(
+                db,
+                &seed_paths,
+                tags,
+                tags_all,
+                note_type,
+                status,
+                // Honor the same hard cap as the per-call graph modes: a misconfigured
+                // `retrieval.methods.graph.hops` must not bypass the traversal-cost bound.
+                graph.hops.min(super::MAX_EXPAND_HOPS),
+                Some(&graph.edge_kinds),
+                graph.min_edge_weight,
+                graph.hop_decay,
+            )?,
+            GraphAlgorithm::Ppr => self.ppr_graph_paths(
+                db,
+                &seed_paths,
+                tags,
+                tags_all,
+                note_type,
+                status,
+                Some(&graph.edge_kinds),
+                graph.min_edge_weight,
+                &graph.ppr_params(),
+            )?,
+        };
         g.truncate(retrieval_depth(cfg.methods.graph.top_k, limit) as usize);
         Ok(g)
     }

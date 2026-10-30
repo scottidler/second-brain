@@ -255,6 +255,122 @@ fn expand_to_graph_paths_applies_seed_weight_and_hop_decay() {
     );
 }
 
+/// The BFS regression fixture: three ranked seeds, six neighbors, mixed edge
+/// kinds and weights, one edge between seeds, a neighbor reached from two
+/// seeds, a reverse-written edge, and 2-hop paths.
+fn bfs_regression_server() -> (OracleMcpServer, Vec<String>) {
+    let db = SearchIndex::open_memory().expect("db");
+    for p in [
+        "notes/s1.md",
+        "notes/s2.md",
+        "notes/s3.md",
+        "notes/a.md",
+        "notes/b.md",
+        "notes/c.md",
+        "notes/d.md",
+        "notes/e.md",
+        "notes/f.md",
+    ] {
+        seed(&db, p, "body");
+    }
+    let server = OracleMcpServer::new(Config::default(), db);
+    {
+        let handle = server.db_handle();
+        let mut guard = handle.lock().expect("lock");
+        let e = |s: &str, d: &str, k: &str, w: f32| Edge::deterministic(s, d, k, w);
+        guard
+            .insert_edges(&[
+                e("notes/s1.md", "notes/a.md", "wikilink", 1.0),
+                e("notes/b.md", "notes/s1.md", "wikilink", 0.8),
+                e("notes/s1.md", "notes/s2.md", "wikilink", 1.0),
+                e("notes/s2.md", "notes/a.md", "semantic", 0.7),
+                e("notes/s2.md", "notes/c.md", "wikilink", 0.6),
+                e("notes/a.md", "notes/d.md", "wikilink", 0.9),
+                e("notes/c.md", "notes/d.md", "shared-tag", 0.35),
+                e("notes/s3.md", "notes/e.md", "wikilink", 0.45),
+                e("notes/e.md", "notes/f.md", "semantic", 0.3),
+                e("notes/b.md", "notes/f.md", "wikilink", 1.0),
+            ])
+            .expect("insert edges");
+    }
+    let seeds = vec![
+        "notes/s1.md".to_string(),
+        "notes/s2.md".to_string(),
+        "notes/s3.md".to_string(),
+    ];
+    (server, seeds)
+}
+
+/// BFS scores on the regression fixture are bit-identical to the scorer as
+/// it stood before PPR was added: the f32 bit patterns below were captured
+/// from that code (2 hops, all kinds, min weight 0, hop decay 0.5).
+#[test]
+fn bfs_scores_unchanged() {
+    let (server, seeds) = bfs_regression_server();
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    let scored = OracleMcpServer::bfs_scores(&guard, &seeds, 2, None, 0.0, 0.5).expect("bfs");
+    let bits: Vec<(&str, u32)> = scored.iter().map(|(p, s)| (p.as_str(), s.to_bits())).collect();
+    assert_eq!(
+        bits,
+        vec![
+            ("notes/a.md", 1068289229), // 1.35
+            ("notes/b.md", 1061997773), // 0.8
+            ("notes/d.md", 1057006551), // 0.5025
+            ("notes/f.md", 1054364140), // 0.4225
+            ("notes/c.md", 1050253722), // 0.3
+            ("notes/e.md", 1041865114), // 0.15
+        ]
+    );
+    let paths = server
+        .expand_to_graph_paths(&guard, &seeds, None, false, None, None, 2, None, 0.0, 0.5)
+        .expect("expand");
+    assert_eq!(
+        paths,
+        scored.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        "the graph list is the scored order"
+    );
+}
+
+/// PPR on the same fixture: seeds never appear, every non-seed neighbor is
+/// ranked, and the edge-kind filter is honored.
+#[test]
+fn ppr_graph_paths_ranks_non_seed_neighbors() {
+    let (server, seeds) = bfs_regression_server();
+    let handle = server.db_handle();
+    let guard = handle.lock().expect("lock");
+    let params = GraphMethod::default().ppr_params();
+    let all = server
+        .ppr_graph_paths(&guard, &seeds, None, false, None, None, None, 0.0, &params)
+        .expect("ppr");
+    let mut sorted = all.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "notes/a.md",
+            "notes/b.md",
+            "notes/c.md",
+            "notes/d.md",
+            "notes/e.md",
+            "notes/f.md"
+        ]
+        .map(String::from)
+        .to_vec()
+    );
+    // a hangs off both top seeds; it leads.
+    assert_eq!(all[0], "notes/a.md", "{all:?}");
+
+    let wikilink = vec!["wikilink".to_string()];
+    let links_only = server
+        .ppr_graph_paths(&guard, &seeds, None, false, None, None, Some(&wikilink), 0.0, &params)
+        .expect("ppr");
+    // f is reachable over wikilinks through b; nothing reaches anything through
+    // the semantic or shared-tag edges.
+    assert!(links_only.contains(&"notes/f.md".to_string()), "{links_only:?}");
+    assert!(!links_only.iter().any(|p| p.starts_with("notes/s")), "{links_only:?}");
+}
+
 /// `input_k = 0` short-circuits to fail-open (no reorder, no disable).
 #[test]
 fn rerank_input_k_zero_fails_open() {
@@ -447,6 +563,19 @@ fn configured_hybrid_returns_all_sixty_matches_at_limit_100() {
 #[test]
 fn configured_graph_returns_all_sixty_neighbors_at_limit_100() {
     let server = limit_server(limit_index(true), retrieval_with(false, false, true));
+    let paths = configured_paths(&server, 100);
+    assert_eq!(paths.len(), MATCHING_NOTES, "{paths:?}");
+    assert!(paths.iter().all(|p| p.starts_with("notes/n")), "{paths:?}");
+}
+
+/// The configured graph retriever with `algorithm: ppr` returns the same
+/// sixty neighbors: PPR is wired into the pipeline and seeded from the same
+/// list as BFS.
+#[test]
+fn configured_graph_ppr_returns_all_sixty_neighbors_at_limit_100() {
+    let mut retrieval = retrieval_with(false, false, true);
+    retrieval.methods.graph.algorithm = crate::config::GraphAlgorithm::Ppr;
+    let server = limit_server(limit_index(true), retrieval);
     let paths = configured_paths(&server, 100);
     assert_eq!(paths.len(), MATCHING_NOTES, "{paths:?}");
     assert!(paths.iter().all(|p| p.starts_with("notes/n")), "{paths:?}");

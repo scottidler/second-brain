@@ -189,6 +189,44 @@ pub struct GraphMethod {
     /// Edge kinds to traverse.
     #[serde(default = "default_edge_kinds")]
     pub edge_kinds: Vec<String>,
+    /// How expanded notes are scored: `bfs` (the hop-limited expansion) or
+    /// `ppr` (personalized PageRank). `hops` and `hop-decay` apply to `bfs`
+    /// only; the `ppr-*` keys apply to `ppr` only.
+    #[serde(default)]
+    pub algorithm: GraphAlgorithm,
+    /// PPR teleport probability back to the seeds, in (0, 1).
+    #[serde(default = "default_ppr_alpha")]
+    pub ppr_alpha: f64,
+    /// PPR residual threshold per unit of weighted degree.
+    #[serde(default = "default_ppr_epsilon")]
+    pub ppr_epsilon: f64,
+    /// PPR work cap per query; reaching it returns the current estimate.
+    #[serde(default = "default_ppr_max_pushes")]
+    pub ppr_max_pushes: usize,
+}
+
+impl GraphMethod {
+    /// The vault-side PPR parameters this method configures.
+    pub fn ppr_params(&self) -> vault::search::PprParams {
+        vault::search::PprParams {
+            alpha: self.ppr_alpha,
+            epsilon: self.ppr_epsilon,
+            max_pushes: self.ppr_max_pushes,
+        }
+    }
+}
+
+/// The graph retriever's scorer.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphAlgorithm {
+    /// Breadth-first expansion up to `hops`, each neighbor scored by
+    /// `sum(seed weight * path weight * hop-decay^(hop-1))`.
+    #[default]
+    Bfs,
+    /// Forward-push personalized PageRank from the reciprocal-rank-weighted
+    /// seeds.
+    Ppr,
 }
 
 impl Default for GraphMethod {
@@ -201,6 +239,10 @@ impl Default for GraphMethod {
             hop_decay: default_graph_hop_decay(),
             min_edge_weight: 0.0,
             edge_kinds: default_edge_kinds(),
+            algorithm: GraphAlgorithm::Bfs,
+            ppr_alpha: default_ppr_alpha(),
+            ppr_epsilon: default_ppr_epsilon(),
+            ppr_max_pushes: default_ppr_max_pushes(),
         }
     }
 }
@@ -362,6 +404,18 @@ fn default_graph_hop_decay() -> f32 {
 
 fn default_edge_kinds() -> Vec<String> {
     vec!["wikilink".to_string()]
+}
+
+fn default_ppr_alpha() -> f64 {
+    0.15
+}
+
+fn default_ppr_epsilon() -> f64 {
+    1e-4
+}
+
+fn default_ppr_max_pushes() -> usize {
+    20_000
 }
 
 fn default_rrf_k() -> usize {

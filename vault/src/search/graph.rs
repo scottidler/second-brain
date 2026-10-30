@@ -16,6 +16,9 @@ use rusqlite::params;
 
 use super::{SearchIndex, optional_row, warn_row};
 
+mod ppr;
+pub use ppr::{PprParams, PprScores, forward_push};
+
 /// One edge to insert into the `edges` table. `src` and `dst` are
 /// vault-relative note paths. Every edge is *owned by its `src`*: the graph
 /// pass refreshes a note's edges with delete-by-`src` then insert, and
@@ -656,32 +659,14 @@ impl SearchIndex {
         edge_kinds: Option<&[String]>,
         min_weight: f32,
     ) -> Result<Vec<(String, String, f32, String)>> {
-        let mut sql = String::from(
-            "SELECT src, dst, kind, weight, predicate FROM edges
-             WHERE (src = ?1 OR dst = ?1) AND weight >= ?2",
-        );
+        let (sql, kinds) = neighbor_query(edge_kinds);
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
             vec![Box::new(node.to_string()), Box::new(min_weight as f64)];
-        if let Some(kinds) = edge_kinds
-            && !kinds.is_empty()
-        {
-            // A filter value matches either the edge `kind` (e.g. "semantic",
-            // "fact") or, for typed edges, the `predicate` (e.g.
-            // "uses", "released-on") — so callers can target a relation
-            // directly. Each value is bound twice (kind list and predicate list).
-            let kind_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3)).collect();
-            let pred_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3 + kinds.len())).collect();
-            sql.push_str(&format!(
-                " AND (kind IN ({}) OR predicate IN ({}))",
-                kind_ph.join(", "),
-                pred_ph.join(", ")
-            ));
-            for k in kinds {
-                params_vec.push(Box::new(k.clone()));
-            }
-            for k in kinds {
-                params_vec.push(Box::new(k.clone()));
-            }
+        for k in &kinds {
+            params_vec.push(Box::new(k.clone()));
+        }
+        for k in &kinds {
+            params_vec.push(Box::new(k.clone()));
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -703,6 +688,30 @@ impl SearchIndex {
         }
         Ok(out)
     }
+}
+
+/// The incident-edge query shared by [`SearchIndex::expand_graph`] and
+/// [`SearchIndex::personalized_pagerank`], so both traverse exactly the same
+/// edges. Binds `?1` = node, `?2` = min weight, then the returned kinds twice:
+/// a filter value matches either the edge `kind` (e.g. "semantic", "fact") or,
+/// for typed edges, the `predicate` (e.g. "uses", "released-on"), so callers
+/// can target a relation directly. `None` or an empty list matches every kind.
+fn neighbor_query(edge_kinds: Option<&[String]>) -> (String, Vec<String>) {
+    let mut sql = String::from(
+        "SELECT src, dst, kind, weight, predicate FROM edges
+             WHERE (src = ?1 OR dst = ?1) AND weight >= ?2",
+    );
+    let kinds: Vec<String> = edge_kinds.map(|k| k.to_vec()).unwrap_or_default();
+    if !kinds.is_empty() {
+        let kind_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3)).collect();
+        let pred_ph: Vec<String> = (0..kinds.len()).map(|i| format!("?{}", i + 3 + kinds.len())).collect();
+        sql.push_str(&format!(
+            " AND (kind IN ({}) OR predicate IN ({}))",
+            kind_ph.join(", "),
+            pred_ph.join(", ")
+        ));
+    }
+    (sql, kinds)
 }
 
 /// The insert loop shared by [`SearchIndex::insert_edges`] and

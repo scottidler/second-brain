@@ -361,7 +361,7 @@ mod graph;
 mod offsets;
 pub use offsets::KindOffsets;
 
-pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};
+pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach, PprParams, PprScores, forward_push};
 
 mod cold;
 mod filter;

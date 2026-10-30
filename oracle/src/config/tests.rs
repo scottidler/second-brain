@@ -296,3 +296,38 @@ fn rerank_default_matches_verdict() {
         "explicit false wins beside other keys"
     );
 }
+
+/// The graph scorer defaults to `bfs` with the PPR keys at their documented
+/// defaults; `algorithm: ppr` and the `ppr-*` keys parse kebab-case; an
+/// unknown algorithm or a snake_case key fails the load.
+#[test]
+fn graph_algorithm_defaults_to_bfs_and_parses_ppr_keys() {
+    let cfg: Config = serde_yaml::from_str("").expect("empty yaml loads");
+    let g = &cfg.retrieval.methods.graph;
+    assert_eq!(g.algorithm, GraphAlgorithm::Bfs);
+    assert!(!g.enabled, "graph stays off by default");
+    assert_eq!((g.ppr_alpha, g.ppr_epsilon, g.ppr_max_pushes), (0.15, 1e-4, 20_000));
+    assert!(g.ppr_params().validate().is_ok(), "the defaults are valid PPR params");
+
+    let cfg: Config = serde_yaml::from_str(
+        "retrieval:\n  methods:\n    graph:\n      algorithm: ppr\n      ppr-alpha: 0.3\n      ppr-epsilon: 0.001\n      ppr-max-pushes: 500\n",
+    )
+    .expect("ppr block loads");
+    let g = &cfg.retrieval.methods.graph;
+    assert_eq!(g.algorithm, GraphAlgorithm::Ppr);
+    assert_eq!(
+        g.ppr_params(),
+        vault::search::PprParams {
+            alpha: 0.3,
+            epsilon: 0.001,
+            max_pushes: 500
+        }
+    );
+
+    for bad in [
+        "retrieval:\n  methods:\n    graph:\n      algorithm: pagerank\n",
+        "retrieval:\n  methods:\n    graph:\n      ppr_alpha: 0.3\n",
+    ] {
+        assert!(serde_yaml::from_str::<Config>(bad).is_err(), "{bad:?} must be rejected");
+    }
+}
