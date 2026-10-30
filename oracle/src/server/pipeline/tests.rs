@@ -4,6 +4,7 @@ use crate::config::{Bm25Method, Config, MethodsConfig, RerankConfig, RetrievalCo
 use crate::tools::SearchMode;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use vault::embedding::{EmbeddingModel, MockEmbedder};
 use vault::frontmatter::Frontmatter;
 use vault::note::Note;
@@ -404,34 +405,150 @@ fn rerank_single_candidate_fails_open() {
     }
 }
 
-/// A reranker slow enough that the projected batch cost exceeds a zero budget
-/// trips the budget branch: fused order returned, caller told to disable.
-#[test]
-fn rerank_over_budget_disables() {
-    struct SlowMock;
-    impl vault::search::Reranker for SlowMock {
-        fn model_id(&self) -> &str {
-            "slow-mock"
-        }
-        fn score(&self, _query: &str, docs: &[&str]) -> eyre::Result<Vec<f32>> {
-            // Sleep so the probe's measured per-pair cost is reliably positive,
-            // making `projected > 0` deterministic against a zero budget.
-            std::thread::sleep(std::time::Duration::from_millis(3));
-            Ok(vec![0.0; docs.len()])
-        }
+/// Sleeps on every call so the probe's measured per-pair cost is reliably
+/// positive, making `projected > 0` deterministic against a zero budget.
+struct SlowMock;
+impl vault::search::Reranker for SlowMock {
+    fn model_id(&self) -> &str {
+        "slow-mock"
     }
+    fn score(&self, _query: &str, docs: &[&str]) -> eyre::Result<Vec<f32>> {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        Ok(vec![0.0; docs.len()])
+    }
+}
 
+/// A reranker whose probe always errors.
+struct ErrMock;
+impl vault::search::Reranker for ErrMock {
+    fn model_id(&self) -> &str {
+        "err-mock"
+    }
+    fn score(&self, _query: &str, _docs: &[&str]) -> eyre::Result<Vec<f32>> {
+        eyre::bail!("probe exploded")
+    }
+}
+
+/// Two seeded notes and their fused order, for the budget/streak tests.
+fn two_note_db() -> (SearchIndex, Vec<String>) {
     let db = SearchIndex::open_memory().expect("db");
     seed(&db, "notes/p0.md", "alpha");
-    seed(&db, "notes/p1.md", "beta");
-    let fused = vec!["notes/p0.md".to_string(), "notes/p1.md".to_string()];
+    seed(&db, "notes/p1.md", "query");
+    (db, vec!["notes/p0.md".to_string(), "notes/p1.md".to_string()])
+}
+
+/// One query through the pure core plus the streak/latch settle step, against
+/// caller-owned atomics: over budget (`SlowMock`, 0 ms budget) or within
+/// budget (`MockReranker`, unbounded budget).
+fn settle_one(over_budget: bool, streak: &AtomicU32, disabled: &AtomicBool) -> (Vec<String>, RerankRun) {
+    let (db, fused) = two_note_db();
+    let outcome = if over_budget {
+        OracleMcpServer::rerank_within_budget(&db, &rerank_cfg(2, 0), "query", fused, &SlowMock)
+    } else {
+        OracleMcpServer::rerank_within_budget(&db, &rerank_cfg(2, u64::MAX), "query", fused, &MockReranker::new())
+    }
+    .expect("rerank");
+    settle_rerank_outcome(outcome, streak, disabled)
+}
+
+/// A projected batch over the budget keeps the fused order and reports
+/// `OverBudget` (one query), never `Disable` (the whole process).
+#[test]
+fn rerank_over_budget_reports_over_budget_not_disable() {
+    let (db, fused) = two_note_db();
     let cfg = rerank_cfg(2, 0);
 
     let outcome = OracleMcpServer::rerank_within_budget(&db, &cfg, "query", fused.clone(), &SlowMock).expect("rerank");
     match outcome {
-        RerankOutcome::Disable(paths) => assert_eq!(paths, fused),
-        _ => panic!("expected Disable (over budget)"),
+        RerankOutcome::OverBudget(paths) => assert_eq!(paths, fused),
+        _ => panic!("expected OverBudget"),
     }
+}
+
+/// A probe scoring error is not a latency blip: the core says `Disable` and the
+/// settle step latches the process off on the first occurrence.
+#[test]
+fn rerank_probe_error_latches_immediately() {
+    let (db, fused) = two_note_db();
+    let outcome =
+        OracleMcpServer::rerank_within_budget(&db, &rerank_cfg(2, u64::MAX), "query", fused.clone(), &ErrMock)
+            .expect("rerank");
+    let streak = AtomicU32::new(0);
+    let disabled = AtomicBool::new(false);
+    let (paths, run) = settle_rerank_outcome(outcome, &streak, &disabled);
+    assert_eq!(paths, fused);
+    assert_eq!(run, RerankRun::Disabled);
+    assert!(disabled.load(Ordering::Relaxed));
+}
+
+/// One over-budget query fails open for that query only; the next
+/// within-budget query reranks and resets the streak.
+#[test]
+fn rerank_one_over_budget_then_within_resets_streak_without_latch() {
+    let streak = AtomicU32::new(0);
+    let disabled = AtomicBool::new(false);
+    let (_, run) = settle_one(true, &streak, &disabled);
+    assert_eq!(run, RerankRun::FailedOpen);
+    assert_eq!(streak.load(Ordering::Relaxed), 1);
+    let (_, run) = settle_one(false, &streak, &disabled);
+    assert_eq!(run, RerankRun::Ran);
+    assert_eq!(streak.load(Ordering::Relaxed), 0);
+    assert!(!disabled.load(Ordering::Relaxed));
+}
+
+/// Two over-budget queries in a row stay below the latch and each returns the
+/// fused order.
+#[test]
+fn rerank_two_over_budget_in_a_row_do_not_latch() {
+    let (_, fused) = two_note_db();
+    let streak = AtomicU32::new(0);
+    let disabled = AtomicBool::new(false);
+    for _ in 0..2 {
+        let (paths, run) = settle_one(true, &streak, &disabled);
+        assert_eq!(paths, fused, "over-budget query returns the fused order");
+        assert_eq!(run, RerankRun::FailedOpen);
+    }
+    assert_eq!(streak.load(Ordering::Relaxed), 2);
+    assert!(!disabled.load(Ordering::Relaxed));
+}
+
+/// The `RERANK_OVER_BUDGET_LATCH_AFTER`th consecutive over-budget query
+/// latches rerank off.
+#[test]
+fn rerank_three_over_budget_in_a_row_latch() {
+    let streak = AtomicU32::new(0);
+    let disabled = AtomicBool::new(false);
+    let runs: Vec<RerankRun> = (0..3).map(|_| settle_one(true, &streak, &disabled).1).collect();
+    assert_eq!(
+        runs,
+        vec![RerankRun::FailedOpen, RerankRun::FailedOpen, RerankRun::Disabled]
+    );
+    assert!(disabled.load(Ordering::Relaxed));
+}
+
+/// A within-budget query in the middle breaks the streak: over, over, within,
+/// over, over never latches.
+#[test]
+fn rerank_over_over_within_over_over_does_not_latch() {
+    let streak = AtomicU32::new(0);
+    let disabled = AtomicBool::new(false);
+    for over in [true, true, false, true, true] {
+        let (_, run) = settle_one(over, &streak, &disabled);
+        assert_ne!(run, RerankRun::Disabled);
+    }
+    assert_eq!(streak.load(Ordering::Relaxed), 2);
+    assert!(!disabled.load(Ordering::Relaxed));
+}
+
+/// The pure streak decision: within budget resets, the threshold latches.
+#[test]
+fn next_over_budget_streak_resets_and_latches_at_threshold() {
+    assert_eq!(next_over_budget_streak(false, 2), (0, false));
+    assert_eq!(next_over_budget_streak(true, 0), (1, false));
+    assert_eq!(
+        next_over_budget_streak(true, RERANK_OVER_BUDGET_LATCH_AFTER - 1),
+        (RERANK_OVER_BUDGET_LATCH_AFTER, true)
+    );
 }
 
 const MATCHING_NOTES: usize = 60;

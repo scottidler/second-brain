@@ -11,6 +11,7 @@ use super::{GRAPH_HOP_DECAY, OracleMcpServer, RERANK_TEXT_MAX_CHARS};
 use crate::config::{ExcludeConfig, GraphAlgorithm, RerankConfig, RetrievalConfig};
 use crate::tools::SearchMode;
 use rmcp::ErrorData as McpError;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tracing::{debug, warn};
 use vault::search::{NoteRow, Reranker, SearchIndex, fts_natural_query};
 
@@ -23,12 +24,13 @@ pub enum RerankRun {
     Off,
     /// The cross-encoder reordered the head of the fused list.
     Ran,
-    /// Enabled, but this query kept the fused order (too few candidates, or
-    /// none with text to score).
+    /// Enabled, but this query kept the fused order (too few candidates, none
+    /// with text to score, or an over-budget probe short of the latch
+    /// threshold).
     FailedOpen,
     /// Enabled, but rerank is latched off for the process (model load failed,
-    /// the probe errored, or the projected batch exceeded the budget); the
-    /// fused order was returned.
+    /// the probe errored, or `RERANK_OVER_BUDGET_LATCH_AFTER` consecutive
+    /// queries projected over the budget); the fused order was returned.
     Disabled,
 }
 
@@ -42,12 +44,74 @@ pub struct PipelineRun {
 
 /// Outcome of the testable rerank core (`rerank_within_budget`). `Disable`
 /// tells the caller to latch rerank off for the rest of the process (probe
-/// failure / over-budget); `FailOpen` keeps the fused order for this query only
-/// (too few candidates / no resolvable text); `Reordered` is the reranked list.
+/// scoring failed); `OverBudget` keeps the fused order for this query and
+/// counts toward the consecutive over-budget streak; `FailOpen` keeps the
+/// fused order for this query only (too few candidates / no resolvable text);
+/// `Reordered` is the reranked list.
 enum RerankOutcome {
     Reordered(Vec<String>),
     FailOpen(Vec<String>),
+    OverBudget(Vec<String>),
     Disable(Vec<String>),
+}
+
+/// Consecutive over-budget queries after which rerank latches off for the
+/// process. One over-budget probe is a latency blip (a first query on a cold
+/// cache can project just past the budget); a run of them is a host that
+/// cannot afford the stage.
+const RERANK_OVER_BUDGET_LATCH_AFTER: u32 = 3;
+
+/// The over-budget streak decision, pure: given whether this query's probe was
+/// over budget and the streak before it, the streak after it and whether to
+/// latch rerank off. A within-budget query resets the streak to 0.
+fn next_over_budget_streak(over_budget: bool, streak: u32) -> (u32, bool) {
+    if !over_budget {
+        return (0, false);
+    }
+    let next = streak.saturating_add(1);
+    (next, next >= RERANK_OVER_BUDGET_LATCH_AFTER)
+}
+
+/// Turn one `RerankOutcome` into the returned list and `RerankRun`, updating
+/// the over-budget `streak` and the process `disabled` latch. Takes the two
+/// atomics by reference so tests drive it with their own instead of the
+/// process globals in `maybe_rerank`. `FailOpen` measured nothing, so it
+/// leaves the streak alone.
+fn settle_rerank_outcome(
+    outcome: RerankOutcome,
+    streak: &AtomicU32,
+    disabled: &AtomicBool,
+) -> (Vec<String>, RerankRun) {
+    match outcome {
+        RerankOutcome::Reordered(paths) => {
+            streak.store(0, Ordering::Relaxed);
+            (paths, RerankRun::Ran)
+        }
+        RerankOutcome::FailOpen(paths) => (paths, RerankRun::FailedOpen),
+        RerankOutcome::OverBudget(paths) => {
+            let (next, latch) = next_over_budget_streak(true, streak.load(Ordering::Relaxed));
+            streak.store(next, Ordering::Relaxed);
+            if latch {
+                warn!(
+                    "rerank disabled for this process: {next} consecutive queries over the latency budget \
+                     (latch threshold {RERANK_OVER_BUDGET_LATCH_AFTER}); falling back to fused order"
+                );
+                disabled.store(true, Ordering::Relaxed);
+                (paths, RerankRun::Disabled)
+            } else {
+                warn!(
+                    "rerank skipped for this query: over the latency budget \
+                     ({next}/{RERANK_OVER_BUDGET_LATCH_AFTER} consecutive before the stage latches off); \
+                     returning fused order"
+                );
+                (paths, RerankRun::FailedOpen)
+            }
+        }
+        RerankOutcome::Disable(paths) => {
+            disabled.store(true, Ordering::Relaxed);
+            (paths, RerankRun::Disabled)
+        }
+    }
 }
 
 /// How many candidates a retriever pulls for a call: its configured depth, or
@@ -657,10 +721,13 @@ impl OracleMcpServer {
     /// `backend` and `threads` query embedding uses) against the detected CPU.
     /// Latency-budgeted with a warmup probe: time one `(query, doc)` pair,
     /// project the batch cost linearly (`project_batch_ms`), and if it exceeds
-    /// `latency_budget_ms` no-op the stage **for the process** (fail-open to
-    /// the fused order) with a WARN. Reranks only the head; the tail beyond
-    /// `input_k` keeps its fused order. Returns the list and what the stage
-    /// did.
+    /// `latency_budget_ms` skip the stage **for this query** (fail-open to the
+    /// fused order) with a WARN. `RERANK_OVER_BUDGET_LATCH_AFTER` consecutive
+    /// over-budget queries latch the stage off for the process; a
+    /// within-budget query resets the streak. A model-load failure or a probe
+    /// scoring error latches it off immediately. Reranks only the head; the
+    /// tail beyond `input_k` keeps its fused order. Returns the list and what
+    /// the stage did.
     fn maybe_rerank(
         &self,
         db: &SearchIndex,
@@ -668,10 +735,11 @@ impl OracleMcpServer {
         query: &str,
         fused_paths: Vec<String>,
     ) -> Result<(Vec<String>, RerankRun), McpError> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        // Once the probe trips (or the model fails to load) in a process, stay
-        // off so every subsequent query does not re-pay the probe.
+        // Once latched (model load failed, probe errored, or the over-budget
+        // streak hit the threshold), stay off so every subsequent query does
+        // not re-pay the probe.
         static RERANK_DISABLED: AtomicBool = AtomicBool::new(false);
+        static RERANK_OVER_BUDGET_STREAK: AtomicU32 = AtomicU32::new(0);
         if RERANK_DISABLED.load(Ordering::Relaxed) {
             return Ok((fused_paths, RerankRun::Disabled));
         }
@@ -691,20 +759,19 @@ impl OracleMcpServer {
             }
         };
 
-        match Self::rerank_within_budget(db, cfg, query, fused_paths, reranker.as_ref())? {
-            RerankOutcome::Reordered(paths) => Ok((paths, RerankRun::Ran)),
-            RerankOutcome::FailOpen(paths) => Ok((paths, RerankRun::FailedOpen)),
-            RerankOutcome::Disable(paths) => {
-                RERANK_DISABLED.store(true, Ordering::Relaxed);
-                Ok((paths, RerankRun::Disabled))
-            }
-        }
+        let outcome = Self::rerank_within_budget(db, cfg, query, fused_paths, reranker.as_ref())?;
+        Ok(settle_rerank_outcome(
+            outcome,
+            &RERANK_OVER_BUDGET_STREAK,
+            &RERANK_DISABLED,
+        ))
     }
 
     /// The rerank stage, pure over an injected [`Reranker`] and the DB - no
-    /// model loader, no process-global latch. Returns the reordered list plus
-    /// whether the caller should latch rerank off for the process (probe
-    /// failure / over-budget). Unit-tested with `MockReranker`.
+    /// model loader, no process-global latch or streak. Returns the reordered
+    /// list, or the fused order tagged with why (`OverBudget` for a projected
+    /// batch over the budget, `Disable` for a probe scoring error). Unit-tested
+    /// with `MockReranker`.
     fn rerank_within_budget(
         db: &SearchIndex,
         cfg: &RerankConfig,
@@ -747,13 +814,12 @@ impl OracleMcpServer {
         let projected = vault::search::project_batch_ms(per_pair_ms, items.len());
         if projected > cfg.latency_budget_ms as f64 {
             warn!(
-                "rerank disabled for this process: projected {projected:.0} ms for {} pairs \
-                 ({per_pair_ms:.0} ms/pair, one batched forward) exceeds budget {} ms; \
-                 falling back to fused order",
+                "rerank probe over budget: projected {projected:.0} ms for {} pairs \
+                 ({per_pair_ms:.0} ms/pair, one batched forward) exceeds budget {} ms",
                 items.len(),
                 cfg.latency_budget_ms
             );
-            return Ok(RerankOutcome::Disable(fused_paths));
+            return Ok(RerankOutcome::OverBudget(fused_paths));
         }
 
         // Within budget: rerank the head, then append the untouched tail.

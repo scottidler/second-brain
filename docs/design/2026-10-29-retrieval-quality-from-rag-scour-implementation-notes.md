@@ -600,3 +600,27 @@ Implementation audit must-fix 2: the Phase 3 empty-source cleanup also fired on 
 - A borg `Distilled` schema drift would now leave every affected stale video note re-read and failed each tick (rows intact). That is the intended loud failure; confirm an ERROR per note per tick is the volume you want, or whether a per-tick summary line should replace it.
 
 Tests (all fail with the fix reverted by mapping `Err` to the empty-source path, pass with it): `embed::tests::recipe::malformed_source_keeps_old_rows`, `unreadable_source_keeps_old_rows` (a directory where `distilled.yml` should be), `unreadable_in_note_transcript_keeps_old_rows`, `embed::tests::archive::a_malformed_archive_falls_back_to_staging_and_errs_only_when_nothing_yields`. `empty_source_clears_old_rows` stays green in both states.
+
+## Audit fix: rerank over-budget latch after 3 consecutive misses
+Implementation audit finding: `maybe_rerank` latched the process-global `RERANK_DISABLED` the first time one warmup probe projected over `latency-budget-ms`. On ripr the first query projects about 31 ms/pair x 50 = 1550 ms against the 1500 ms budget, so the Phase 7 rerank-on default was a coin flip that could silently turn itself off for the whole process. Scott's ruling (option B, 2026-10-30): latch only after 3 consecutive over-budget queries.
+
+### Design decisions
+- `RerankOutcome` gains `OverBudget(paths)`, distinct from `Disable(paths)`; `rerank_within_budget` returns `OverBudget` for a projected batch over the budget and keeps `Disable` for a probe scoring error only; `oracle/src/server/pipeline.rs:rerank_within_budget`; the core stays pure (no globals), the caller decides what an over-budget query means for the process.
+- The threshold is a const, `RERANK_OVER_BUDGET_LATCH_AFTER: u32 = 3`, not a config key; `oracle/src/server/pipeline.rs`; per the ruling.
+- The streak decision is a pure function, `next_over_budget_streak(over_budget, streak) -> (new_streak, latch)`, and `settle_rerank_outcome(outcome, &AtomicU32, &AtomicBool) -> (paths, RerankRun)` applies it to caller-owned atomics; `maybe_rerank` passes its two process statics (`RERANK_DISABLED`, new `RERANK_OVER_BUDGET_STREAK`). Tests drive `settle_rerank_outcome` with their own atomics, so the whole path (core outcome, streak, latch, reported `RerankRun`, returned order) is unit-tested without touching the process globals.
+- A within-budget query (`Reordered`) resets the streak to 0. `FailOpen` (too few candidates, no text to score) measured nothing and leaves the streak alone.
+- Model-load failure and probe scoring error still latch immediately; unchanged.
+- Reporting: an over-budget query short of the threshold is `RerankRun::FailedOpen` (WARN "rerank skipped for this query ... (n/3 consecutive before the stage latches off)"); the latching query and every later one are `RerankRun::Disabled` (WARN naming the threshold). `sb oracle eval`'s `RerankTally` needed no code change: a skip counts as `failed open`, a latch as `latched off`. The `RerankRun::FailedOpen` / `Disabled` doc comments now say so.
+- Docs: `maybe_rerank` doc comment, `RerankConfig::latency_budget_ms` doc comment (`oracle/src/config.rs`), `oracle/AGENTS.md` (search-modes invariant and module map), `CLAUDE.md` "Hybrid retrieval" paragraph, `config/templates/oracle.yml.example` rerank comments. `vault/src/search/AGENTS.md` does not describe the latch and was left alone.
+
+### Deviations
+- None from the ruling. The old test `rerank_over_budget_disables` pinned the wrong behavior; it is inverted by name to `rerank_over_budget_reports_over_budget_not_disable`.
+
+### Tradeoffs
+- Reusing `RerankRun::FailedOpen` for a single over-budget skip vs a new `RerankRun::SkippedOverBudget` variant: reuse, because the eval tally and its warning already read "failed open" as "this query kept the fused order", which is exactly what happened; a new variant would touch every `RerankRun` consumer for no change in the verdict.
+- Relaxed load-then-store on the streak vs a compare-and-swap loop: under concurrent queries two over-budget misses can race and count once. The cost is at most one extra over-budget query before the latch, which is benign for a latency guard; the code stays simple.
+
+### Open questions
+- None.
+
+Tests (each fails on a revert, checked by mutation): `server::pipeline::tests::rerank_one_over_budget_then_within_resets_streak_without_latch`, `rerank_two_over_budget_in_a_row_do_not_latch`, `rerank_three_over_budget_in_a_row_latch`, `rerank_over_over_within_over_over_does_not_latch`, `rerank_over_budget_reports_over_budget_not_disable`, `rerank_probe_error_latches_immediately`, `next_over_budget_streak_resets_and_latches_at_threshold`. Mutations: threshold 1 (the old immediate latch) fails the four streak tests and the pure-function test; within-budget not resetting fails the reset and over/over/within/over/over tests; the core returning `Disable` on over budget (the old core) fails the five over-budget tests; a probe error reported as `OverBudget` fails `rerank_probe_error_latches_immediately`.

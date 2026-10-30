@@ -303,7 +303,9 @@ pub struct RerankConfig {
     #[serde(default = "default_rerank_input_k")]
     pub input_k: u32,
     /// Warmup-probe budget; if the projected batch exceeds this, the stage
-    /// no-ops for the process (fail-open to fused order).
+    /// skips that query (fail-open to fused order), and a run of
+    /// consecutive over-budget queries latches it off for the process
+    /// (`RERANK_OVER_BUDGET_LATCH_AFTER` in `server::pipeline`).
     #[serde(default = "default_rerank_latency_budget_ms")]
     pub latency_budget_ms: u64,
 }

@@ -94,8 +94,10 @@ retrieval:
   # --- 3. Rerank. Cross-encoder second stage. ON by default. ---
   # WARNING: on a CPU without AVX2+FMA (Candle scalar) the cross-encoder is
   # ~150-300 ms/pair, so 50 candidates can be ~7.5-15 s. The warmup probe projects the
-  # batch cost and FAILS OPEN to the fused order (logs a WARN) when it exceeds
-  # latency-budget-ms — expect that to happen on older hardware. Prefetch the
+  # batch cost and FAILS OPEN to the fused order for that query (logs a WARN)
+  # when it exceeds latency-budget-ms; a run of consecutive over-budget queries
+  # turns the stage off until the process restarts, and a within-budget query
+  # resets the run. Expect that to happen on older hardware. Prefetch the
   # model so the first query does not block on a download. Set `enabled: false`
   # to turn the stage off; an absent or partial block leaves it on.
   rerank:
@@ -103,7 +105,7 @@ retrieval:
     method: cross-encoder
     model: ms-marco-MiniLM-L6-v2
     input-k: 50               # rerank the top 50 fused candidates
-    latency-budget-ms: 1500   # probe budget; over this, the stage no-ops
+    latency-budget-ms: 1500   # probe budget; over this, the query keeps fused order
 
   # --- 4. Query transform. Optional pre-retrieval rewrite. OFF by default. ---
   # Adds an LLM round-trip per query (via the on-box Fabric pattern) and can
