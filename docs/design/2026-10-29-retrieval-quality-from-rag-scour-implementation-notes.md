@@ -482,3 +482,35 @@ What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,
 
 - **Claim verdict: hold** (confirm CI lower bound -0.0036, not above 0). Defaults stay `claim: false` in `cortex.yml.example` and the code default. The tune split is significantly positive (+0.0434, CI [+0.0166, +0.0720]) and the confirm point estimate is +0.0249 with the CI lower bound 0.0036 below zero, the closest any Phase 4-6 change has come to clearing the rule; the rule reads confirm only. The live `cortex.yml` has no `embed.kinds` key, so claim embedding is off on ripr.
 - `otto ci` green at commit. Arm directories, reports, logs and scripts stay in `$P` (nothing but `.md` under `docs/`). The binary `$P/sb-phase6` is pinned there. No background process is left running.
+
+## Phase 7: Rerank default
+
+### Design decisions
+- `RerankConfig` gets a container `#[serde(default)]` and `enabled` defaults through `default_rerank_enabled()` returning `true` (`oracle/src/config.rs`). Absent, empty and partial `rerank:` blocks resolve enabled; only an explicit `enabled: false` turns it off. `impl Default` calls the same function, so the struct default and the deserialized default cannot diverge. The warmup probe is untouched and still fails open.
+- Verdict `ship`, so the default flips. `config/templates/oracle.yml.example` now ships `enabled: true` with a note on how to turn it off; `oracle/AGENTS.md` and root `CLAUDE.md` no longer say rerank is off by default (query-transform still is).
+- `traced_pipeline_reports_rerank_off_when_disabled_in_config` relied on the old default; it now sets `rerank.enabled = false` explicitly, which is what its name says. `empty_config_loads_eval_best_default` asserts rerank on.
+
+### Deviations
+- Arm A's config is the live `oracle.yml` (no `retrieval:` block, so the built-in default at the measured binary: rerank off); `sb oracle eval` has no arm-A config flag. Arm B config is that file plus `retrieval: {rerank: {enabled: true}}`.
+- The measurement ran on `p6/sb-phase6` (Phase 6 code, offsets 0.0, claim off), the Phase-6 state, over a copy of Phase 6's `evalA` (Phase 5 arm C index, recipe-2 chunks + prefix). The binary predates this commit's default flip, which is why arm A is rerank-off.
+- `rerank_default_matches_verdict` failing on revert: with `default_rerank_enabled()` returning `false` it fails at "absent retrieval block" (`oracle/src/config/tests.rs`). Source restored byte-identical (`config.rs` backup compared by copy).
+
+### Tradeoffs
+- One default function used by both the field and `impl Default` vs a literal `true` in each: one source of truth.
+- Flipping the default for every host vs gating on CPU: the probe already fails open on a host that cannot meet 1500 ms (talos), so no new gate.
+
+### Open questions
+- Deploying this flips rerank on for the live `ripr` oracle (live `oracle.yml` has no `retrieval:` block). That is the deploy step, not mine; the measured p95 was 803 ms on ripr.
+- Rerank reorders the top 50 by summary text and the judge sees summary + claims, so the eval and rerank share a text view. The effect is large (+0.15) relative to MDD 0.094, but the judge-shares-text caveat stands.
+
+### Evidence (Phase 7, ripr 2026-10-29)
+- Run: `p7/run.sh` (bwrap, live dir read-only, `XDG_DATA_HOME=p7/evalA`, copy of Phase 6 `evalA`), 247 operator queries, `--latency-budget-ms 1500`, exit 0, 22:48 -> 23:09, `judgments: 5561 total, 0 from truncated bodies`, 0 pooled notes without judgment. Report `.../scratchpad/p7/rr-report.txt`. `configured rerank: arm A off, arm B ran 247/247`.
+
+  | target | split | nDCG A | nDCG B | delta | 95% CI | n | MDD | p95 A ms | p95 B ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | configured | tune | 0.6308 | 0.7758 | +0.1451 | [+0.0981, +0.1924] | 125 | 0.0683 | 47.6 | 819.3 | ship |
+  | configured | confirm | 0.6400 | 0.7907 | +0.1507 | [+0.0860, +0.2164] | 99 | 0.0937 | 45.9 | 803.4 | ship |
+  | vector, hybrid, bm25, graph-hybrid (both splits) | | same | same | +0.0000 | [0, 0] | | insufficient | | | insufficient |
+
+- Rule on confirm: CI lower bound +0.0860 > 0 and arm B p95 803.4 ms <= 1500 ms: ship. Consistent with Phase 2's baseline (+0.1509, p95 767 ms).
+- Test `rerank_default_matches_verdict` green; shown failing with the default reverted. `otto ci` result recorded in the report.

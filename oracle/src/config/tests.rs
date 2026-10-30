@@ -9,7 +9,7 @@ use super::*;
 
 /// An `oracle.yml` with no `retrieval:` block loads to the eval-best
 /// built-in default: vector-only, bm25 demoted (weight 0.3) and off,
-/// graph weight 0.0 and off, rrf k=60, no rerank, no transform,
+/// graph weight 0.0 and off, rrf k=60, rerank on, no transform,
 /// stub-exclude on.
 #[test]
 fn empty_config_loads_eval_best_default() {
@@ -30,7 +30,7 @@ fn empty_config_loads_eval_best_default() {
     assert_eq!(r.fusion.method, FusionMethod::Rrf);
     assert_eq!(r.fusion.k, vault::search::RRF_K);
 
-    assert!(!r.rerank.enabled, "rerank off by default");
+    assert!(r.rerank.enabled, "rerank on by default");
     assert_eq!(r.rerank.method, RerankMethod::CrossEncoder);
     assert_eq!(r.rerank.input_k, 50);
     assert_eq!(r.rerank.latency_budget_ms, 1500);
@@ -263,5 +263,36 @@ fn vector_kind_offsets_default_to_zero_and_parse_kebab_case() {
     assert!(
         serde_yaml::from_str::<Config>(bad).is_err(),
         "snake_case key must be rejected"
+    );
+}
+
+/// The recorded verdict is `ship` (confirm delta +0.1507, CI lower bound
+/// +0.0860, p95 803 ms against a 1500 ms budget): absent, empty and partial
+/// `rerank:` blocks resolve enabled, and an explicit `enabled: false` always
+/// turns it off, alone or beside other keys.
+#[test]
+fn rerank_default_matches_verdict() {
+    let enabled = |yaml: &str| -> bool {
+        let cfg: Config = serde_yaml::from_str(yaml).expect("config loads");
+        cfg.retrieval.rerank.enabled
+    };
+
+    assert!(enabled(""), "absent retrieval block");
+    assert!(enabled("retrieval: {}"), "absent rerank block");
+    assert!(enabled("retrieval:\n  rerank: {}"), "empty rerank block");
+    assert!(
+        enabled("retrieval:\n  rerank:\n    input-k: 25"),
+        "partial block without enabled"
+    );
+    assert!(
+        enabled("retrieval:\n  rerank:\n    latency-budget-ms: 800"),
+        "partial block without enabled"
+    );
+    assert!(enabled("retrieval:\n  rerank:\n    enabled: true"));
+
+    assert!(!enabled("retrieval:\n  rerank:\n    enabled: false"));
+    assert!(
+        !enabled("retrieval:\n  rerank:\n    enabled: false\n    input-k: 25"),
+        "explicit false wins beside other keys"
     );
 }

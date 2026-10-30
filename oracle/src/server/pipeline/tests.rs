@@ -561,8 +561,10 @@ fn bm25_quotes_natural_language_queries() {
 fn traced_pipeline_reports_rerank_off_when_disabled_in_config() {
     let db = SearchIndex::open_memory().expect("db");
     seed(&db, "notes/hit.md", "transformer attention mechanism");
+    let mut retrieval = bm25_only_retrieval(1.0);
+    retrieval.rerank.enabled = false;
     let cfg = Config {
-        retrieval: bm25_only_retrieval(1.0),
+        retrieval,
         ..Default::default()
     };
     let server = OracleMcpServer::new(cfg, db);

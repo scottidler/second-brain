@@ -37,7 +37,7 @@ pub struct Config {
     /// query that arrives without an explicit `mode`. See
     /// `docs/design/2026-06-06-configurable-retrieval-pipeline.md`. An
     /// existing config without a `retrieval:` block loads to the eval-best
-    /// built-in default (vector-only, stub-exclude, no rerank/transform).
+    /// built-in default (vector-only, stub-exclude, rerank on, no transform).
     #[serde(default)]
     pub retrieval: RetrievalConfig,
 
@@ -97,7 +97,7 @@ pub struct RetrievalConfig {
     pub methods: MethodsConfig,
     /// Fusion params, consulted only when more than one retriever is enabled.
     pub fusion: FusionConfig,
-    /// Optional cross-encoder rerank stage (off by default).
+    /// Cross-encoder rerank stage (on by default; the warmup probe fails open).
     pub rerank: RerankConfig,
     /// Optional pre-retrieval query transform stage (off by default).
     pub query_transform: QueryTransformConfig,
@@ -241,13 +241,16 @@ pub enum RerankMethod {
     CrossEncoder,
 }
 
-/// Optional cross-encoder rerank stage. OFF by default: cross-encoder
-/// inference is the most CPU-sensitive stage (~150-300 ms/pair on Candle
-/// without AVX2+FMA, as on `talos`; ONNX is faster where the CPU allows it).
+/// Cross-encoder rerank stage. ON by default: the paired eval cleared the
+/// ship rule. It is the most CPU-sensitive stage (~150-300 ms/pair on Candle
+/// without AVX2+FMA, as on `talos`; ONNX is faster where the CPU allows it),
+/// so the warmup probe no-ops the stage on a host that cannot meet the budget.
+/// Absent, empty and partial blocks all resolve enabled; only an explicit
+/// `enabled: false` turns it off.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct RerankConfig {
-    #[serde(default)]
+    #[serde(default = "default_rerank_enabled")]
     pub enabled: bool,
     #[serde(default)]
     pub method: RerankMethod,
@@ -266,7 +269,7 @@ pub struct RerankConfig {
 impl Default for RerankConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_rerank_enabled(),
             method: RerankMethod::CrossEncoder,
             model: default_rerank_model(),
             input_k: default_rerank_input_k(),
@@ -363,6 +366,10 @@ fn default_edge_kinds() -> Vec<String> {
 
 fn default_rrf_k() -> usize {
     vault::search::RRF_K
+}
+
+fn default_rerank_enabled() -> bool {
+    true
 }
 
 fn default_rerank_model() -> String {
