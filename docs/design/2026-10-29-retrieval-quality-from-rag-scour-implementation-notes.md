@@ -194,3 +194,17 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
   | claim | 0.001 s | 0.002 s | 0.001 s |
 
   Plan before: `SEARCH e USING INDEX idx_note_embeddings_kind_model (kind=? AND model_version=?)`, i.e. every chunk row of the model visited once per candidate note. After: `SEARCH e USING INDEX idx_note_embeddings_note_kind_model (note_path=? AND kind=? AND model_version=?)`. `search_vector`'s scan plan is unchanged (`SCAN e`, 22-23 ms full-row read on both copies).
+
+## Pre-Phase 4: eval size ruling
+
+### Design decisions
+- Scott ruled (2026-10-29) to proceed at 248 queries rather than grow the set. Phase 2's rerank arm measured confirm MDD 0.0913 at n=99, so sd(delta) is about 0.32 and a 0.02 MDD needs about 2,060 confirm queries; mining yields 331. The risk row and Resolved Decisions are amended. The ship rule (CI lower bound > 0 on confirm) is unchanged.
+
+### Deviations
+- The risk-table mitigation "grow the set before Phase 4 if MDD > 0.02" is replaced by the ruling above.
+
+### Tradeoffs
+- LLM-synthesized queries vs a smaller honest set: synthesized queries derived from notes favor those notes.
+
+### Open questions
+- None.

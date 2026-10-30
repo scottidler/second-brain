@@ -291,6 +291,7 @@ print("rows",len(L),"over512",sum(l>512 for l in L))' cortex/tests/fixtures/bge-
 - 2026-10-29: Phase 8's arms both run graph at weight 0.3; at the default 0.0 RRF skips the list. (Panel R1 #12.)
 - 2026-10-29: Scott approving this doc approves the decision rule, which is the provenance for flipping rerank and claim defaults that the 2026-10-27 doc left to him. (Panel R1 #17.)
 - 2026-10-29: rollback is a forward recipe bump plus a re-drain; an older binary restores no vectors. (Panel R1 #5.)
+- 2026-10-29: the eval proceeds at 248 operator queries; the 0.02 MDD target is unreachable from mined queries (needs ~2,060 confirm queries). LLM-synthesized queries rejected: queries written from notes bias toward those notes. Scott chose this after Phase 2 measured confirm MDD 0.0913.
 - 2026-10-29: talos is out of scope (Scott's no-sb-on-talos ruling, same day).
 - 2026-10-29 (after Phase 0): a no-source re-embed deletes the note's rows of that kind in the sentinel's transaction (Scott, option A over keeping the rows as the transcript's only trace); `--drop-kind` also clears that kind's sentinels; `cortex::embed::run` logs the DB path at DEBUG. All three land in Phase 3.
 - 2026-10-29: rerank and kind offsets interact (rerank reorders the top 50 by summary text). Phase 7 runs on the Phase-6 state, so the shipped composition is what gets measured.
@@ -364,7 +365,7 @@ print("rows",len(L),"over512",sum(l>512 for l in L))' cortex/tests/fixtures/bge-
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Confirm split too small for a CI to clear 0 | Med | High | Phase 2 prints MDD per target; grow the set before Phase 4 if MDD > 0.02 |
+| Confirm split too small for a CI to clear 0 | High | Med | Phase 2 prints MDD per target. Measured: confirm MDD 0.0913 at n=99 (rerank arm); 0.02 needs ~2,060 confirm queries and mining yields 331. Scott ruled 2026-10-29: proceed at 248 queries; the CI rule stands, so an undetectable change reads `hold` and does not ship |
 | An arm writes the live DB | Low | High | read-only bind + absolute path; Phase 0 proves it |
 | Judge-text change shifts every absolute number | High | Low | decisions use paired deltas only; calibration re-run in Phase 2 |
 | Re-tokenized slice overflows | Med | Med | re-encode with truncation off, shrink to fit; test on compound words |
