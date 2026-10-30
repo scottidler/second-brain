@@ -406,3 +406,17 @@ What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,
 
 ### Open questions
 - None.
+
+## Pre-Phase 6: stub-note judge failure
+
+### Design decisions
+- Scott chose (2026-10-29) to drop query `mined-fee24c19477e781c` ("Better Stack video") from the vault operator set, over excluding stub notes from the judged pool. The judge returned a non-integer reply, then an empty one, for a note whose summary is only an iframe tag. The set is now 247 queries. A future judge failure still fails the run.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Dropping the query vs a pool filter: a filter is an eval code change mid-measurement that would re-base every target.
+
+### Open questions
+- None.
