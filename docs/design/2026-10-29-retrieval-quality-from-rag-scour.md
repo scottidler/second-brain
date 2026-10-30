@@ -266,10 +266,12 @@ L=[len(e.ids) for e in t.encode_batch([r[0] for r in db.execute("select text fro
 print("rows",len(L),"over512",sum(l>512 for l in L))' cortex/tests/fixtures/bge-small-en-v1.5-tokenizer.json ~/.local/share/sb/oracle/oracle.db
 ```
 
-- [ ] After the Phase-5 drain on ripr, the command prints `rows` >= 19,663 and `over512 0`.
+- [x] After the Phase-5 drain on ripr, the command prints `rows` >= 19,663 and `over512 0`.
   - Observed on main (0155df6, the full measurement script): `transcript-chunk rows 19663 median 650 p90 746 max 20703 over512 17835 90.7% tokens_lost 3064045 24.0% of all tokens`
-- [ ] The drain is complete and stamped: `sqlite3 -readonly ~/.local/share/sb/oracle/oracle.db "select kind, recipe, count(*) from note_embeddings group by 1,2"` on ripr shows exactly one recipe per kind, equal to its `RECIPE` constant.
+  - Observed on ripr after the drain (sb v0.21.0, 2026-10-30): `rows 29656 over512 0`
+- [x] The drain is complete and stamped: `sqlite3 -readonly ~/.local/share/sb/oracle/oracle.db "select kind, recipe, count(*) from note_embeddings group by 1,2"` on ripr shows exactly one recipe per kind, equal to its `RECIPE` constant.
   - Observed on main: `Error: in prepare, no such column: recipe`
+  - Observed on ripr after the drain (sb v0.21.0, 2026-10-30): `summary|1|4933` and `transcript-chunk|2|29656`; no claim rows, since claim stays off
 - [ ] `sb oracle eval --queries ~/repos/scottidler/obsidian/system/eval/oracle-queries.yml` exits 0 over >= 100 queries.
   - Observed on main: `ls: cannot access '/home/saidler/repos/scottidler/obsidian/system/eval/oracle-queries.yml': No such file or directory`
 - [ ] `sb oracle eval --queries <set> --compare-config <arm.yml>` prints a verdict per target and split.
