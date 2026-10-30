@@ -624,3 +624,114 @@ Implementation audit finding: `maybe_rerank` latched the process-global `RERANK_
 - None.
 
 Tests (each fails on a revert, checked by mutation): `server::pipeline::tests::rerank_one_over_budget_then_within_resets_streak_without_latch`, `rerank_two_over_budget_in_a_row_do_not_latch`, `rerank_three_over_budget_in_a_row_latch`, `rerank_over_over_within_over_over_does_not_latch`, `rerank_over_budget_reports_over_budget_not_disable`, `rerank_probe_error_latches_immediately`, `next_over_budget_streak_resets_and_latches_at_threshold`. Mutations: threshold 1 (the old immediate latch) fails the four streak tests and the pure-function test; within-budget not resetting fails the reset and over/over/within/over/over tests; the core returning `Disable` on over budget (the old core) fails the five over-budget tests; a probe error reported as `OverBudget` fails `rerank_probe_error_latches_immediately`.
+
+## Follow-up: cross-model judge panel (2026-10-30)
+Scott's ruling: no human labels; get the best judge-quality evidence from a cross-model judge panel, and check that the shipped decisions do not flip when the judge changes. No repo code changed. Everything (scripts, caches, run homes, reports) is in `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/xj` (`$X` below).
+
+### Design decisions
+- Judges, exact model strings as passed to `--judge-model` (fabric v1.4.473 on ripr):
+  - incumbent: `""` (fabric default, `fabric --dry-run` prints `Model: claude-sonnet-5`); its grades are the cached rows from Phases 4-8, not re-bought.
+  - Gemini: `gemini-4-argon`. The Gemini API lists it as `displayName: Gemini 4 Argon`, not a preview id. It is Google's flagship; the newest Pro preview `gemini-3.1-pro-preview` and the stable `gemini-2.5-pro` were also smoke-tested (both answered `3`).
+  - OpenAI: `gpt-5.5`. Smoke call through fabric: `3` in 2.7 s.
+- The judgment cache is keyed per judge model: `PRIMARY KEY (query_id, query_hash, note_path, content_hash, judge_model, rubric_version)` (`oracle/src/eval/cache.rs`), and `evaluate` builds the key from `opts.judge_model` (`oracle/src/eval.rs`). One judge cannot read another's grade.
+- The pairs judged are every incumbent cache row (Phase 8's `eval-cache.db`, 13,221 rows) whose judge text can be rebuilt exactly. A scratch Rust tool (`$X/judgefill`, path deps on `oracle` and `vault`) recomputes `oracle::eval::eval.rs:judge_text` from a backup of the Phase 5 arm C notes table and keeps a row only when `stable_hash(title + "\n" + text)` equals the cached `content_hash`: 8,788 pairs matched (964 rows belong to queries no longer in the set, 434 to notes absent from the snapshot, 3,035 carry an older judge text, mostly Phase 1's summary-only text). All 326 calibration pairs are among the 8,788. Every pair any rerun pooled was in that set: no cache grew during the 32 harness runs (39,585 rows before and after).
+- New grades come from oracle's own `FabricJudge::new(model, live llm.api-keys).judge(...)`, written with oracle's own `JudgmentCache::put` under that model's key, 16 calls in parallel, at most 3 attempts per pair. The harness then ran with `--judge-model <model>` and found every grade as a cache hit, so verdicts come from the unmodified harness.
+- Median judge: for each of the 8,788 pairs, the median of the three integer grades, written as cache rows under the synthetic model name `median3`. The harness ran with `--judge-model median3`. A missing pair would have sent fabric `-m median3` and failed the run loudly. None did.
+- Agreement metrics: exact %, adjacent %, unweighted kappa and hit-boundary precision/recall call the code's own functions (`calc::cohens_kappa`, `calc::boundary_precision_recall` with `judge::HIT_THRESHOLD` = 2); exact and adjacent are computed as in `eval.rs`'s CalibrationPanel block. Quadratic-weighted kappa is the standard definition (weights `(i-j)^2/9`), written in the scratch tool. In a pair "X vs Y", X is the reference (the code's "human" slot): P = of Y's hits, the share X also calls a hit; R = of X's hits, the share Y catches. (P+R)/2 is the quantity `TRUST_GATE` 0.6 gates.
+- Reruns: same binaries, arm DBs, configs, query set, split and seed as recorded; one fresh home per change (`$X/runs/<cfg>`, a `sqlite3 .backup` of the recorded arm A DB plus the merged cache), every run inside `bwrap --dev-bind / / --ro-bind ~/.local/share/sb/oracle ~/.local/share/sb/oracle` (`touch` probe: `Read-only file system`). `$X/run-one.sh` holds the exact command per change. P7 ran alone after everything else (the p6 binary latches rerank off after one over-budget probe); `configured rerank: arm A off, arm B ran 247/247` under all four judges.
+- The incumbent was replayed as a check on the arms: every incumbent row and judgment count matches the tables recorded above (P4+5 5,446; P6 offsets 4,946 / 5,305 / 5,348; claim 4,813; P7 5,561; P8 4,265 / 4,264). No arm was missing or stale; none was rebuilt.
+- Latency: the "gate as recorded" verdict uses the recorded arm B p95 on confirm (P7 803.4 ms, P8 α=0.15 197.6 ms, α=0.3 191.0 ms, all against 1500 ms); P4+5 and P6 had no budget. "Quality only" is `ship` iff the CI lower bound > 0.
+
+### Agreement panel
+Calibration pairs (326, unlabelled):
+
+| pair (ref vs other) | n | exact | adjacent | kappa | kappa qw | P@>=2 | R@>=2 | (P+R)/2 |
+|---|---|---|---|---|---|---|---|---|
+| incumbent vs gemini | 326 | 81.0% | 98.8% | 0.672 | 0.883 | 0.926 | 0.781 | 0.854 |
+| incumbent vs openai | 326 | 63.5% | 88.3% | 0.452 | 0.574 | 0.544 | 0.875 | 0.709 |
+| gemini vs openai | 326 | 69.9% | 87.4% | 0.554 | 0.577 | 0.505 | 0.963 | 0.734 |
+| median vs incumbent | 326 | 86.8% | 99.7% | 0.775 | 0.930 | 0.891 | 0.950 | 0.920 |
+| median vs gemini | 326 | 93.3% | 100.0% | 0.888 | 0.963 | 0.981 | 0.883 | 0.932 |
+| median vs openai | 326 | 74.8% | 88.7% | 0.628 | 0.630 | 0.573 | 0.983 | 0.778 |
+
+| judge | n | 0 | 1 | 2 | 3 | mean | share >=2 |
+|---|---|---|---|---|---|---|---|
+| incumbent | 326 | 208 | 54 | 27 | 37 | 0.672 | 19.6% |
+| gemini | 326 | 183 | 89 | 28 | 26 | 0.684 | 16.6% |
+| openai | 326 | 129 | 94 | 24 | 79 | 1.163 | 31.6% |
+| median | 326 | 179 | 87 | 28 | 32 | 0.733 | 18.4% |
+
+Union of pairs judged in the reruns (8,788):
+
+| pair (ref vs other) | n | exact | adjacent | kappa | kappa qw | P@>=2 | R@>=2 | (P+R)/2 |
+|---|---|---|---|---|---|---|---|---|
+| incumbent vs gemini | 8788 | 79.6% | 99.5% | 0.610 | 0.847 | 0.910 | 0.684 | 0.797 |
+| incumbent vs openai | 8788 | 55.9% | 79.4% | 0.341 | 0.343 | 0.372 | 0.844 | 0.608 |
+| gemini vs openai | 8788 | 62.1% | 78.9% | 0.438 | 0.355 | 0.320 | 0.965 | 0.643 |
+| median vs incumbent | 8788 | 85.9% | 99.8% | 0.735 | 0.904 | 0.860 | 0.938 | 0.899 |
+| median vs gemini | 8788 | 93.5% | 99.9% | 0.882 | 0.950 | 0.986 | 0.808 | 0.897 |
+| median vs openai | 8788 | 66.8% | 80.3% | 0.511 | 0.404 | 0.398 | 0.983 | 0.690 |
+
+| judge | n | 0 | 1 | 2 | 3 | mean | share >=2 |
+|---|---|---|---|---|---|---|---|
+| incumbent | 8788 | 6107 | 1303 | 898 | 480 | 0.516 | 15.7% |
+| gemini | 8788 | 5398 | 2355 | 664 | 371 | 0.546 | 11.8% |
+| openai | 8788 | 3414 | 2251 | 644 | 2479 | 1.249 | 35.5% |
+| median | 8788 | 5308 | 2216 | 804 | 460 | 0.592 | 14.4% |
+
+### Verdict robustness (confirm split; tune rows in `$X/verdicts.md`)
+| change | judge | confirm delta | 95% CI | n | verdict, latency gate as recorded | verdict, quality only | shipped | flip |
+|---|---|---|---|---|---|---|---|---|
+| P4+5 index vs pre-change | incumbent | -0.0105 | [-0.0554, +0.0329] | 97 | hold | hold | hold (deploy override) | - |
+| P4+5 index vs pre-change | gemini | +0.0031 | [-0.0387, +0.0440] | 103 | hold | hold | hold (deploy override) | - |
+| P4+5 index vs pre-change | openai | +0.0183 | [-0.0191, +0.0541] | 109 | hold | hold | hold (deploy override) | - |
+| P4+5 index vs pre-change | median | +0.0095 | [-0.0325, +0.0490] | 104 | hold | hold | hold (deploy override) | - |
+| P7 rerank on vs off | incumbent | +0.1507 | [+0.0860, +0.2164] | 99 | ship | ship | ship | - |
+| P7 rerank on vs off | gemini | +0.1578 | [+0.1042, +0.2116] | 104 | ship | ship | ship | - |
+| P7 rerank on vs off | openai | +0.0613 | [+0.0166, +0.1051] | 109 | ship | ship | ship | - |
+| P7 rerank on vs off | median | +0.1464 | [+0.0923, +0.1995] | 104 | ship | ship | ship | - |
+| P6 offset 0.02 | incumbent | +0.0166 | [-0.0090, +0.0425] | 97 | hold | hold | hold | - |
+| P6 offset 0.02 | gemini | +0.0253 | [+0.0027, +0.0493] | 102 | ship | ship | hold | FLIP |
+| P6 offset 0.02 | openai | +0.0100 | [-0.0154, +0.0353] | 109 | hold | hold | hold | - |
+| P6 offset 0.02 | median | +0.0210 | [-0.0018, +0.0450] | 102 | hold | hold | hold | - |
+| P6 offset 0.05 | incumbent | -0.0049 | [-0.0397, +0.0295] | 97 | hold | hold | hold | - |
+| P6 offset 0.05 | gemini | +0.0135 | [-0.0168, +0.0446] | 102 | hold | hold | hold | - |
+| P6 offset 0.05 | openai | +0.0117 | [-0.0222, +0.0450] | 109 | hold | hold | hold | - |
+| P6 offset 0.05 | median | +0.0021 | [-0.0303, +0.0351] | 102 | hold | hold | hold | - |
+| P6 offset 0.1 | incumbent | -0.0218 | [-0.0591, +0.0157] | 97 | hold | hold | hold | - |
+| P6 offset 0.1 | gemini | -0.0065 | [-0.0480, +0.0319] | 102 | hold | hold | hold | - |
+| P6 offset 0.1 | openai | +0.0116 | [-0.0232, +0.0461] | 109 | hold | hold | hold | - |
+| P6 offset 0.1 | median | -0.0132 | [-0.0501, +0.0228] | 102 | hold | hold | hold | - |
+| P6 claim index | incumbent | +0.0249 | [-0.0036, +0.0526] | 95 | hold | hold | hold | - |
+| P6 claim index | gemini | +0.0267 | [-0.0071, +0.0631] | 101 | hold | hold | hold | - |
+| P6 claim index | openai | -0.0048 | [-0.0286, +0.0194] | 109 | hold | hold | hold | - |
+| P6 claim index | median | +0.0189 | [-0.0124, +0.0515] | 101 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.15 no-rerank | incumbent | -0.0006 | [-0.0017, +0.0000] | 95 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.15 no-rerank | gemini | -0.0004 | [-0.0025, +0.0016] | 100 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.15 no-rerank | openai | -0.0012 | [-0.0045, +0.0022] | 109 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.15 no-rerank | median | -0.0002 | [-0.0018, +0.0014] | 101 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.3 no-rerank | incumbent | -0.0001 | [-0.0018, +0.0017] | 95 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.3 no-rerank | gemini | +0.0003 | [-0.0009, +0.0018] | 100 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.3 no-rerank | openai | -0.0006 | [-0.0038, +0.0027] | 109 | hold | hold | hold | - |
+| P8 PPR vs BFS a=0.3 no-rerank | median | +0.0002 | [-0.0010, +0.0017] | 101 | hold | hold | hold | - |
+
+- One flip: P6 offset 0.02 under `gemini-4-argon`, confirm +0.0253, CI [+0.0027, +0.0493], `ship` against the shipped `hold`. The selection rule holds under that judge too: Gemini's tune split picks 0.02 (-0.0176, against -0.0420 at 0.05 and -0.0501 at 0.1). The median judge reads `hold` on the same change by 0.0018 (CI [-0.0018, +0.0450]); OpenAI reads `hold` (+0.0100, CI [-0.0154, +0.0353]).
+- Tune picks under the other judges: P6 offsets, 0.02 under OpenAI (+0.0170) and the median (-0.0103), both `hold` on confirm. P8 alpha, a tie under Gemini and the median (+0.0010 / +0.0012 at both alphas), 0.3 under OpenAI (-0.0010); confirm is `hold` at both alphas under every judge.
+- P7 rerank stays `ship` under every judge. Gemini and the median put it at the incumbent's size (+0.1578, +0.1464). OpenAI puts it at +0.0613, CI [+0.0166, +0.1051], still clear of 0.
+- P4+5 stays `hold` under every judge. Its confirm delta turns positive under all three non-incumbent judges (+0.0031, +0.0183, +0.0095); none is significant.
+- P6 claim stays `hold` under every judge. Gemini comes closest (lower bound -0.0071); the median and Gemini repeat the incumbent's significant tune gain.
+
+### Deviations
+- OpenAI's newest family could not be used through the harness. `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol` and `gpt-6.1-terra` all fail the smoke call with `POST "https://api.openai.com/v1/responses": 400 Bad Request {"message": "Unsupported parameter: 'temperature' is not supported with this model.", "type": "invalid_request_error", "param": "temperature"}`. fabric sends a temperature unless given `-r/--raw`, and `vault::fabric::command` passes no such flag, so making them usable is a code change; not done. `gpt-5.5-pro` answered the smoke call (6.8 s) but was not used: see Tradeoffs.
+- Bulk judging ran outside the harness (in `judgefill`, through the harness's own judge type), to parallelize 17,576 calls; the harness then read them from the cache. The harness's own call loop is sequential.
+- 55 `gemini-4-argon` calls failed after 3 attempts on the first pass (1,136 retries in all): 54 with `POST "https://api.anthropic.com/v1/messages": 404 Not Found ... {"type":"error","error":{"type":"not_found_error","message":"model: gemini-4-argon"}}` and 1 with `fabric -p judge-relevance timed out after 60s`. Under 16-way concurrency fabric sometimes failed to place the model under its Gemini vendor and sent it to its default vendor (Anthropic), which rejected it. Those calls produced errors, never grades, because no other vendor serves that model id. A second pass at 2 workers judged all 56 missing pairs with 0 errors. `gpt-5.5`: 8,788 judged, 0 errors, 0 retries.
+
+### Tradeoffs
+- `gpt-5.5` over `gpt-5.5-pro`: the pro tier is a parallel-compute variant at a much higher per-token price, and 8,788 calls on it was a spend nobody approved. Strongest-quality evidence on the OpenAI side would mean that model, or the GPT-6 family once fabric is passed `-r`.
+- `gemini-4-argon` over `gemini-2.5-pro`: the brief's "non-preview if possible" is met by both. Argon is the flagship and is listed without a preview suffix; 2.5 Pro is a generation older.
+- Rebuilding judge text from the arm notes table, verified by content hash, vs re-running retrieval to collect pools: the hash check proves the text is exactly what the judge saw, and the zero cache growth across the reruns proves the set was complete.
+
+### Open questions
+- The P6 0.02 offset flips to `ship` under Gemini alone, and the median misses by 0.0018. Under the pre-registered rule, which read on confirm uses the incumbent judge, it stays `hold`. Should one judge's ship move the default, or should a judge-robust rule (for example the median judge, or "ship under at least 2 of 3") replace the incumbent-only rule for future phases?
+- GPT-5.5 is the outlier: 35.5% of union pairs at grade >= 2 vs 15.7% (incumbent) and 11.8% (Gemini), with 2,479 grade-3s against 480 and 371. Kappa vs the median is 0.511 (union). The incumbent and Gemini agree closely (exact 79.6%, adjacent 99.5%, quadratic-weighted kappa 0.847 on the union). Treat the OpenAI judge as a lenient grader, not as an independent view of equal weight?
+- Every judge clears `TRUST_GATE` 0.6 against the median ((P+R)/2 on the union: incumbent 0.899, Gemini 0.897, OpenAI 0.690), and so does every pair of judges (lowest: incumbent vs OpenAI, 0.608 on the union). That is agreement between models, not accuracy against Scott; the calibration sheet stays unlabelled. Is model agreement enough to call the judge trusted, or does the gate still wait on human labels?
