@@ -65,17 +65,24 @@ fn process_transcript_batch_prefers_the_archive_over_staging() {
         staging: staging.path(),
     };
     assert_eq!(
-        read_source_transcript(roots, "both", "notes/video.md").as_deref(),
+        read_source_transcript(roots, "both", "notes/video.md")
+            .expect("read")
+            .as_deref(),
         Some("archived copy text")
     );
     // An archive without the trace falls back to staging.
     std::fs::remove_dir_all(archive.path().join("both")).expect("rm archive");
     assert_eq!(
-        read_source_transcript(roots, "both", "notes/video.md").as_deref(),
+        read_source_transcript(roots, "both", "notes/video.md")
+            .expect("read")
+            .as_deref(),
         Some("staged copy text")
     );
     // A traversal trace never resolves through the archive.
-    assert_eq!(read_source_transcript(roots, "../both", "notes/video.md"), None);
+    assert_eq!(
+        read_source_transcript(roots, "../both", "notes/video.md").expect("read"),
+        None
+    );
 }
 
 /// One transcript-chunk batch over `roots`.
@@ -178,4 +185,30 @@ fn archive_without_transcript_does_not_revive_the_sentinel_every_tick() {
         0,
         "no revive loop on a transcript-less archive"
     );
+}
+
+#[test]
+fn a_malformed_archive_falls_back_to_staging_and_errs_only_when_nothing_yields() {
+    let staging = TempDir::new().expect("staging");
+    let archive = TempDir::new().expect("archive");
+    stage_distilled_transcript(staging.path(), "both", "staged copy text");
+    stage_distilled_transcript(archive.path(), "both", "archived copy text");
+    std::fs::write(
+        archive.path().join("both").join(vault::distilled::FILENAME),
+        "transcript: [unclosed\n",
+    )
+    .expect("corrupt archive");
+    let roots = SourceRoots {
+        archive: archive.path(),
+        staging: staging.path(),
+    };
+    assert_eq!(
+        read_source_transcript(roots, "both", "notes/video.md")
+            .expect("staging stands in")
+            .as_deref(),
+        Some("staged copy text")
+    );
+    std::fs::remove_dir_all(staging.path().join("both")).expect("sweep staging");
+    let err = read_source_transcript(roots, "both", "notes/video.md").expect_err("no copy yields text");
+    assert!(err.to_string().contains("malformed"), "{err}");
 }

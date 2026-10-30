@@ -577,3 +577,26 @@ What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,
   Legacy targets are identical on both arms (`insufficient`). Alpha on tune: 0.3 (+0.0021 against +0.0018). Decision on confirm at 0.3: -0.0001, CI [-0.0018, +0.0017], **hold**. The effect is tiny: PPR only reorders the 50 vector hits, and the confirm CI is tight around zero. p95 criterion, met on both splits at both alphas: α=0.3 PPR 176.0 vs BFS 217.8 (tune) and 191.0 vs 230.6 (confirm); α=0.15 190.9 vs 199.6 and 197.6 vs 234.9. PPR on ~23k wikilink edges, lazily loaded, is no slower than the 2-hop BFS, which builds its statement per node.
 - **Verdict:** `hold` in both rounds. Defaults unchanged: `algorithm: bfs`, `ppr-alpha: 0.15` (the tune pick of 0.3 does not ship on a hold), graph off at weight 0.0. The p95 criterion is met where it can be read (rerank off); with rerank on it is lost in rerank's ~800 ms and reads not met at α=0.15.
 - `otto ci` green (exit 0, `All CI checks passed!`) on the final code tree, 00:03:08, before any `-norr` run. The `-norr` round changed no code, so CI was not re-run. Arms, reports, logs and scripts stay in `$P`; only `.md` under `docs/`. No background process left running.
+
+## Audit fix: unreadable source keeps rows
+Implementation audit must-fix 2: the Phase 3 empty-source cleanup also fired on a source that exists but cannot be read or parsed, because `read_distilled_transcript` returned `None` for every I/O and YAML error. The doc bullet and Scott's resolved decision cover only an empty or missing transcript.
+
+### Design decisions
+- The source readers return `Result<Option<String>>`: `Ok(None)` is "the system can no longer produce a transcript" (no trace, file NotFound, parsed `distilled.yml` with no or blank `transcript`), `Err` is "a copy exists and cannot be read or parsed"; `cortex/src/embed/source.rs:read_distilled_transcript`, `read_staged_transcript`, `read_source_transcript`; the split is decided where the error kind is still visible, not guessed later from a `None`.
+- `process_transcript_batch` sends `Err` down the tokenizer-error path: an ERROR log naming the note, `stats.failed += 1`, no sentinel, no row delete, retried next tick; `cortex/src/embed/transcript.rs:process_transcript_batch`; matches the Phase 4 tokenizer-error rule so one "can't read it right now" policy covers both.
+- The in-note reader got the same split: an unreadable note file (other than NotFound) is `Err`; a missing file or absent `## Transcript` section stays `Ok(None)`; `cortex/src/embed/transcript.rs:read_section_text`; it feeds the same delete path for Image/Audio/Note/Vocab notes.
+- Archive-then-staging: a broken archive copy does not stop the staging fallback. If staging yields text it is used (WARN names the archive error); if staging is missing or empty and the archive errored, the archive error is returned, so a broken copy never reads as "source gone"; `cortex/src/embed/source.rs:read_source_transcript`.
+- Dropped the `is_file()` filter on the archive path: it turned EACCES on `metadata` and a directory-shaped path into a silent "missing". The NotFound check inside `read_distilled_transcript` now decides missing for both roots.
+- `cortex/AGENTS.md` transcript invariant extended with the missing-vs-broken rule.
+
+### Deviations
+- None from the design doc: the bullet's "(empty or missing transcript)" is now exactly what deletes rows. Relative to the Phase 3 code this narrows the delete path, and relative to v0.20.0 a malformed/unreadable source no longer writes a sentinel either (v0.20.0 sentinelled it and kept rows); the brief asked for no sentinel so the note is retried, matching the tokenizer-error handling.
+
+### Tradeoffs
+- No sentinel on a broken source vs sentinel-without-delete (the synthesis' suggested fix): without a sentinel the note is re-read every tick until the file is fixed or the note re-modified, at the cost of one failed read and one ERROR line per tick per broken note. Chosen because it is loud and self-healing; a sentinel would hide a borg schema drift until the next re-modify.
+- Using a good staged copy when the archive copy is broken vs failing the note: the staged copy is the same borg output, so embedding from it is correct; failing would block a recoverable note on an archive defect that the WARN already surfaces.
+
+### Open questions
+- A borg `Distilled` schema drift would now leave every affected stale video note re-read and failed each tick (rows intact). That is the intended loud failure; confirm an ERROR per note per tick is the volume you want, or whether a per-tick summary line should replace it.
+
+Tests (all fail with the fix reverted by mapping `Err` to the empty-source path, pass with it): `embed::tests::recipe::malformed_source_keeps_old_rows`, `unreadable_source_keeps_old_rows` (a directory where `distilled.yml` should be), `unreadable_in_note_transcript_keeps_old_rows`, `embed::tests::archive::a_malformed_archive_falls_back_to_staging_and_errs_only_when_nothing_yields`. `empty_source_clears_old_rows` stays green in both states.

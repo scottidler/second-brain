@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use eyre::Result;
+use eyre::{Result, eyre};
 use vault::detail::first_sentence;
 use vault::embedding::EmbeddingModel;
 use vault::schema::NoteType;
@@ -88,9 +88,20 @@ pub(super) fn process_transcript_batch(
             read_section_text(&abs, "## Transcript")
         };
         let transcript = match transcript {
-            Some(s) if !s.trim().is_empty() => s,
-            _ => {
-                // Missing/expired/malformed staged file OR absent in-note section:
+            Ok(Some(s)) if !s.trim().is_empty() => s,
+            // A source that exists but cannot be read or parsed is not proof the
+            // transcript is gone: no sentinel, no row delete, so the old rows keep
+            // serving and the note is retried next tick (the tokenizer-error rule).
+            Err(e) => {
+                log::error!(
+                    "cortex::embed: reading the transcript of {} failed, note skipped: {e}",
+                    t.note_path
+                );
+                stats.failed += 1;
+                continue;
+            }
+            Ok(_) => {
+                // Missing/expired staged file, no transcript text, OR absent in-note section:
                 // record the examined sentinel keyed on the NOTE's indexed
                 // modified_at (never on the staged file) so the note leaves the
                 // stale set until it is re-modified or the model version bumps.
@@ -221,12 +232,16 @@ pub(super) fn chunk_context_prefix(title: &str, summary: &str) -> String {
     if lead.is_empty() { format!("{title}.") } else { format!("{title}. {lead}") }
 }
 
-/// Read a single `## Heading` section out of a vault file. Returns
-/// `None` when the file is missing/unreadable or the section is absent;
-/// callers log + skip. `header` must include the leading `## ` and
-/// match the anchor exactly (case-sensitive).
-pub(super) fn read_section_text(abs: &Path, header: &str) -> Option<String> {
-    let body = std::fs::read_to_string(abs).ok()?;
+/// Read a single `## Heading` section out of a vault file. `Ok(None)` when
+/// the file is missing or the section is absent; `Err` when the file exists
+/// but cannot be read. `header` must include the leading `## ` and match the
+/// anchor exactly (case-sensitive).
+pub(super) fn read_section_text(abs: &Path, header: &str) -> Result<Option<String>> {
+    let body = match std::fs::read_to_string(abs) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(eyre!("{} unreadable: {e}", abs.display())),
+    };
     let mut lines = body.lines();
     while let Some(line) = lines.next() {
         if line.trim() == header {
@@ -238,8 +253,8 @@ pub(super) fn read_section_text(abs: &Path, header: &str) -> Option<String> {
                 collected.push_str(next);
                 collected.push('\n');
             }
-            return Some(collected.trim().to_string());
+            return Ok(Some(collected.trim().to_string()));
         }
     }
-    None
+    Ok(None)
 }

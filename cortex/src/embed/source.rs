@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use eyre::Result;
+use eyre::{Result, eyre};
 use vault::distilled::{Distilled, FILENAME as DISTILLED_FILENAME};
 use vault::schema::NoteType;
 use vault::search::{EmbeddingKind, SearchIndex};
@@ -36,9 +36,14 @@ impl<'a> SourceRoots<'a> {
 /// `<archive>/<trace>/distilled.yml` first, then the staged
 /// `<staging>/<trace>/distilled.yml` (2026-10-14-note-sources-intent-tools-channels).
 /// The archive outlives the staging sweep, so a trace whose staging dir is
-/// gone still embeds. `None` (and the caller's examined sentinel) only when
-/// neither yields transcript text.
-pub(super) fn read_source_transcript(roots: SourceRoots<'_>, trace: &str, note_path: &str) -> Option<String> {
+/// gone still embeds.
+///
+/// `Ok(None)` means the system can no longer produce a transcript (no trace,
+/// both copies missing, or no transcript text): the caller sentinels the note
+/// and deletes its old rows. `Err` means a copy exists but cannot be read or
+/// parsed and no other copy yielded text: the caller keeps the old rows and
+/// retries next tick, because a broken file is not proof the source is gone.
+pub(super) fn read_source_transcript(roots: SourceRoots<'_>, trace: &str, note_path: &str) -> Result<Option<String>> {
     log::debug!(
         "cortex::embed::read_source_transcript: note={note_path} trace={trace} archive={} staging={}",
         roots.archive.display(),
@@ -46,16 +51,26 @@ pub(super) fn read_source_transcript(roots: SourceRoots<'_>, trace: &str, note_p
     );
     if trace.is_empty() {
         log::warn!("cortex::embed: {note_path} has no trace; cannot resolve its source transcript");
-        return None;
+        return Ok(None);
     }
-    let archived = vault::trace::dir(roots.archive, trace).map(|dir| dir.join(DISTILLED_FILENAME));
-    if let Some(path) = archived.filter(|p| p.is_file())
-        && let Some(t) = read_distilled_transcript(&path, note_path)
-    {
+    let archived = match vault::trace::dir(roots.archive, trace) {
+        Some(dir) => read_distilled_transcript(&dir.join(DISTILLED_FILENAME), note_path),
+        None => Ok(None),
+    };
+    if let Ok(Some(t)) = archived {
         log::debug!("cortex::embed: {note_path} transcript resolved from the archive");
-        return Some(t);
+        return Ok(Some(t));
     }
-    read_staged_transcript(roots.staging, trace, note_path)
+    let staged = read_staged_transcript(roots.staging, trace, note_path)?;
+    match (staged, archived) {
+        (Some(t), Err(e)) => {
+            log::warn!("cortex::embed: {note_path} archive copy unusable, staged copy used instead: {e}");
+            Ok(Some(t))
+        }
+        (Some(t), Ok(_)) => Ok(Some(t)),
+        (None, Err(e)) => Err(e),
+        (None, Ok(_)) => Ok(None),
+    }
 }
 
 /// Resolve a Video/Youtube/Article note's verbatim transcript from borg's
@@ -65,62 +80,52 @@ pub(super) fn read_source_transcript(roots: SourceRoots<'_>, trace: &str, note_p
 /// sole staging writer. The fallback behind the archive
 /// ([`read_source_transcript`]).
 ///
-/// Returns `None` — and the caller records the examined sentinel — on every
-/// failure mode, all fail-closed (never a silent empty embed, never an error
-/// that spins the loop):
-/// - empty `trace` (note predates the trace column, or was never staged)
+/// `Ok(None)` — and the caller's examined sentinel plus row delete — when:
+/// - `trace` is empty (note predates the trace column, or was never staged)
 /// - the staged file is missing or expired (swept by retention)
-/// - the staged file is unreadable or malformed YAML
 /// - `transcript` is absent/empty (e.g. the article source-quality gate cleared it)
+///
+/// `Err` when the staged file exists but is unreadable or malformed YAML.
 ///
 /// A sentinel skip holds until the note's indexed `modified_at` advances, the
 /// model version bumps, or an archive copy appears after the sentinel
 /// ([`revive_archived_sentinels`]).
-fn read_staged_transcript(staging_root: &Path, trace: &str, note_path: &str) -> Option<String> {
+fn read_staged_transcript(staging_root: &Path, trace: &str, note_path: &str) -> Result<Option<String>> {
     log::debug!(
         "cortex::embed::read_staged_transcript: note={note_path} trace={trace} staging_root={}",
         staging_root.display(),
     );
     if trace.is_empty() {
         log::warn!("cortex::embed: {note_path} has no trace; cannot resolve staged transcript");
-        return None;
+        return Ok(None);
     }
     read_distilled_transcript(&staging_root.join(trace).join(DISTILLED_FILENAME), note_path)
 }
 
-/// The `transcript` field of one `distilled.yml`, or `None` with a WARN when
-/// the file is unreadable, malformed, or carries no transcript text.
-fn read_distilled_transcript(path: &Path, note_path: &str) -> Option<String> {
+/// The `transcript` field of one `distilled.yml`. `Ok(None)` with a WARN when
+/// the file does not exist or carries no transcript text; `Err` when it exists
+/// but cannot be read or does not parse as `Distilled`.
+fn read_distilled_transcript(path: &Path, note_path: &str) -> Result<Option<String>> {
     let yaml = match std::fs::read_to_string(path) {
         Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::warn!("cortex::embed: {note_path} has no distilled.yml at {}", path.display());
+            return Ok(None);
+        }
         Err(e) => {
-            // Missing (never staged / swept by retention) or otherwise unreadable.
-            log::warn!(
-                "cortex::embed: {note_path} distilled.yml unreadable at {}: {e}",
-                path.display(),
-            );
-            return None;
+            return Err(eyre!("{note_path} distilled.yml unreadable at {}: {e}", path.display()));
         }
     };
-    let distilled: Distilled = match serde_yaml::from_str(&yaml) {
-        Ok(d) => d,
-        Err(e) => {
-            // Fail closed on malformed YAML: skip, never a partial embed.
-            log::warn!(
-                "cortex::embed: {note_path} distilled.yml at {} is malformed: {e}",
-                path.display(),
-            );
-            return None;
-        }
-    };
+    let distilled: Distilled = serde_yaml::from_str(&yaml)
+        .map_err(|e| eyre!("{note_path} distilled.yml at {} is malformed: {e}", path.display()))?;
     match distilled.transcript {
-        Some(t) if !t.trim().is_empty() => Some(t),
+        Some(t) if !t.trim().is_empty() => Ok(Some(t)),
         _ => {
             log::warn!(
                 "cortex::embed: {note_path} distilled.yml at {} has no transcript text",
                 path.display(),
             );
-            None
+            Ok(None)
         }
     }
 }
