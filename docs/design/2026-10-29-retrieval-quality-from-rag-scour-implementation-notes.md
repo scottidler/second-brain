@@ -208,3 +208,78 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
 
 ### Open questions
 - None.
+
+## Phase 4: Token-accurate chunker
+
+### Design decisions
+- The chunker is `vault::embedding::chunk` (`chunk.rs`): `windows(segmenter, max_input_tokens, prefix, text) -> Result<Vec<Window>>` does the work and `chunk(...)` returns only the texts. It runs over a `Segmenter` port (`token_spans`: byte span per token, specials excluded; `count_tokens`: encoded length with `[CLS]`/`[SEP]`, truncation off), so one algorithm serves the real tokenizer (`TokenChunker`) and the mock (`WhitespaceSegmenter`, one token per word, test-util only).
+- Window capacity = `max_input_tokens - SPECIAL_TOKENS - tokens(prefix)`, after the prefix is cut at a token boundary to `PREFIX_MAX_TOKENS`. A capacity at or below `CHUNK_OVERLAP_TOKENS` is an error. Each window is the verbatim byte slice from its first token's start to its last token's end; the final `prefix + "\n\n" + slice` is re-encoded and the window shrinks one token at a time until it fits. The next window starts `CHUNK_OVERLAP_TOKENS` before the previous end (never at or before the previous start).
+- `CHUNK_OVERLAP_TOKENS = 64`, `PREFIX_MAX_TOKENS = 64` and `SPECIAL_TOKENS = 2` are vault constants re-exported from `vault::embedding`; `TRANSCRIPT_CHUNK_RECIPE`'s doc comment names them. `CHUNK_MAX_TOKENS` is gone, and so is the word chunker `vault::embedding::chunk_transcript` and its tests, and cortex's `CLAIM_GROUP_MAX_WORDS`.
+- `EmbeddingModel` gains `max_input_tokens`, `count_tokens` and `chunk`, all required (no default), so no implementor can silently fall back to a word count. Candle and ONNX return their `MAX_SEQ_LEN` (512) and delegate to a `TokenChunker` loaded from the same `tokenizer.json` with truncation and padding off (`candle.rs` / `onnx.rs` `load_version`). `MockEmbedder` defaults to a 512 window (`MOCK_MAX_INPUT_TOKENS`) with `with_max_input_tokens` for tests.
+- `cortex::embed::transcript` calls `model.chunk("", &transcript)`; the prefix is Phase 5. On a tokenizer error it logs ERROR naming the note, counts it `failed`, and writes no rows and no sentinel, so the old rows keep serving and the note is retried next tick.
+- `cortex::embed::claim::group_claims(model, text) -> Result<Vec<String>>` packs claims in order and accepts a group only after re-encoding the exact `\n`-joined string; a single claim over the window is windowed by `model.chunk` into its own groups instead of being truncated. Same error handling as transcripts.
+- `cortex::embed::summary`: every summary text is counted; over the window logs one WARN per embed naming the note path, token count and window (`summary text of <path> is <n> tokens, over the 512-token window; only its head is embedded`). A tokenizer error there skips the note the same way.
+- `TRANSCRIPT_CHUNK_RECIPE` 1 -> 2 and `CLAIM_RECIPE` 1 -> 2 (`vault/src/search/vector.rs`), each with a comment saying what recipe 1 and 2 are. `recipe_reembed_is_not_stale_next_tick` now observes stamping for transcript chunks (rows at 2, column default 1) and passes.
+- `vault/AGENTS.md` names the chunk module, the trait methods and the recipe rule.
+
+### Deviations
+- The trait gets a third method, `count_tokens`, beyond the doc's two. `group_claims` has to measure each candidate group and the summary WARN has to measure the summary; neither is a windowing call. Same effect, correct seam.
+- The backends do not reuse their inference tokenizer for chunking: it carries truncation 512 and batch padding. Each holds a second `Tokenizer` from the same file with both off.
+- The doc says a tokenizer error skips the note for chunking; the summary count applies the same rule (an un-tokenizable summary would not embed either).
+- An oversize single claim is windowed rather than embedded alone and truncated (the old behavior). "Never truncated" applies to claims too.
+- The two named tests are a cortex integration test, `cortex/tests/chunker.rs`, because the committed fixture lives in `cortex/tests/fixtures/`; they drive vault's real `TokenChunker` and check every window with an independent fixture tokenizer.
+- Phase 3's `backend_free_migration_renames_the_pin_and_rows_without_a_reembed` seeded recipe-less rows and asserted nothing is stale; with two kinds at recipe 2 those rows are stale for the recipe, which is correct. The test now stamps the current recipe before its staleness assertion so it still checks the rename and only the rename.
+- Arm A is the snapshot copy opened by the new binary, not re-embedded. The open runs the Phase-3 migration (two `recipe` columns and the stale-join index); `search_vector` reads neither, so retrieval is the snapshot's. Arm A's legacy single-arm numbers match Phase 2's to the fourth decimal (vector 0.7561, hybrid 0.7751, configured 0.7563), which is the check.
+- The eval cache lives beside arm A's DB (`eval.rs:eval_cache_path`), so arm A carries a `.backup` copy of the live `eval-cache.db` (10,038 rows); the 845 new judgments went into that copy, not the live cache.
+
+### Tradeoffs
+- Shrinking one token at a time (the doc's rule) vs a binary search: overflow after a mid-word cut is one or two tokens, so a linear shrink re-encodes one or two extra times per window.
+- A tokenizer failure leaves the note unsentinelled (retried every tick, loud every tick) vs sentinelling it (quiet, but a transient error would hide the note until it is edited). Loud wins; the drain loop already halts on a zero-progress batch.
+- Generic `Segmenter` port vs a tokenizer-only chunker: the port lets `MockEmbedder` run the same windowing code in every cortex test, so the batch tests exercise the real algorithm.
+
+### Open questions
+- The paired verdict is `hold` with every non-bm25 delta negative; tune is significantly negative for vector, hybrid and configured. Measured: chunk rows went 19,679 -> 25,802 and rows per chunked note 9.0 -> 11.9 (2,178 -> 2,161 notes). Hypothesis, not verified: more chunk vectors per transcript note give it more chances to win the min-distance pooling (problem 3), crowding out summary-matched notes. Evidence that would confirm it: per-query top-10 kind attribution (which row kind won each pooled note) on arms A and B. Phase 5 measures against this arm, and Phase 6's kind offsets are the lever the doc already plans; whether Phase 5 should still ship 4+5 together if 4+5 vs live is also `hold` is Scott's call under the decision rule.
+- 1,324 transcript-chunk sentinels remain at recipe 1 in arm B, all on notes that now have recipe-2 rows; a second `--kind transcript-chunk` pass scanned 0, so they are inert. They clear only when those notes go sourceless again. Worth a cleanup in the sentinel write?
+
+### Evidence (Phase 4, ripr 2026-10-29)
+- Tests, all green in `otto ci`:
+  - `cortex/tests/chunker.rs`: `chunk_fits_model_window` (fixture tokenizer, truncation off; a 20,441-token input with a no-whitespace URL run (400 path segments plus a 300-char query) every fourth round, long German and English compounds, accented and CJK text, code punctuation; prefixes empty, a sentence, and 128 words cut to 64 tokens; every chunk <= 512 with `[CLS]`/`[SEP]` and the longest > 496) and `chunk_overlap_has_no_gaps` (first window at token 0, last at the final token, consecutive windows advance and share 1..=64 source tokens, every window equals its verbatim source slice).
+  - `vault/src/embedding/chunk/tests.rs`: blank input, verbatim single window, exact-capacity boundary, stride 446, prefix capacity, prefix cut at `PREFIX_MAX_TOKENS`, capacity-below-overlap error, multibyte slicing, shrink-on-inflated-re-encode, tokenizer error returned.
+  - `cortex/src/embed/tests/chunking.rs`: `tokenizer_error_skips_the_note_without_rows_or_sentinel` (transcript, claim and summary paths) and `oversize_summary_warns_with_path_and_token_count`. `group_claims_fits_the_token_window` replaces `group_claims_splits_by_word_budget` (the oversize-claim behavior changed by design).
+- Shown failing with the change reverted (`vault/src/embedding/chunk.rs` backed up, mutated, tested, restored, `cmp` clean):
+
+  | mutation | fails |
+  |---|---|
+  | M1: accept every window without the re-encode shrink | `chunk_fits_model_window`: `chunk 10 (prefix 0 bytes) encodes to 513 tokens with [CLS]/[SEP], over 512` |
+  | M2: `chunk` replaced by the recipe-1 400-word / 350-stride window | `chunk_fits_model_window`: `chunk 0 (prefix 0 bytes) encodes to 13932 tokens` |
+  | M3: next window starts at the previous end (no overlap) | `chunk_overlap_has_no_gaps`: `consecutive windows share at least one source token: 0..510 then 510..1020` |
+  | M4: next window starts one past the previous end (a gap) | `chunk_overlap_has_no_gaps`: `0..510 then 511..1021` |
+
+  M1 is the WordPiece re-tokenization risk the doc names, observed on the fixture: a cut slice re-encoded one token longer than its span.
+- Index arm, same shape as Phase 0 (`$P4` = `.../scratchpad/p4`; `bwrap --dev-bind / / --ro-bind ~/.local/share/sb/oracle ~/.local/share/sb/oracle`; the `touch` probe returned `Read-only file system`; `cortex.yml` has neither `archive-root` nor `staging-root`):
+  - Binary: `target/release/sb` built from this commit's tree (`sb v0.20.0-7-gc6e0f86`), pinned as `$P4/sb-phase4`.
+  - Snapshot `2026-10-30T00:32:09Z`: `sqlite3 ~/.local/share/sb/oracle/oracle.db ".backup $P4/snapshot.db"` -> `summary|4924|4924`, `transcript-chunk|19679|2178` (rows, notes), no `recipe` column. Arm A = `$P4/armA/sb/oracle/oracle.db`, arm B = `$P4/armB/sb/oracle/oracle.db`, both byte-copies of the snapshot (same sha256), each with `sb/borg` symlinked to the live borg dir.
+  - Arm B: `XDG_DATA_HOME=$P4/armB sb cortex embed -v --kind transcript-chunk --backfill`, 17:36:33 -> 17:47:59 PDT: migration logged, `oracle db=$P4/armB/...` at DEBUG, `embed complete: scanned=3498 embedded=25802 skipped_empty=274 failed=0`, exit 0, 0 ERROR lines (the WARNs are missing or transcript-less sources). A second `--kind transcript-chunk` pass: `scanned=0`.
+  - Arm B census: `summary|1|4924`, `transcript-chunk|2|25802` over 2,161 notes; no transcript-chunk row at any other recipe; `min(produced_at)` after the run start. The snapshot's masked set (stale chunk rows behind a current sentinel) is again 17 notes / 163 rows; arm B holds 0 rows for them, and they are exactly the 17 snapshot notes with no chunk rows in arm B (`mark_nothing_to_embed_batch ... cleared N old row(s)` in the log).
+  - Live DB untouched: still no `recipe` column after both runs.
+- Token-count command (Acceptance Criteria) against arm B: `rows 25802 over512 0`. Same script with a distribution: snapshot `rows 19679 median 650 p90 746 max 20703 over512 17849 tokens_not_embedded 3066549`; arm B `rows 25802 median 512 p90 512 max 512 over512 0 tokens_not_embedded 0`.
+- Paired eval, 17:48:59 -> 18:15:20 PDT, exit 0, no judge refusal: `XDG_DATA_HOME=$P4/armA sb oracle eval --queries ~/repos/scottidler/obsidian/system/eval/oracle-queries.yml --compare-db $P4/armB/sb/oracle/oracle.db` inside the same bwrap (248 queries, live `oracle.yml` on both arms, latency reported not gated: Phase 4 names no budget). Judgments 5,249; arm A's cache copy 10,038 -> 10,883.
+
+  | target | split | nDCG A | nDCG B | delta | 95% CI | n | MDD | p95 A ms | p95 B ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | vector | tune | 0.7565 | 0.7168 | -0.0397 | [-0.0741, -0.0066] | 119 | 0.0482 | 47.0 | 49.8 | hold |
+  | vector | confirm | 0.7603 | 0.7293 | -0.0310 | [-0.0720, +0.0076] | 96 | 0.0573 | 43.8 | 49.2 | hold |
+  | configured | tune | 0.7566 | 0.7169 | -0.0397 | [-0.0741, -0.0066] | 119 | 0.0482 | 43.7 | 43.1 | hold |
+  | configured | confirm | 0.7603 | 0.7293 | -0.0310 | [-0.0720, +0.0076] | 96 | 0.0573 | 44.2 | 43.5 | hold |
+  | hybrid | tune | 0.7683 | 0.7387 | -0.0296 | [-0.0568, -0.0036] | 119 | 0.0375 | 40.7 | 44.0 | hold |
+  | hybrid | confirm | 0.7643 | 0.7410 | -0.0232 | [-0.0580, +0.0097] | 97 | 0.0484 | 42.0 | 43.9 | hold |
+  | graph | tune | 0.5349 | 0.5191 | -0.0158 | [-0.0387, +0.0067] | 116 | 0.0325 | 470.4 | 448.8 | hold |
+  | graph | confirm | 0.5291 | 0.5210 | -0.0081 | [-0.0376, +0.0208] | 96 | 0.0418 | 468.0 | 464.2 | hold |
+  | graph-hybrid | tune | 0.6305 | 0.6109 | -0.0196 | [-0.0444, +0.0041] | 116 | 0.0352 | 470.6 | 445.5 | hold |
+  | graph-hybrid | confirm | 0.6408 | 0.6212 | -0.0197 | [-0.0514, +0.0122] | 96 | 0.0449 | 476.3 | 458.4 | hold |
+  | graph-hybrid (no fact) | tune / confirm | 0.6305 / 0.6408 | 0.6109 / 0.6212 | -0.0196 / -0.0197 | [-0.0444, +0.0041] / [-0.0514, +0.0122] | 116 / 96 | 0.0352 / 0.0449 | 535.6 / 549.5 | 513.2 / 536.3 | hold |
+  | bm25 | tune / confirm | 0.9111 / 0.8903 | same | +0.0000 | [0, 0] | 47 / 45 | insufficient | 11.9 / 11.5 | 11.4 / 11.2 | insufficient |
+
+  - Verdict on the decision rule: `hold` for every vector-reading target. No confirm CI lower bound is above 0; every confirm delta is negative, and the tune split is significantly negative (CI upper bound < 0) for vector, configured and hybrid. bm25 does not read vectors, so its arms are identical.
+  - Kept for Phase 5: arm B `$P4/armB` (recipe-2 chunks, no prefix), arm A `$P4/armA` with the grown judgment cache, the snapshot `$P4/snapshot.db`, the report `$P4/eval-report.txt`, logs `$P4/armB-embed.log` and `$P4/eval.log`. `$P4` is `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p4`.
+- No deploy, no live re-embed: Phase 5 ships 4+5 as one drain.

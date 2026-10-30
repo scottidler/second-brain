@@ -16,7 +16,8 @@ use super::{BatchOutcome, EmbedStats};
 use crate::shutdown::StopHandle;
 
 /// one batch of transcript chunks. Each transcript-eligible
-/// note expands into N chunks via `vault::embedding::chunk_transcript`;
+/// note expands into N chunks via `EmbeddingModel::chunk`, each fitted to
+/// the model's token window;
 /// the chunks are embedded in one batch and flushed via
 /// `swap_transcript_chunks`, which DELETE/INSERTs atomically per note
 /// to avoid leaving a half-replaced chunk set visible to hybrid search.
@@ -25,7 +26,7 @@ use crate::shutdown::StopHandle;
 /// the number of chunks. A pathologically long transcript will still
 /// be flushed in one short transaction (delete + N inserts); the
 /// per-note CPU is dominated by chunk_count * inference latency, which
-/// is bounded by the chunker's max_tokens.
+/// is bounded by the model's token window.
 pub(super) fn process_transcript_batch(
     index: &mut SearchIndex,
     model: &dyn EmbeddingModel,
@@ -107,9 +108,19 @@ pub(super) fn process_transcript_batch(
                 continue;
             }
         };
-        let chunks = vault::embedding::chunk_transcript(&transcript, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS);
+        // A tokenizer error skips the note with no rows written and no
+        // sentinel: its old rows keep serving and it is retried next tick.
+        // Never embed a truncated chunk in its place.
+        let chunks = match model.chunk("", &transcript) {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                log::error!("cortex::embed: chunking {} failed, note skipped: {e}", t.note_path);
+                stats.failed += 1;
+                continue;
+            }
+        };
         if chunks.is_empty() {
-            log::warn!("cortex::embed: chunk_transcript produced 0 chunks for {}", t.note_path);
+            log::warn!("cortex::embed: chunking produced 0 chunks for {}", t.note_path);
             stats.skipped_empty += 1;
             examined.push((t.note_path.clone(), t.modified_at));
             continue;
@@ -196,12 +207,6 @@ pub(super) fn process_transcript_batch(
     }
     Ok(finish(stats))
 }
-
-/// Chunk window defaults. The design pins these; future tuning happens
-/// here, not via per-call args, because the stale-target query and the
-/// chunker share the same notion of "what fits in one chunk."
-pub(super) const CHUNK_MAX_TOKENS: usize = 400;
-pub(super) const CHUNK_OVERLAP_TOKENS: usize = 50;
 
 /// Read a single `## Heading` section out of a vault file. Returns
 /// `None` when the file is missing/unreadable or the section is absent;

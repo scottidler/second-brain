@@ -490,6 +490,12 @@ fn backend_free_migration_renames_the_pin_and_rows_without_a_reembed() {
         EmbeddingKind::TranscriptChunk,
         EmbeddingKind::Claim,
     ] {
+        // The seed predates recipes, so its rows read recipe 1 and any kind
+        // whose recipe has since been bumped is stale for that reason alone.
+        // Stamp the current recipe so this asserts the rename and nothing else.
+        index
+            .set_test_recipe(kind, kind.recipe())
+            .expect("stamp current recipe");
         let stale = index.stale_embedding_targets(kind, SMALL, 100).expect("stale targets");
         assert!(
             stale.is_empty(),

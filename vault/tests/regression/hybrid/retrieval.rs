@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use vault::embedding::{EmbeddingModel, MockEmbedder, chunk_transcript};
+use vault::embedding::{EmbeddingModel, MockEmbedder};
 use vault::search::{BatchUpsert, EmbeddingKind, K_RRF_INPUT, RRF_K, SearchIndex, reciprocal_rank_fusion};
 
 /// 20 synthetic notes with bodies that exercise both lexical (BM25) and
@@ -260,7 +260,7 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
             }])
             .expect("summary upsert");
 
-        let chunks = chunk_transcript(transcript, 30, 5);
+        let chunks = m.chunk("", transcript).expect("chunk");
         let chunk_pairs: Vec<(String, Vec<f32>)> = chunks
             .into_iter()
             .map(|c| {

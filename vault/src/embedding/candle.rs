@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
+use super::chunk::{Segmenter, TokenChunker};
 use super::{BGE_SMALL_MODEL_VERSION, EmbeddingModel, MODELS, ModelSpec, model_spec};
 
 /// Resolve a model version to its registry entry; `None` if unknown. Candle
@@ -71,6 +72,8 @@ const DEFAULT_WORKERS: usize = 1;
 pub struct CandleBertModel {
     replicas: Vec<Mutex<Inner>>,
     next_replica: AtomicUsize,
+    /// The same `tokenizer.json`, truncation off, for chunking and counting.
+    chunker: TokenChunker,
     model_version: String,
     dim: usize,
 }
@@ -127,6 +130,7 @@ impl CandleBertModel {
         }
         let pad_token_id = config.pad_token_id as u32;
 
+        let chunker = TokenChunker::from_file(&tokenizer_path)?;
         let mut replicas = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner = build_inner(&tokenizer_path, &weights_path, &config, pad_token_id)?;
@@ -139,6 +143,7 @@ impl CandleBertModel {
         Ok(Self {
             replicas,
             next_replica: AtomicUsize::new(0),
+            chunker,
             model_version: version.to_string(),
             dim,
         })
@@ -233,6 +238,18 @@ impl EmbeddingModel for CandleBertModel {
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         self.embed_inner(texts)
+    }
+
+    fn max_input_tokens(&self) -> usize {
+        MAX_SEQ_LEN
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<usize> {
+        self.chunker.count_tokens(text)
+    }
+
+    fn chunk(&self, prefix: &str, text: &str) -> Result<Vec<String>> {
+        super::chunk::chunk(&self.chunker, MAX_SEQ_LEN, prefix, text)
     }
 }
 

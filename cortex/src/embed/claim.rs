@@ -20,8 +20,8 @@ use crate::shutdown::StopHandle;
 /// The grouping is load-bearing: a note can carry up to 24 claims, whose
 /// joined text can exceed bge-small's 512-token window. Passing that as one
 /// string would make the model silently truncate the tail - dropping the
-/// late claims, the exact defect this design removes. Splitting into
-/// sub-window groups guarantees every claim is embedded.
+/// late claims. Grouping by the model's own token count guarantees every
+/// claim is embedded whole.
 pub(super) fn process_claim_batch(
     index: &mut SearchIndex,
     model: &dyn EmbeddingModel,
@@ -49,7 +49,17 @@ pub(super) fn process_claim_batch(
     for t in &targets {
         stats.scanned += 1;
         // The Claim arm selects `notes.claims` into the `summary` field.
-        let groups = group_claims(&t.summary, CLAIM_GROUP_MAX_WORDS);
+        let groups = match group_claims(model, &t.summary) {
+            Ok(groups) => groups,
+            Err(e) => {
+                log::error!(
+                    "cortex::embed: grouping claims of {} failed, note skipped: {e}",
+                    t.note_path
+                );
+                stats.failed += 1;
+                continue;
+            }
+        };
         if groups.is_empty() {
             // Defensive: the SQL filter already excludes empty-claims notes,
             // but keep the skip path so a schema drift cannot reintroduce the
@@ -134,43 +144,41 @@ pub(super) fn process_claim_batch(
     Ok(finish(stats))
 }
 
-/// Group a note's newline-joined claim text into chunks whose word count
-/// stays under `max_words`, so no single embedding input overruns the
-/// model's token window (bge-small: 512 tokens ≈ 400 words at the ~0.75
-/// word:token ratio the chunker assumes). Each returned chunk is its member
-/// claims re-joined with `\n`.
+/// Group a note's newline-joined claim text into chunks that each encode to
+/// at most the model's token window, so no embedding input is truncated.
+/// Claims are packed in order; each group is its member claims re-joined
+/// with `\n`, and every group is re-encoded as the exact string that will be
+/// embedded before it is accepted.
 ///
-/// A single claim that alone exceeds the budget becomes its own chunk: the
-/// model truncates that one pathological claim, but no *later* claim is
-/// silently dropped - which is the whole point (dropping tail claims is the
-/// claim-embedding defect; truncating one overlong sentence is acceptable and rare).
-/// Returns an empty Vec when the input is blank.
-pub(super) fn group_claims(claims_text: &str, max_words: usize) -> Vec<String> {
-    let claims: Vec<&str> = claims_text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if claims.is_empty() {
-        return Vec::new();
-    }
+/// A single claim that alone overruns the window is windowed by
+/// [`EmbeddingModel::chunk`] into its own groups, so neither it nor any later
+/// claim loses tokens. Returns an empty Vec when the input is blank, and the
+/// tokenizer's error when it fails.
+pub(super) fn group_claims(model: &dyn EmbeddingModel, claims_text: &str) -> Result<Vec<String>> {
+    let limit = model.max_input_tokens();
     let mut groups: Vec<String> = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-    let mut current_words = 0usize;
-    for claim in claims {
-        let words = claim.split_whitespace().count();
-        if !current.is_empty() && current_words + words > max_words {
-            groups.push(current.join("\n"));
-            current.clear();
-            current_words = 0;
+    let mut current = String::new();
+    for claim in claims_text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if model.count_tokens(claim)? > limit {
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
+            groups.extend(model.chunk("", claim)?);
+            continue;
         }
-        current.push(claim);
-        current_words += words;
+        if current.is_empty() {
+            current = claim.to_string();
+            continue;
+        }
+        let candidate = format!("{current}\n{claim}");
+        if model.count_tokens(&candidate)? <= limit {
+            current = candidate;
+        } else {
+            groups.push(std::mem::replace(&mut current, claim.to_string()));
+        }
     }
     if !current.is_empty() {
-        groups.push(current.join("\n"));
+        groups.push(current);
     }
-    groups
+    Ok(groups)
 }
-
-/// Word budget per claim embedding group. Matches [`CHUNK_MAX_TOKENS`] (the
-/// transcript chunker's per-chunk word budget) so both paths share the same
-/// "what fits in one embedding input" notion against bge-small's 512-token
-/// window.
-pub(super) const CLAIM_GROUP_MAX_WORDS: usize = 400;

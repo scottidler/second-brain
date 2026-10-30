@@ -105,6 +105,24 @@ pub(super) fn process_summary_batch(
         // vault. Because empty segments are dropped before the join, an empty
         // capture note contributes nothing and the result is unchanged.
         let text = summary_embed_text(&t.title, &t.capture_note, summary);
+        // A summary is one vector, not chunked: an oversize one is a distill
+        // defect the encoder truncates, so say so once, by note and size.
+        match model.count_tokens(&text) {
+            Ok(tokens) if tokens > model.max_input_tokens() => log::warn!(
+                "cortex::embed: summary text of {} is {tokens} tokens, over the {}-token window; only its head is embedded",
+                t.note_path,
+                model.max_input_tokens(),
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                log::error!(
+                    "cortex::embed: tokenizing summary of {} failed, note skipped: {e}",
+                    t.note_path
+                );
+                stats.failed += 1;
+                continue;
+            }
+        }
         work.push(EmbedWork {
             note_path: t.note_path.clone(),
             text,

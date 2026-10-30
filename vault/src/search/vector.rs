@@ -79,11 +79,15 @@ impl EmbeddingKind {
 /// Recipe of the `summary` kind: title + capture note + summary
 /// (`cortex::embed::summary_embed_text`).
 pub const SUMMARY_RECIPE: i64 = 1;
-/// Recipe of the `transcript-chunk` kind: the transcript chunker and its
-/// window constants (`cortex::embed::transcript`).
-pub const TRANSCRIPT_CHUNK_RECIPE: i64 = 1;
+/// Recipe of the `transcript-chunk` kind: the transcript chunker
+/// (`cortex::embed::transcript`) and its constants in
+/// `vault::embedding::chunk` (`CHUNK_OVERLAP_TOKENS`, `PREFIX_MAX_TOKENS`).
+/// 1: 400-word windows, 50-word overlap, truncated by the encoder. 2: windows
+/// fitted to the model's token window, 64-token overlap.
+pub const TRANSCRIPT_CHUNK_RECIPE: i64 = 2;
 /// Recipe of the `claim` kind: claim grouping (`cortex::embed::claim`).
-pub const CLAIM_RECIPE: i64 = 1;
+/// 1: 400-word groups. 2: groups fitted to the model's token window.
+pub const CLAIM_RECIPE: i64 = 2;
 
 /// One row of input to [`SearchIndex::upsert_embeddings_batch`].
 ///

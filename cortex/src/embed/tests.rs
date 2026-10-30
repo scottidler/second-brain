@@ -1,7 +1,6 @@
-use super::claim::{CLAIM_GROUP_MAX_WORDS, group_claims};
+use super::claim::group_claims;
 use super::inference::{Inference, embed_in_sub_batches, in_inference_pool};
 use super::lock::lock_path;
-use super::transcript::{CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS};
 use super::*;
 
 use std::path::PathBuf;
@@ -11,10 +10,11 @@ use tempfile::TempDir;
 use crate::config::EmbedConfig;
 
 use vault::distilled::Distilled;
-use vault::embedding::MockEmbedder;
+use vault::embedding::{CHUNK_OVERLAP_TOKENS, MOCK_MAX_INPUT_TOKENS, MockEmbedder, SPECIAL_TOKENS};
 use vault::search::{BatchUpsert, EmbeddingKind, SearchIndex};
 
 mod archive;
+mod chunking;
 mod recipe;
 
 /// Build a minimal vault structure on disk with one note that has a
@@ -622,6 +622,18 @@ impl vault::embedding::EmbeddingModel for CountingMockEmbedder {
         self.call_sizes.lock().expect("calls mutex").push(texts.len());
         self.inner.embed_batch(texts)
     }
+
+    fn max_input_tokens(&self) -> usize {
+        self.inner.max_input_tokens()
+    }
+
+    fn count_tokens(&self, text: &str) -> eyre::Result<usize> {
+        self.inner.count_tokens(text)
+    }
+
+    fn chunk(&self, prefix: &str, text: &str) -> eyre::Result<Vec<String>> {
+        self.inner.chunk(prefix, text)
+    }
 }
 
 /// Regression guard for the 2026-05-19 OOM. If a future refactor
@@ -799,8 +811,8 @@ fn process_claim_batch_embeds_notes_with_claims() {
 
 #[test]
 fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
-    // A claim set whose joined word count exceeds CLAIM_GROUP_MAX_WORDS (400)
-    // must split into multiple embedding rows so no tail claim is dropped by
+    // A claim set whose joined token count exceeds the model's window must
+    // split into multiple embedding rows so no tail claim is dropped by
     // silent model-side truncation.
     let mut index = SearchIndex::open_memory().expect("open");
     let m = MockEmbedder::new(8, "mock-batch-test");
@@ -810,8 +822,9 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
     index
         .insert_test_note_row("notes/big.md", "article", 100)
         .expect("note");
-    // 500 single-word claims: budget 400 -> 400 + 100 -> two groups.
-    let claims: String = (0..500).map(|i| format!("claim{i}")).collect::<Vec<_>>().join("\n");
+    // 600 single-word claims under the mock's 512-token window (510 words
+    // after [CLS]/[SEP]) -> 510 + 90 -> two groups.
+    let claims: String = (0..600).map(|i| format!("claim{i}")).collect::<Vec<_>>().join("\n");
     index.set_test_claims("notes/big.md", &claims).expect("claims");
 
     let stats = *process_batch(
@@ -831,32 +844,48 @@ fn process_claim_batch_splits_oversized_claim_sets_into_multiple_rows() {
     .stats();
 
     assert_eq!(stats.scanned, 1);
-    assert_eq!(stats.embedded, 2, "500 one-word claims at budget 400 -> two groups");
+    assert_eq!(
+        stats.embedded, 2,
+        "600 one-word claims in a 510-word window -> two groups"
+    );
     assert_eq!(index.count_embeddings(Some(EmbeddingKind::Claim)).expect("count"), 2);
 }
 
 #[test]
-fn group_claims_splits_by_word_budget() {
-    // Empty input -> no groups.
-    assert!(group_claims("", 400).is_empty());
-    assert!(group_claims("   \n  \n", 400).is_empty());
+fn group_claims_fits_the_token_window() {
+    // 70-token window: 68 words after [CLS]/[SEP], just above the 64 overlap.
+    let m = MockEmbedder::default_384().with_max_input_tokens(70);
+    let words = |prefix: &str, n: usize| (0..n).map(|i| format!("{prefix}{i}")).collect::<Vec<_>>().join(" ");
 
-    // Two short claims fit in one group.
-    let one = group_claims("alpha beta\ngamma delta", 400);
-    assert_eq!(one, vec!["alpha beta\ngamma delta".to_string()]);
-
-    // Budget forces a split: each claim is two words; budget 3 -> claim1 alone
-    // (2 words), adding claim2 (4 > 3) starts a new group.
-    let split = group_claims("aa bb\ncc dd\nee ff", 3);
+    assert!(group_claims(&m, "").expect("group").is_empty());
+    assert!(group_claims(&m, "   \n  \n").expect("group").is_empty());
     assert_eq!(
-        split,
-        vec!["aa bb".to_string(), "cc dd".to_string(), "ee ff".to_string()]
+        group_claims(&m, "alpha beta\ngamma delta").expect("group"),
+        vec!["alpha beta\ngamma delta".to_string()]
     );
 
-    // A single claim that alone exceeds the budget becomes its own group (the
-    // model truncates that one claim, but no LATER claim is dropped).
-    let overlong = group_claims("one two three four five\nsix", 3);
-    assert_eq!(overlong, vec!["one two three four five".to_string(), "six".to_string()]);
+    // 30 + 30 words = 62 tokens fit; a third claim (92) does not.
+    let (a, b, c) = (words("a", 30), words("b", 30), words("c", 30));
+    assert_eq!(
+        group_claims(&m, &format!("{a}\n{b}\n{c}")).expect("group"),
+        vec![format!("{a}\n{b}"), c.clone()]
+    );
+
+    // A 100-word claim alone overruns the window: it is windowed into its own
+    // groups, never truncated, and the claims around it keep their order.
+    let long = words("x", 100);
+    let groups = group_claims(&m, &format!("{a}\n{long}\n{c}")).expect("group");
+    assert_eq!(groups.first(), Some(&a));
+    assert_eq!(groups.last(), Some(&c));
+    let middle = &groups[1..groups.len() - 1];
+    assert!(middle.len() > 1, "the long claim spans several windows");
+    assert!(
+        middle.last().expect("tail").ends_with("x99"),
+        "the long claim's tail is embedded"
+    );
+    for g in &groups {
+        assert!(m.count_tokens(g).expect("count") <= 70, "{g:?} overruns the window");
+    }
 }
 
 // ---- Config-gated embed kinds (retrieval-gate remediation) ----
@@ -1045,6 +1074,18 @@ impl EmbeddingModel for CountingEmbedder {
         }
         out
     }
+
+    fn max_input_tokens(&self) -> usize {
+        self.inner.max_input_tokens()
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<usize> {
+        self.inner.count_tokens(text)
+    }
+
+    fn chunk(&self, prefix: &str, text: &str) -> Result<Vec<String>> {
+        self.inner.chunk(prefix, text)
+    }
 }
 
 fn expect_vectors(inference: Inference) -> Vec<Vec<f32>> {
@@ -1054,16 +1095,17 @@ fn expect_vectors(inference: Inference) -> Vec<Vec<f32>> {
     }
 }
 
-/// A transcript that `chunk_transcript` splits into exactly `chunks` chunks
-/// (400-word window, 350-word stride).
+/// A transcript that `MockEmbedder::chunk` splits into exactly `chunks`
+/// chunks (510-word window, 446-word stride).
 fn transcript_of_chunks(chunks: usize) -> String {
-    let words = CHUNK_MAX_TOKENS + (CHUNK_MAX_TOKENS - CHUNK_OVERLAP_TOKENS) * (chunks - 1);
+    let window = MOCK_MAX_INPUT_TOKENS - SPECIAL_TOKENS;
+    let words = window + (window - CHUNK_OVERLAP_TOKENS) * (chunks - 1);
     (0..words).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ")
 }
 
 /// Claims text that `group_claims` packs into exactly `groups` groups.
 fn claims_of_groups(groups: usize) -> String {
-    (0..groups * CLAIM_GROUP_MAX_WORDS)
+    (0..groups * (MOCK_MAX_INPUT_TOKENS - SPECIAL_TOKENS))
         .map(|i| format!("c{i}"))
         .collect::<Vec<_>>()
         .join("\n")
@@ -1077,7 +1119,10 @@ fn seed_transcript_note(index: &SearchIndex, vault: &std::path::Path, rel: &str,
         .insert_test_note_full(rel, "audio", "body", "", modified_at)
         .expect("transcript row");
     assert_eq!(
-        vault::embedding::chunk_transcript(&transcript_of_chunks(chunks), CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS).len(),
+        MockEmbedder::default_384()
+            .chunk("", &transcript_of_chunks(chunks))
+            .expect("chunk")
+            .len(),
         chunks,
         "fixture must chunk to exactly {chunks}"
     );

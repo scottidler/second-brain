@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
+use super::chunk::{Segmenter, TokenChunker};
 use super::{EmbeddingModel, MODELS, ModelSpec, model_spec};
 use crate::cpu::CpuFeatures;
 use crate::onnx::{build_session, require_onnx_capable};
@@ -61,6 +62,8 @@ pub fn supported_versions() -> Vec<&'static str> {
 pub struct OnnxEmbedder {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
+    /// The same `tokenizer.json`, truncation off, for chunking and counting.
+    chunker: TokenChunker,
     feeds_token_type_ids: bool,
     model_version: String,
     dim: usize,
@@ -87,6 +90,7 @@ impl OnnxEmbedder {
             );
         }
         let tokenizer = load_tokenizer(&files.tokenizer, config.pad_token_id)?;
+        let chunker = TokenChunker::from_file(&files.tokenizer)?;
         let session = build_session(&files.model, threads, cpu)?;
 
         let input_names: Vec<&str> = session.inputs().iter().map(|i| i.name()).collect();
@@ -104,6 +108,7 @@ impl OnnxEmbedder {
         Ok(Self {
             session: Mutex::new(session),
             tokenizer,
+            chunker,
             feeds_token_type_ids,
             model_version: version.to_string(),
             dim,
@@ -193,6 +198,18 @@ impl EmbeddingModel for OnnxEmbedder {
 
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         self.embed_inner(texts)
+    }
+
+    fn max_input_tokens(&self) -> usize {
+        MAX_SEQ_LEN
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<usize> {
+        self.chunker.count_tokens(text)
+    }
+
+    fn chunk(&self, prefix: &str, text: &str) -> Result<Vec<String>> {
+        super::chunk::chunk(&self.chunker, MAX_SEQ_LEN, prefix, text)
     }
 }
 

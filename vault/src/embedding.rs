@@ -38,6 +38,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 pub mod backend;
 #[cfg(feature = "vec-candle")]
 pub mod candle;
+pub mod chunk;
 
 #[cfg(feature = "vec-onnx")]
 pub mod onnx;
@@ -48,6 +49,7 @@ pub use candle::CandleBertModel;
 pub use onnx::OnnxEmbedder;
 
 pub use backend::{Backend, BackendChoice, InferenceConfig, resolve_backend, resolve_backend_logged};
+pub use chunk::{CHUNK_OVERLAP_TOKENS, PREFIX_MAX_TOKENS, SPECIAL_TOKENS};
 
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 use crate::cpu::CpuFeatures;
@@ -144,6 +146,20 @@ pub trait EmbeddingModel: Send + Sync {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|t| self.embed_one(t)).collect()
     }
+
+    /// The encoder's window in tokens, special tokens included. Input past
+    /// it is truncated by the encoder, so every chunk must fit inside it.
+    fn max_input_tokens(&self) -> usize;
+
+    /// Tokens `text` encodes to under this model's tokenizer, special tokens
+    /// included and truncation disabled.
+    fn count_tokens(&self, text: &str) -> Result<usize>;
+
+    /// Split `text` into windows that each encode, `prefix` included, to at
+    /// most [`max_input_tokens`](Self::max_input_tokens) tokens under this
+    /// model's tokenizer ([`chunk::chunk`]). A tokenizer error is an `Err`;
+    /// the caller skips the note rather than embed a truncated chunk.
+    fn chunk(&self, prefix: &str, text: &str) -> Result<Vec<String>>;
 }
 
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
@@ -295,58 +311,6 @@ fn get_or_load_model(
     Ok(model)
 }
 
-/// Sliding-window chunker for transcript text.
-///
-/// From the hybrid retrieval design. Splits `text` into
-/// overlapping chunks suitable for embedding. The window is measured
-/// in whitespace-separated words, which is a coarse approximation of
-/// the BPE token count. For English with the bge-small-en-v1.5
-/// tokenizer the word:token ratio is ~0.75, so the default
-/// `max_tokens = 400` yields chunks of about 530 BPE tokens - right
-/// up against the model's 512-token limit. The active backend truncates
-/// gracefully on overshoot; if profiling shows truncation hurts
-/// recall, drop `max_tokens` to 300.
-///
-/// `overlap_tokens` is the size of the trailing window each new chunk
-/// shares with the previous chunk. The default of 50 keeps claims
-/// that straddle a chunk boundary visible in both chunks.
-///
-/// Edge cases:
-/// - Empty or whitespace-only input: returns `Vec::new()`.
-/// - Input shorter than `max_tokens`: returns one chunk containing
-///   the whole text (no padding, no trailing whitespace).
-/// - A single very long word (no whitespace): returns one chunk
-///   containing the full word; truncation falls to the embedder.
-/// - `overlap_tokens >= max_tokens`: overlap is clamped to
-///   `max_tokens - 1` so the loop always makes forward progress.
-pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) -> Vec<String> {
-    if max_tokens == 0 {
-        return Vec::new();
-    }
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return Vec::new();
-    }
-    if words.len() <= max_tokens {
-        return vec![words.join(" ")];
-    }
-
-    let overlap = overlap_tokens.min(max_tokens.saturating_sub(1));
-    let stride = max_tokens - overlap;
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < words.len() {
-        let end = (start + max_tokens).min(words.len());
-        let chunk = words[start..end].join(" ");
-        chunks.push(chunk);
-        if end == words.len() {
-            break;
-        }
-        start += stride;
-    }
-    chunks
-}
-
 #[cfg(any(test, feature = "test-util"))]
 /// Deterministic test embedder.
 ///
@@ -361,6 +325,7 @@ pub fn chunk_transcript(text: &str, max_tokens: usize, overlap_tokens: usize) ->
 pub struct MockEmbedder {
     dim: usize,
     model_version: String,
+    max_input_tokens: usize,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -370,7 +335,15 @@ impl MockEmbedder {
         Self {
             dim,
             model_version: model_version.into(),
+            max_input_tokens: MOCK_MAX_INPUT_TOKENS,
         }
+    }
+
+    /// Set the window [`chunk`](EmbeddingModel::chunk) fits whitespace
+    /// "tokens" into (default [`MOCK_MAX_INPUT_TOKENS`]).
+    pub fn with_max_input_tokens(mut self, max_input_tokens: usize) -> Self {
+        self.max_input_tokens = max_input_tokens;
+        self
     }
 
     /// Build a mock embedder at the default 384 dim with a stable test label.
@@ -404,7 +377,24 @@ impl EmbeddingModel for MockEmbedder {
         l2_normalize(&mut out);
         Ok(out)
     }
+
+    fn max_input_tokens(&self) -> usize {
+        self.max_input_tokens
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<usize> {
+        chunk::Segmenter::count_tokens(&chunk::WhitespaceSegmenter, text)
+    }
+
+    fn chunk(&self, prefix: &str, text: &str) -> Result<Vec<String>> {
+        chunk::chunk(&chunk::WhitespaceSegmenter, self.max_input_tokens, prefix, text)
+    }
 }
+
+#[cfg(any(test, feature = "test-util"))]
+/// [`MockEmbedder`]'s default window, the same 512 as bge-small, counted in
+/// whitespace words plus [`SPECIAL_TOKENS`].
+pub const MOCK_MAX_INPUT_TOKENS: usize = 512;
 
 #[cfg(any(test, feature = "test-util"))]
 /// 64-bit FNV-1a hash. Stable across releases of Rust because it has no
