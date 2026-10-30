@@ -1095,10 +1095,20 @@ fn expect_vectors(inference: Inference) -> Vec<Vec<f32>> {
     }
 }
 
+/// The context prefix every seeded transcript note produces: its test title
+/// (`T`) and no summary. One mock token, so it comes off each window.
+const SEEDED_PREFIX: &str = "T.";
+
 /// A transcript that `MockEmbedder::chunk` splits into exactly `chunks`
-/// chunks (510-word window, 446-word stride).
+/// chunks under `SEEDED_PREFIX` (509-word window, 445-word stride).
 fn transcript_of_chunks(chunks: usize) -> String {
-    let window = MOCK_MAX_INPUT_TOKENS - SPECIAL_TOKENS;
+    transcript_of_chunks_under(1, chunks)
+}
+
+/// Like `transcript_of_chunks`, for a note whose context prefix is
+/// `prefix_tokens` mock tokens (`T.` plus the first sentence of its summary).
+fn transcript_of_chunks_under(prefix_tokens: usize, chunks: usize) -> String {
+    let window = MOCK_MAX_INPUT_TOKENS - SPECIAL_TOKENS - prefix_tokens;
     let words = window + (window - CHUNK_OVERLAP_TOKENS) * (chunks - 1);
     (0..words).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ")
 }
@@ -1120,7 +1130,7 @@ fn seed_transcript_note(index: &SearchIndex, vault: &std::path::Path, rel: &str,
         .expect("transcript row");
     assert_eq!(
         MockEmbedder::default_384()
-            .chunk("", &transcript_of_chunks(chunks))
+            .chunk(SEEDED_PREFIX, &transcript_of_chunks(chunks))
             .expect("chunk")
             .len(),
         chunks,

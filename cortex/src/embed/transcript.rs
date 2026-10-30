@@ -5,6 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use eyre::Result;
+use vault::detail::first_sentence;
 use vault::embedding::EmbeddingModel;
 use vault::schema::NoteType;
 use vault::search::{EmbeddingKind, SearchIndex};
@@ -111,7 +112,8 @@ pub(super) fn process_transcript_batch(
         // A tokenizer error skips the note with no rows written and no
         // sentinel: its old rows keep serving and it is retried next tick.
         // Never embed a truncated chunk in its place.
-        let chunks = match model.chunk("", &transcript) {
+        let prefix = chunk_context_prefix(&t.title, &t.summary);
+        let chunks = match model.chunk(&prefix, &transcript) {
             Ok(chunks) => chunks,
             Err(e) => {
                 log::error!("cortex::embed: chunking {} failed, note skipped: {e}", t.note_path);
@@ -206,6 +208,17 @@ pub(super) fn process_transcript_batch(
         stats.embedded += n as u64;
     }
     Ok(finish(stats))
+}
+
+/// The context every transcript chunk opens with: `"{title}. {first sentence
+/// of the summary}"`, or `"{title}."` when the summary is empty. A bare
+/// window ("he said the second one works better") names no topic; this does.
+/// Changing it changes the embedded text, so it is part of
+/// `TRANSCRIPT_CHUNK_RECIPE`.
+pub(super) fn chunk_context_prefix(title: &str, summary: &str) -> String {
+    let title = title.trim();
+    let lead = first_sentence(summary);
+    if lead.is_empty() { format!("{title}.") } else { format!("{title}. {lead}") }
 }
 
 /// Read a single `## Heading` section out of a vault file. Returns

@@ -283,3 +283,112 @@ Design doc: `docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`
   - Verdict on the decision rule: `hold` for every vector-reading target. No confirm CI lower bound is above 0; every confirm delta is negative, and the tune split is significantly negative (CI upper bound < 0) for vector, configured and hybrid. bm25 does not read vectors, so its arms are identical.
   - Kept for Phase 5: arm B `$P4/armB` (recipe-2 chunks, no prefix), arm A `$P4/armA` with the grown judgment cache, the snapshot `$P4/snapshot.db`, the report `$P4/eval-report.txt`, logs `$P4/armB-embed.log` and `$P4/eval.log`. `$P4` is `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p4`.
 - No deploy, no live re-embed: Phase 5 ships 4+5 as one drain.
+
+## Phase 5: Contextual prefix + single rollout
+
+### Design decisions
+- Every transcript chunk opens with a context prefix, built by `cortex::embed::transcript::chunk_context_prefix(title, summary)`: `"{title}. {first_sentence(summary)}"`, or `"{title}."` when the summary is empty. It goes to `EmbeddingModel::chunk(prefix, text)` (the Phase-4 seam), so the chunker spends window capacity on it and re-encodes the final `prefix + "\n\n" + window` string. `vault::detail::first_sentence` is reused, not copied.
+- The transcript-chunk arm of `stale_embedding_targets` now selects `n.summary` (it selected `''`). `StaleTarget.summary` for that arm is the prefix source, never chunk text; the field doc says so.
+- `TRANSCRIPT_CHUNK_RECIPE` stays 2. Phases 4 and 5 are one recipe, so one drain; the constant's doc comment now says recipe 2 includes the prefix. `cortex/AGENTS.md` records the prefix and that changing it is a recipe bump.
+- Two test-util helpers in vault so cortex tests can see all of a note's chunks and set a distinct title: `SearchIndex::embedding_texts` and `SearchIndex::set_test_title` (both `cfg(test)`/`test-util`).
+
+### Deviations
+- The operator set was run minus one query. `mined-fee24c19477e781c` ("Better Stack video") x `notes/if-your-between-25-34-you-need-to-watch-this-before-you-turn-35-seriously-dude-its-60-seconds.md` failed judging on two full runs: `judge reply contains no integer score: "video"` then `fabric -p judge-relevance failed: empty response`. The note is a stub (summary is an iframe tag, 139 chars, no claims). Arm C surfaces it; Phase 4's arms did not. Same handling as the Phase 2 refused pair: a scratch copy of the set without that query (247 queries, `$P5/oracle-queries-minus-junk.yml`), vault file untouched. Not root-caused at the API level: a standalone `fabric -p judge-relevance` from my shell has no API keys (`could not find vendor`), so I could not replay the call. Phase 4's table is on 248 queries, these are on 247; the one query is in neither's decision.
+- Both paired evals put the baseline in the "arm A" slot and arm C in `--compare-db`, so every delta is C minus baseline. Eval 1's baseline is a `sqlite3 .backup` copy of Phase-4 arm B, eval 2's is a copy of Phase-4 arm A (not the originals, so neither Phase-4 directory changed). The two evals share one grown judgment cache: eval 1's cache copy was copied to eval 2's home.
+- Arm C is re-embedded from the Phase-4 snapshot (recipe 1), as instructed, not from arm B.
+- Phase 4's `transcript_of_chunks` fixture assumed an empty prefix. Seeded notes now have the `T.` prefix (1 mock token), so the fixture sizes windows for it (`transcript_of_chunks_under(prefix_tokens, chunks)`), and the recipe tests, whose notes carry the summary `summary`, use 2. Without it, five existing tests' chunk counts moved by one.
+
+### Tradeoffs
+- `chunk_context_prefix` is `pub(super)` and tested directly vs inlined in the batch loop: it is the one place the embedded text's context is decided, so it is a seam a recipe bump has to find.
+- Prefix from `first_sentence` vs the whole summary: the doc's choice; the whole summary would eat the 64-token prefix cap and `first_sentence` is already the vault's sentence rule. Its weakness is a summary whose first "sentence" is an iframe or URL fragment (the stub note above); it is cut at `PREFIX_MAX_TOKENS` like any prefix.
+
+### Open questions
+- Verdict, both paired evals are `hold` on confirm (tables below). Under the pre-registered rule 4+5 does not ship. Scott's call whether to deploy anyway, to change the plan (Phase 6 offsets first, or the LLM-written chunk context the doc names as the fallback when the prefix verdict is `hold`), or to stop at the chunker-only result. `otto deploy` was NOT run.
+- Eval 1 reads `ship` on the tune split only (vector, hybrid, graph-hybrid); confirm CIs cross 0. The doc says single-setting phases use confirm only, so tune does not count. Worth noting that C beats B on both halves in sign.
+- The judge failure on a stub note will recur whenever a retrieval change surfaces it. Fix options: drop the query (done in scratch), make the judge treat an unparseable reply on a stub as a score of 0 explicitly, or drop stub notes from the pool. Scott's call, same as Phase 2's.
+- 1,324 recipe-1 transcript-chunk sentinels in arm B (Phase 4's open question) do not recur in arm C: the census is one recipe per kind (below), since arm C was re-embedded from recipe-1 rows and sentinels.
+
+### Evidence (Phase 5, ripr 2026-10-29)
+- Tests, all green in `otto ci`: `chunk_text_starts_with_context` (`cortex/src/embed/tests/chunking.rs`; two notes, one with a summary and one without, titles `Retrieval Talk` and `Quiet Talk`, every chunk of each starts with `"{title}."` and equals `"{prefix}\n\n..."`, and fits the window), `chunk_context_prefix_joins_title_and_first_sentence`, and the existing `chunk_fits_model_window`. That test already ran three prefixes: empty, one sentence, and 128 words cut to `PREFIX_MAX_TOKENS` (64) tokens, against the committed fixture tokenizer with truncation off, so a 64-token prefix was covered by Phase 4. Confirmed, not extended.
+- Shown failing with the change reverted (sources backed up under `$P5/bak`, mutated, tested, restored, `cmp` clean):
+
+  | mutation | fails |
+  |---|---|
+  | M1: `model.chunk(&prefix[..0], ...)` (no prefix reaches the chunker) | `chunk_text_starts_with_context`: `notes/with.md chunk 0 must start with its title: w0 w1 w2 ...` |
+  | M2: the chunk arm of the stale query selects `''` instead of `n.summary` | `chunk_text_starts_with_context`: `notes/with.md chunk 0: Retrieval Talk.` (title only, the summary sentence is missing) |
+  | M3: capacity ignores `prefix_tokens` and the re-encode shrink is off for a prefix over 200 bytes | `chunk_fits_model_window`: `chunk 0 (prefix 1041 bytes) encodes to 576 tokens with [CLS]/[SEP], over 512` (the 64-token prefix case) |
+
+  M3 with only the capacity change passes: the re-encode shrink catches it, so the two guards are redundant by design.
+- Index arm C: `$P5` = `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p5`. Binary `$P5/sb-phase5` (`sb v0.20.0-8-gaad8fbc` plus this phase's working tree). `sqlite3 $P4/snapshot.db ".backup $P5/armC/sb/oracle/oracle.db"`, `sb/borg` symlinked to the live borg dir; `bwrap --dev-bind / / --ro-bind ~/.local/share/sb/oracle ~/.local/share/sb/oracle -- env XDG_DATA_HOME=$P5/armC sb cortex embed -v --kind transcript-chunk --backfill` (a `touch` probe in the same bind returned `Read-only file system`; the `-v` log names `oracle db=$P5/armC/sb/oracle/oracle.db`). 18:22:33 -> 18:36:04 PDT: `embed complete: scanned=3935 embedded=29630 skipped_empty=274 failed=0`, 0 ERROR lines.
+- Arm C census: `summary|1|4924|4924 notes`, `transcript-chunk|2|29630|2161 notes`, one recipe per kind; `min(produced_at)` after the run start. Rows per chunked note: snapshot 9.0 (19,679 / 2,178), arm B 11.9 (25,802 / 2,161), arm C 13.7 (29,630 / 2,161). The prefix costs 1-64 tokens a window, so each window advances less and more windows are needed.
+- Token-count command on arm C: `rows 29630 over512 0`.
+- The live DB was not written by any arm process (read-only bind). Its mtime moved (1793318879 -> 1793323881) and it still has no `recipe` column: that is the live cortex daemon running the pre-Phase-3 binary, which is the only writer.
+- Paired eval 1, arm C vs Phase-4 arm B (attributes the prefix): `XDG_DATA_HOME=$P5/evalB` (copy of arm B + a copy of Phase-4 arm A's `eval-cache.db`, 10,883 rows) `sb oracle eval --queries <247-query scratch set> --compare-db $P5/armC/...`, same bwrap, exit 0, report `$P5/eval1-report.txt`. Latency reported, not gated (the doc names no budget for Phase 5). Delta = C - B.
+
+  | target | split | nDCG B | nDCG C | delta | 95% CI | n | MDD | p95 B ms | p95 C ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | vector | tune | 0.6992 | 0.7410 | +0.0418 | [+0.0081, +0.0772] | 121 | 0.0491 | 41.6 | 45.1 | ship |
+  | vector | confirm | 0.7101 | 0.7281 | +0.0180 | [-0.0229, +0.0583] | 95 | 0.0580 | 40.6 | 44.1 | hold |
+  | configured | tune | 0.6993 | 0.7411 | +0.0418 | [+0.0081, +0.0772] | 121 | 0.0491 | 41.3 | 45.4 | ship |
+  | configured | confirm | 0.7101 | 0.7281 | +0.0180 | [-0.0229, +0.0583] | 95 | 0.0580 | 41.7 | 44.5 | hold |
+  | hybrid | tune | 0.7082 | 0.7448 | +0.0366 | [+0.0044, +0.0693] | 122 | 0.0462 | 42.3 | 44.8 | ship |
+  | hybrid | confirm | 0.7179 | 0.7415 | +0.0237 | [-0.0107, +0.0578] | 96 | 0.0493 | 42.0 | 45.0 | hold |
+  | graph | tune | 0.4972 | 0.5219 | +0.0246 | [-0.0030, +0.0521] | 118 | 0.0394 | 427.8 | 435.4 | hold |
+  | graph | confirm | 0.5046 | 0.5184 | +0.0138 | [-0.0124, +0.0399] | 96 | 0.0375 | 428.1 | 437.1 | hold |
+  | graph-hybrid | tune | 0.5907 | 0.6213 | +0.0306 | [+0.0022, +0.0585] | 118 | 0.0398 | 426.3 | 440.9 | ship |
+  | graph-hybrid | confirm | 0.6095 | 0.6323 | +0.0228 | [-0.0075, +0.0531] | 96 | 0.0431 | 430.1 | 436.5 | hold |
+  | graph-hybrid (no fact) | tune / confirm | 0.5907 / 0.6095 | 0.6213 / 0.6323 | +0.0306 / +0.0228 | [+0.0022, +0.0585] / [-0.0075, +0.0531] | 118 / 96 | 0.0398 / 0.0431 | 478.7 / 501.7 | 508.6 / 513.1 | ship (tune) / hold (confirm) |
+  | bm25 | tune / confirm | 0.9136 / 0.8903 | same | +0.0000 | [0, 0] | 46 / 45 | insufficient | 1.1 / 1.0 | 1.1 / 1.1 | insufficient |
+
+  The prefix's attributed effect: positive on every vector-reading target and both splits, significant on tune, `hold` on confirm (CI lower bounds -0.0229 vector, -0.0107 hybrid). The decision rule reads confirm, so the prefix alone is `hold`.
+- Paired eval 2, arm C vs Phase-4 arm A (the shipped verdict, 4+5 vs live-equivalent): `XDG_DATA_HOME=$P5/evalA` (copy of arm A + eval 1's grown cache, 11,656 rows), same flags, exit 0, report `$P5/eval2-report.txt`. Delta = C - A.
+
+  | target | split | nDCG A | nDCG C | delta | 95% CI | n | MDD | p95 A ms | p95 C ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | vector | tune | 0.7187 | 0.7237 | +0.0050 | [-0.0360, +0.0458] | 121 | 0.0586 | 35.8 | 42.9 | hold |
+  | vector | confirm | 0.7202 | 0.7097 | -0.0105 | [-0.0554, +0.0329] | 97 | 0.0632 | 35.4 | 43.6 | hold |
+  | configured | tune | 0.7188 | 0.7238 | +0.0050 | [-0.0360, +0.0458] | 121 | 0.0586 | 37.1 | 44.1 | hold |
+  | configured | confirm | 0.7202 | 0.7097 | -0.0105 | [-0.0554, +0.0329] | 97 | 0.0632 | 37.3 | 45.2 | hold |
+  | hybrid | tune | 0.7228 | 0.7346 | +0.0118 | [-0.0203, +0.0444] | 122 | 0.0458 | 36.4 | 43.8 | hold |
+  | hybrid | confirm | 0.7245 | 0.7298 | +0.0053 | [-0.0353, +0.0446] | 97 | 0.0572 | 35.6 | 44.6 | hold |
+  | graph | tune | 0.5039 | 0.5146 | +0.0106 | [-0.0191, +0.0406] | 118 | 0.0433 | 455.1 | 436.0 | hold |
+  | graph | confirm | 0.5059 | 0.5117 | +0.0058 | [-0.0264, +0.0360] | 95 | 0.0442 | 462.0 | 455.3 | hold |
+  | graph-hybrid | tune | 0.5935 | 0.6085 | +0.0150 | [-0.0168, +0.0463] | 118 | 0.0454 | 454.8 | 427.9 | hold |
+  | graph-hybrid | confirm | 0.6211 | 0.6286 | +0.0075 | [-0.0261, +0.0399] | 95 | 0.0478 | 448.7 | 467.7 | hold |
+  | graph-hybrid (no fact) | tune / confirm | 0.5935 / 0.6211 | 0.6085 / 0.6286 | +0.0150 / +0.0075 | [-0.0168, +0.0463] / [-0.0261, +0.0399] | 118 / 95 | 0.0454 / 0.0478 | 519.0 / 517.7 | 492.9 / 515.4 | hold |
+  | bm25 | tune / confirm | 0.9136 / 0.8903 | same | +0.0000 | [0, 0] | 46 / 45 | insufficient | 1.1 / 1.1 | 1.2 / 1.1 | insufficient |
+
+  4+5 against live is `hold` on every target: the confirm delta is -0.0105 (vector), the tune delta +0.0050, both CIs span 0 with MDD 0.06. The chunker's -0.036 (Phase 4) is gone, but the combined recipe is not measurably better than today's. p95 of the vector path rose 35 -> 43 ms, reported only.
+
+### Root cause: why Phase 4 regressed vector nDCG
+Hypothesis under test (Phase 4, unverified): more chunk vectors per transcript note (9.0 -> 11.9) win the min-distance pooling in `SearchIndex::search_vector` and push summary-matched notes out of the top 10.
+
+Method: a scratch Rust tool (`$P5/kindmix`, never committed; a separate crate with a path dependency on `vault`, `search_vector`'s logic re-run over each arm's DB with `vault::embedding::embed_query` and the same min-reduce and tie-break) lists, for each of the 247 queries and arms A, Phase-4 B and C, the top-10 vector hits with the row kind that gave each note's minimum distance. A per-query nDCG delta from the same judgment cache (latest judgment per query and note, per-pair A∪B pool, `2^g-1` gain) reproduces the eval's per-split means exactly (B vs A: tune -0.0397 n=119, confirm -0.0310 n=96; C vs B +0.0418 n=121 / +0.0180 n=95; C vs A +0.0050 n=121 / -0.0105 n=97), so the per-query figures are the eval's. Outputs: `$P5/rootcause-vsA.txt`, `$P5/rootcause-CvsB.txt`, `$P5/kindmix-ABC-247.tsv`.
+
+Kind mix of the 2,470 top-10 vector slots (247 queries x 10):
+
+| arm | won by summary | won by transcript-chunk | slots on notes with chunk rows | chunk-won per query |
+|---|---|---|---|---|
+| A (live-equivalent) | 1,003 (40.6%) | 1,467 (59.4%) | 2,027 (82.1%) | 5.94 |
+| P4 B (chunker) | 933 (37.8%) | 1,537 (62.2%) | 2,056 (83.2%) | 6.22 |
+| C (chunker + prefix) | 1,038 (42.0%) | 1,432 (58.0%) | 1,887 (76.4%) | 5.80 |
+
+Per query, B vs A (215 paired queries, mean delta -0.0358):
+
+| group | n | mean delta | chunk-won A -> B | chunked-note slots A -> B |
+|---|---|---|---|---|
+| regressed | 104 | -0.1609 | 5.88 -> 6.22 (+0.34) | 8.09 -> 8.23 (+0.14) |
+| unchanged | 36 | 0 | 4.33 -> 4.61 (+0.28) | 7.36 -> 7.42 (+0.06) |
+| improved | 75 | +0.1205 | 5.89 -> 6.07 (+0.17) | 8.56 -> 8.64 (+0.08) |
+
+Pearson(per-query delta nDCG, delta chunk-won hits) = -0.006; against delta chunked-note slots = +0.001. Swaps B vs A: 819 notes entered a top 10 and 819 left; 769 of the entrants and 716 of the leavers were won by a chunk row (53 net slots moved from summary-won to chunk-won, 2.1% of slots); mean judge grade of entrants 0.365 vs leavers 0.425.
+
+Finding: the hypothesis is NOT confirmed as the cause. The direction is there (summary-won slots fell 1,003 -> 933 and regressed queries gained more chunk-won hits than improved ones, +0.34 vs +0.17) but it is small and it does not track the loss: 82% of slots already go to notes with chunk rows in arm A, chunked-note slots moved 8.21 -> 8.32 per query, the per-query correlation is zero, and 90%+ of the churn is chunk-for-chunk, not chunk displacing summary. What changed in B is WHICH chunk-won notes surface (the full-window chunks cover transcript text recipe 1 never embedded, and the windows' boundaries moved), and the notes that surface are graded lower by a judge that sees summary + claims. That reading (a deep-transcript passage match is graded on a summary that may not mention it, problem 6 in the doc) is consistent with the numbers but untested here.
+
+What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,003) and cut chunked-note slots to 7.64 per query, i.e. the prefix makes a chunk resemble its note's topic, so chunk-won hits are on-topic notes more often. C vs B: +0.0313 mean delta, regressed/improved groups' chunk-won deltas -0.19 / -0.23 (no differential). Kind offsets (Phase 6) address slot crowding; this evidence says crowding is not the main loss, so a transcript-chunk offset may buy less than the doc assumes. Phase 6 still decides on its own tune/confirm measurement.
+
+### What `otto deploy` would do (not run)
+- Builds `sb`, installs it to `~/.cargo/bin/`, syncs patterns and canonical tags to `~/.config/sb/`, restarts the existing borg and cortex units. On first start the new cortex opens the live `oracle.db` and migrates it in place (adds `recipe` to `note_embeddings` and `embedding_examined`, reading 1, and the `idx_note_embeddings_note_kind_model` index).
+- Then the recipe-2 drain: `transcript-chunk` has about 2,161 notes (29,630 chunk rows in arm C, against 19,679 live) re-embedded a tick at a time, each note swapped atomically while old rows serve; 17 notes whose transcript source is gone lose their 163 stale rows (`mark_nothing_to_embed_batch`). `claim` is recipe 2 too but off by default, so it is inert. Summary rows stay at recipe 1. The Phase-3 stale-query index also removes the 10-23 s batch-boundary stall.
+- Rollback is a forward recipe bump plus a re-drain; an older binary restores nothing. With both verdicts `hold`, deploying changes the live index to a result the eval cannot distinguish from today's.
+- `otto ci` green at commit; arm directories, reports, logs and the scratch tool stay in `$P5`.

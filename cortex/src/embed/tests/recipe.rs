@@ -33,8 +33,9 @@ fn drain(index: &mut SearchIndex, m: &MockEmbedder, kind: EmbeddingKind, vault: 
 /// Two videos with staged transcripts and one with no source at all.
 fn seed(index: &SearchIndex, vault: &Path, staging: &Path) {
     for (rel, trace, transcript) in [
-        ("notes/v1.md", "t1", Some(transcript_of_chunks(3))),
-        ("notes/v2.md", "t2", Some(transcript_of_chunks(2))),
+        // Prefix "T. summary": two mock tokens.
+        ("notes/v1.md", "t1", Some(transcript_of_chunks_under(2, 3))),
+        ("notes/v2.md", "t2", Some(transcript_of_chunks_under(2, 2))),
         ("notes/v3.md", "t3", None),
     ] {
         write_note_with_summary(vault, rel, "a video");

@@ -100,3 +100,69 @@ fn oversize_summary_warns_with_path_and_token_count() {
     assert!(warns[0].contains("43 tokens"), "names the token count: {}", warns[0]);
     assert!(vault::capture::warns_containing("notes/fitting-summary.md").is_empty());
 }
+
+#[test]
+fn chunk_context_prefix_joins_title_and_first_sentence() {
+    use crate::embed::transcript::chunk_context_prefix;
+    assert_eq!(
+        chunk_context_prefix("Retrieval Talk", "The speaker compares chunkers. Second sentence."),
+        "Retrieval Talk. The speaker compares chunkers."
+    );
+    assert_eq!(chunk_context_prefix("Retrieval Talk", ""), "Retrieval Talk.");
+    assert_eq!(chunk_context_prefix("Retrieval Talk", "   \n "), "Retrieval Talk.");
+}
+
+#[test]
+fn chunk_text_starts_with_context() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(8, "mock-context-prefix");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    let vault = TempDir::new().expect("vault");
+    let transcript = transcript_of_chunks(3);
+    write_note_with_transcript(vault.path(), "notes/with.md", "audio", "", &transcript);
+    write_note_with_transcript(vault.path(), "notes/without.md", "audio", "", &transcript);
+    index
+        .insert_test_note_full(
+            "notes/with.md",
+            "audio",
+            "body",
+            "The speaker compares chunkers. Second sentence.",
+            100,
+        )
+        .expect("with summary");
+    index
+        .insert_test_note_full("notes/without.md", "audio", "body", "", 100)
+        .expect("without summary");
+    index.set_test_title("notes/with.md", "Retrieval Talk").expect("title");
+    index.set_test_title("notes/without.md", "Quiet Talk").expect("title");
+
+    let stats = run(&mut index, &m, EmbeddingKind::TranscriptChunk, vault.path());
+    assert_eq!(stats.failed, 0);
+
+    for (path, prefix) in [
+        ("notes/with.md", "Retrieval Talk. The speaker compares chunkers."),
+        ("notes/without.md", "Quiet Talk."),
+    ] {
+        let texts = index
+            .embedding_texts(path, EmbeddingKind::TranscriptChunk)
+            .expect("texts");
+        assert!(texts.len() > 1, "{path}: more than one chunk, got {}", texts.len());
+        let title = prefix.split('.').next().expect("title");
+        for (i, text) in texts.iter().enumerate() {
+            assert!(
+                text.starts_with(&format!("{title}.")),
+                "{path} chunk {i} must start with its title: {text:.60}"
+            );
+            assert!(
+                text.starts_with(&format!("{prefix}\n\n")),
+                "{path} chunk {i}: {text:.80}"
+            );
+        }
+        assert!(
+            texts
+                .iter()
+                .all(|t| m.count_tokens(t).expect("count") <= m.max_input_tokens()),
+            "{path}: every prefixed chunk fits the window"
+        );
+    }
+}

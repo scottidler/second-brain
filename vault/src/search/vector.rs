@@ -83,7 +83,8 @@ pub const SUMMARY_RECIPE: i64 = 1;
 /// (`cortex::embed::transcript`) and its constants in
 /// `vault::embedding::chunk` (`CHUNK_OVERLAP_TOKENS`, `PREFIX_MAX_TOKENS`).
 /// 1: 400-word windows, 50-word overlap, truncated by the encoder. 2: windows
-/// fitted to the model's token window, 64-token overlap.
+/// fitted to the model's token window, 64-token overlap, and every window
+/// opens with the note's context prefix (`title. first sentence of summary`).
 pub const TRANSCRIPT_CHUNK_RECIPE: i64 = 2;
 /// Recipe of the `claim` kind: claim grouping (`cortex::embed::claim`).
 /// 1: 400-word groups. 2: groups fitted to the model's token window.
@@ -122,7 +123,8 @@ pub struct StaleTarget {
     /// notes missing a `## Summary` heading). For Claim embeddings this is
     /// `notes.claims` (the newline-joined claim text, also no file I/O);
     /// cortex groups it into token-window-sized chunks. For TranscriptChunk
-    /// this is always an empty string; cortex reads the transcript from the
+    /// this is `notes.summary`, the source of the chunk context prefix
+    /// (never the chunk text itself); cortex reads the transcript from the
     /// staged `distilled.yml` (via `trace`) for Video/Article kinds and from
     /// the in-note `## Transcript` section for the verbatim kinds.
     pub summary: String,
@@ -784,7 +786,7 @@ impl SearchIndex {
                     .to_string()
             }
             EmbeddingKind::TranscriptChunk => format!(
-                "SELECT DISTINCT n.path, n.note_type, n.modified_at, '', n.title, '', n.trace
+                "SELECT DISTINCT n.path, n.note_type, n.modified_at, n.summary, n.title, '', n.trace
                  FROM notes n
                  LEFT JOIN note_embeddings e
                    ON e.note_path = n.path
@@ -1027,6 +1029,25 @@ impl SearchIndex {
             params![note_path, kind.as_str()],
             |row| row.get(0),
         ))
+    }
+
+    /// Every `text` embedded for a note's `kind`, in chunk order. Lets tests in
+    /// other crates assert on all of a note's chunks, not just chunk 0.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn embedding_texts(&self, note_path: &str, kind: EmbeddingKind) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT text FROM note_embeddings WHERE note_path = ?1 AND kind = ?2 ORDER BY chunk_index")?;
+        let rows = stmt.query_map(params![note_path, kind.as_str()], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// Set the `notes.title` column for a test row.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_test_title(&self, path: &str, title: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE notes SET title = ?2 WHERE path = ?1", params![path, title])?;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-util"))]

@@ -44,6 +44,7 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 
 - **Add a lint rule:** write `lint_X(notes, config) -> Report` + `apply_X(...) -> Result<count>`; register in the `lib::lint` dispatch chain and (optionally) a daemon auto-apply tick; gate `apply_X` on `opts.apply`.
 - **Add a command:** module with `pub fn run(vault_root, config, opts)`; branch scan → lint/apply on opts; wire into `sb` CLI and (optionally) a daemon tick.
+- **Transcript chunks open with a context prefix:** `embed::transcript::chunk_context_prefix` builds `"{title}. {first sentence of summary}"` (`"{title}."` when the summary is empty) and hands it to `EmbeddingModel::chunk`, which spends window capacity on it. The transcript-chunk stale query carries `notes.summary` for this. The prefix is embedded text, so changing it is a `TRANSCRIPT_CHUNK_RECIPE` bump.
 - **Embed loop:** `stale_embedding_targets` (read) → `embed_batch` (outside txn) → `swap_embeddings_batch` / `swap_kind_chunks` (single `BEGIN IMMEDIATE … COMMIT`). A kind whose embedded text changes bumps its `vault::search` `*_RECIPE` constant; the drain re-embeds it through the normal stale query.
 
 ## Anti-patterns
