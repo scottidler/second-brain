@@ -346,14 +346,15 @@ impl Default for EmbedConfig {
 /// generates must be config. Mirrors the per-method `enabled` flags in
 /// `oracle.yml`'s retrieval pipeline.
 ///
-/// `claim` is default-OFF pending the kind-weighted-pooling contingency: the
+/// `claim` is default-OFF: the
 /// v0.9.0 claim-embedding rollout regressed retrieval (the live `sb oracle eval`
 /// gate failed 2026-07-05, nDCG 0.8795 -> 0.8471 with recall down too), and the
 /// daemon tick embedded claims unconditionally so the `--drop-kind claim`
 /// rollback was non-sticky. Gating it here keeps the claim-free baseline
 /// restored across daemon ticks. The explicit `sb cortex embed --kind claim`
-/// override still forces claim embedding (CLI > config) for the future
-/// guard-first experiment.
+/// override still forces claim embedding (CLI > config). Re-measured
+/// 2026-10-29 on recipe 2: confirm-split CI [-0.0036, +0.0526], so it stays off
+/// (`docs/design/2026-10-29-retrieval-quality-from-rag-scour.md`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct EmbedKindsConfig {

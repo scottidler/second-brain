@@ -50,11 +50,10 @@ embed:
   kinds:
     summary: true
     transcript-chunk: true
-    # claim is DEFAULT-OFF pending the kind-weighted-pooling contingency: the
-    # v0.9.0 claim-embedding rollout regressed retrieval and the live
-    # `sb oracle eval` gate failed 2026-07-05 (nDCG 0.8795 -> 0.8471). Leave OFF
-    # to keep the claim-free baseline; flip to true only for the guard-first
-    # claim experiment.
+    # claim is DEFAULT-OFF: the v0.9.0 claim-embedding rollout regressed
+    # retrieval (2026-07-05, nDCG 0.8795 -> 0.8471), and the 2026-10-29
+    # recipe-2 re-measure did not clear the ship rule. Flip to true only for a
+    # measured experiment.
     claim: false
 
 # Root of borg's per-trace staging directories. TOP-LEVEL, not under `embed:`:
