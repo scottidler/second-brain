@@ -63,6 +63,10 @@ retrieval:
     vector:
       enabled: true     # the eval-best retriever for this host
       top-k: 50         # candidate depth fed into fusion
+      kind-offsets:     # distance added to a row of each kind before a note's best row wins
+        summary: 0.0
+        transcript-chunk: 0.0
+        claim: 0.0
     bm25:
       enabled: false    # exact-keyword (FTS5); off by default (dilutes vector)
       top-k: 50

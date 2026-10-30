@@ -420,3 +420,65 @@ What the prefix did: it moved slots back toward summary-won (1,038, above A's 1,
 
 ### Open questions
 - None.
+
+## Phase 6: Kind offsets
+
+### Design decisions
+- `vault::search::KindOffsets { summary, transcript_chunk, claim }` (`vault/src/search/offsets.rs`) is the config and the runtime type in one: `Deserialize` with kebab-case keys, `deny_unknown_fields`, every key defaults to 0.0, so a partial block or no block is all zero. `oracle::config::VectorMethod.kind_offsets` carries it at `retrieval.methods.vector.kind-offsets`. A snake_case key is a load error.
+- `SearchIndex::search_vector` takes a trailing `&KindOffsets`, selects `e.kind`, and computes `distance = 1 - dot + offsets.for_kind(kind)` before the per-note min-reduce. All callers (the oracle `vector_paths` primitive, the regression fixture, the perf test, the bench, the unit tests) pass it explicitly; there is no wrapper that hides the argument. A returned `VectorHit::distance` includes the winning row's offset.
+- A NaN or infinite offset is an error at the top of `search_vector` (`KindOffsets::validate`), and an unknown `kind` column value is an error in `for_kind`. Neither is reachable from the CHECK constraint or a sane config; both fail loud instead of poisoning every distance.
+- `config/templates/oracle.yml.example` documents the block under `methods.vector` (all 0.0). `vault/src/search/AGENTS.md` names the argument. The old "NAMED CONTINGENCY: kind-weighted pooling" paragraph on `search_vector` is replaced by a description of the offsets, since this is that lever.
+- `vector_paths` (oracle) reads `self.config.retrieval.methods.vector.kind_offsets`, so every caller of the vector primitive uses the configured offsets: the configured pipeline and also the legacy `vector`, `hybrid`, `graph` modes. The tables below therefore show the legacy vector/hybrid/graph targets moving with `configured`.
+
+### Deviations
+- The doc says "all-zero offsets reproduce today's ranking exactly on the regression fixture". `kind_offsets_zero_is_identity` is in `vault/tests/regression/hybrid/retrieval.rs` and runs the transcript-chunk fixture (summary rows plus chunk rows, 5 queries). It compares `search_vector` against an independent per-note min-reduce rebuilt from the fixture's own texts (path order exactly, distances within 1e-5), asserts all-zero equals `KindOffsets::default()` bit for bit, and asserts that at least one query is won by a chunk row so the fixture exercises the kind. The doc's name for the fixture is loose; this is the one that has both kinds.
+- The pinned binary `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p6/sb-phase6` was built from the working tree at the final code state before the commit existed (a one-commit phase cannot be built from its own commit first). The commit's code is byte-identical; only these notes were added after the build.
+- Arm A's config is the live `oracle.yml` unchanged (it has no `retrieval:` block, i.e. the built-in default, offsets all 0.0), read from `~/.config/sb/oracle.yml` because `sb oracle eval` has no flag for arm A's config. A copy is kept as `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p6/arm-a-oracle.yml`. Arm B configs are that file plus a `retrieval.methods.vector.kind-offsets` block.
+- The choice among 0.02, 0.05, 0.1 is made on the tune split of the `configured` target (the shipped path). The legacy `vector` target reads the same numbers.
+
+### Tradeoffs
+- Offsets applied to the shared `vector_paths` primitive (legacy modes move too) vs only the configured pipeline: one seam, no second code path to keep in sync, and the offset is a property of the vector retriever. The cost is that the legacy `vector` row stops being an unconfigured control. With the shipped default of 0.0 nothing moves.
+- Explicit trailing argument on `search_vector` vs a wrapper defaulting to zero: a wrapper would let a new caller silently skip the configured offsets.
+
+### Open questions
+- None blocking. The claim index arm read `hold` by 0.004 on the confirm CI lower bound (table below); a larger confirm set could flip it. That is the Phase-2 MDD ruling again, not a new question.
+
+### Evidence (Phase 6, ripr 2026-10-29)
+- Tests, green in `otto ci`: `kind_offsets_zero_is_identity` (regression fixture), `kind_offset_on_transcript_chunks_demotes_chunk_won_notes` (positive: with a chunk-won note and a weak-summary note, zero offsets rank chunk-won first; a 2.0 chunk offset flips them), `kind_offset_is_added_to_the_winning_rows_distance`, `kind_offsets_reject_non_finite_values` (all `vault/src/search/vector/tests.rs`), the `offsets/tests.rs` unit tests, and `vector_kind_offsets_default_to_zero_and_parse_kebab_case` (oracle config). The existing `vector_filter_all_set_has_exact_sql_and_params` was updated for the added `e.kind` column.
+- Shown failing with the change broken (`offsets.rs` backed up, mutated, tested, restored, `cmp` clean):
+
+  | mutation | fails |
+  |---|---|
+  | M1: `for_kind` adds 0.3 to the transcript-chunk offset regardless of config | `kind_offsets_zero_is_identity`: `all-zero offsets must keep today's ranking for "temporal workflow durable execution engine"` |
+  | M2: `for_kind` returns 0.0 for transcript-chunk (config ignored) | `kind_offset_on_transcript_chunks_demotes_chunk_won_notes` |
+
+- Baseline DB: Phase 5's arm C (recipe-2 chunker + prefix, fully embedded), `sqlite3 .backup` copy at `$P/evalA/sb/oracle/oracle.db` (census `summary|1|4924`, `transcript-chunk|2|29630`), with a copy of `p5/evalA`'s `eval-cache.db` (equal in size to `evalB`'s, newer mtime; 11,656 rows) beside it. `$P` = `/media/saidler/4tb/claude-tmp/claude-1000/-home-saidler-repos-scottidler-second-brain/821cbe7f-1f30-43e6-8fa8-6acb8d69303f/scratchpad/p6`. The live DB was never opened as an arm and never written (`touch` probe in the same bwrap bind returned `Read-only file system`; all runs inside `bwrap --dev-bind / / --ro-bind ~/.local/share/sb/oracle ~/.local/share/sb/oracle`). No `otto deploy`.
+- Query set: the vault `oracle-queries.yml`, 247 queries after Scott's stub drop. No judge failure on any run (exit 0 x4), 0 pooled notes without a judgment.
+- Offset arms (config arms, same DB both sides; delta = B - A; report `$P/off-<o>-report.txt`, log `off-<o>.log`, script `run-offsets.sh`, arm configs `$P/arm-b-<o>.yml`). A's nDCG differs by row because each row is scored on its own A-union-B pool. `configured rerank: arm A off, arm B off` on all three. Latency reported, not gated.
+
+  | offset | target | split | nDCG A | nDCG B | delta | 95% CI | n | MDD | p95 A ms | p95 B ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | 0.02 | configured | tune | 0.7542 | 0.7504 | -0.0038 | [-0.0255, +0.0176] | 122 | 0.0305 | 49.4 | 50.0 | hold |
+  | 0.02 | configured | confirm | 0.7507 | 0.7673 | +0.0166 | [-0.0090, +0.0425] | 97 | 0.0365 | 47.9 | 48.1 | hold |
+  | 0.05 | configured | tune | 0.7316 | 0.7030 | -0.0286 | [-0.0604, +0.0026] | 122 | 0.0453 | 46.9 | 51.1 | hold |
+  | 0.05 | configured | confirm | 0.7385 | 0.7336 | -0.0049 | [-0.0397, +0.0295] | 97 | 0.0495 | 46.6 | 49.2 | hold |
+  | 0.1 | configured | tune | 0.7311 | 0.6939 | -0.0372 | [-0.0741, -0.0023] | 122 | 0.0517 | 48.5 | 47.7 | hold |
+  | 0.1 | configured | confirm | 0.7381 | 0.7163 | -0.0218 | [-0.0591, +0.0157] | 97 | 0.0545 | 49.0 | 47.7 | hold |
+
+  Legacy targets in the same runs (tune / confirm delta, CI on confirm): vector 0.02 -0.0038 / +0.0166 [-0.0091, +0.0424], 0.05 -0.0286 / -0.0050 [-0.0398, +0.0294], 0.1 -0.0372 / -0.0219 [-0.0593, +0.0156]; hybrid 0.02 -0.0078 / +0.0023 [-0.0222, +0.0259], 0.05 -0.0236 / -0.0173 [-0.0493, +0.0146], 0.1 -0.0294 / -0.0326 [-0.0673, +0.0013]; graph-hybrid 0.02 -0.0073 / +0.0040 [-0.0241, +0.0304], 0.05 -0.0103 / -0.0057 [-0.0409, +0.0277], 0.1 -0.0112 / -0.0156 [-0.0539, +0.0205]. bm25 is identical on both arms (insufficient) in every run.
+- Selection on tune (`configured`): 0.02 is the best of the three (delta -0.0038 against -0.0286 and -0.0372); tune moves monotonically worse as the offset grows, and 0.1 is significantly negative on tune (CI upper bound -0.0023). Decision on confirm for 0.02: delta +0.0166, CI [-0.0090, +0.0425], lower bound not above 0, so the verdict is **hold**. Every vector-reading target is `hold` on confirm at every offset.
+- **Chosen default: 0.0 for all three kinds** (unchanged). `oracle.yml.example` documents the keys at 0.0.
+- Claim index arm (confirm only). Arm D = `sqlite3 .backup` copy of arm C at `$P/armD/sb/oracle/oracle.db`, `sb/borg` symlinked to the live borg dir, scratch `$P/cortex-claim.yml` (live `cortex.yml` plus `embed.kinds.claim: true`, live files untouched), `bwrap` as above: `XDG_DATA_HOME=$P/armD sb cortex --config $P/cortex-claim.yml embed -v --kind claim --backfill` -> `oracle db=$P/armD/sb/oracle/oracle.db` at DEBUG, `embed complete: scanned=2857 embedded=3240 skipped_empty=0 failed=0`, 0 WARN/ERROR lines, exit 0, 22:26 -> 22:27. Census: `claim|2|3240|2857 notes`, summary and transcript-chunk unchanged. Because the offset verdict is hold, both arms run offset 0 (arm A = live config; arm B = the same config over arm D's DB), so the claim effect is isolated. 22:27:47 -> 22:45:43, exit 0, `judgments: 4813 total`, report `$P/claim-eval-report.txt`. Delta = D - C.
+
+  | target | split | nDCG A | nDCG B | delta | 95% CI | n | MDD | p95 A ms | p95 B ms | verdict |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | configured | tune | 0.7240 | 0.7674 | +0.0434 | [+0.0166, +0.0720] | 122 | 0.0400 | 48.5 | 52.0 | ship |
+  | configured | confirm | 0.7499 | 0.7749 | +0.0249 | [-0.0036, +0.0526] | 95 | 0.0408 | 49.5 | 50.8 | hold |
+  | vector | tune | 0.7236 | 0.7670 | +0.0434 | [+0.0166, +0.0721] | 122 | 0.0400 | 47.1 | 50.1 | ship |
+  | vector | confirm | 0.7499 | 0.7749 | +0.0249 | [-0.0036, +0.0526] | 95 | 0.0408 | 48.0 | 50.6 | hold |
+  | hybrid | tune / confirm | 0.7363 / 0.7709 | 0.7731 / 0.7824 | +0.0368 / +0.0115 | [+0.0124, +0.0639] / [-0.0105, +0.0329] | 123 / 96 | 0.0373 / 0.0308 | 47.6 / 52.5 | 52.3 / 50.9 | ship (tune) / hold (confirm) |
+  | graph-hybrid | tune / confirm | 0.6201 / 0.6764 | 0.6462 / 0.6821 | +0.0261 / +0.0057 | [+0.0043, +0.0495] / [-0.0184, +0.0304] | 120 / 94 | 0.0323 / 0.0350 | 450.5 / 474.0 | 443.0 / 492.0 | ship (tune) / hold (confirm) |
+  | bm25 | tune / confirm | 0.9136 / 0.8903 | same | +0.0000 | [0, 0] | 46 / 45 | insufficient | 1.1 / 1.1 | 1.1 / 1.1 | insufficient |
+
+- **Claim verdict: hold** (confirm CI lower bound -0.0036, not above 0). Defaults stay `claim: false` in `cortex.yml.example` and the code default. The tune split is significantly positive (+0.0434, CI [+0.0166, +0.0720]) and the confirm point estimate is +0.0249 with the CI lower bound 0.0036 below zero, the closest any Phase 4-6 change has come to clearing the rule; the rule reads confirm only. The live `cortex.yml` has no `embed.kinds` key, so claim embedding is off on ripr.
+- `otto ci` green at commit. Arm directories, reports, logs and scripts stay in `$P` (nothing but `.md` under `docs/`). The binary `$P/sb-phase6` is pinned there. No background process is left running.

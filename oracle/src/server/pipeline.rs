@@ -97,7 +97,15 @@ impl OracleMcpServer {
         }
         .map_err(Self::err)?;
         let hits = db
-            .search_vector(&q_vec, k, tags, tags_all, note_type, status)
+            .search_vector(
+                &q_vec,
+                k,
+                tags,
+                tags_all,
+                note_type,
+                status,
+                &self.config.retrieval.methods.vector.kind_offsets,
+            )
             .map_err(Self::err)?;
         self.warn_if_no_embeddings(db, &hits)?;
         Ok(hits.iter().map(|h| h.note_path.clone()).collect())

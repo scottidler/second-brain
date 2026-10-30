@@ -105,7 +105,9 @@ fn search_vector_returns_closest_summary_first() {
     upsert_summary(&index, &m, "notes/c.md", "kubernetes operator pattern", 100);
 
     let q = m.embed_one("durable execution temporal").expect("query");
-    let hits = index.search_vector(&q, 3, None, false, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 3, None, false, None, None, &KindOffsets::default())
+        .expect("search");
     assert_eq!(hits.len(), 3);
     // The exact match seed is the deterministic mock hash; we just need to
     // verify that the same string (notes/a.md's summary text starts with
@@ -144,7 +146,9 @@ fn search_vector_ties_break_by_path_deterministically() {
         }
         let q = m.embed_one("anything").expect("q");
 
-        let all = index.search_vector(&q, 3, None, false, None, None).expect("search");
+        let all = index
+            .search_vector(&q, 3, None, false, None, None, &KindOffsets::default())
+            .expect("search");
         let paths: Vec<&str> = all.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             paths,
@@ -152,7 +156,9 @@ fn search_vector_ties_break_by_path_deterministically() {
             "tied distances must order by path asc"
         );
 
-        let top2 = index.search_vector(&q, 2, None, false, None, None).expect("search");
+        let top2 = index
+            .search_vector(&q, 2, None, false, None, None, &KindOffsets::default())
+            .expect("search");
         let p2: Vec<&str> = top2.iter().map(|h| h.note_path.as_str()).collect();
         assert_eq!(
             p2,
@@ -172,7 +178,9 @@ fn search_vector_respects_limit() {
         upsert_summary(&index, &m, &path, &format!("text {i}"), 100);
     }
     let q = m.embed_one("query").expect("q");
-    let hits = index.search_vector(&q, 2, None, false, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 2, None, false, None, None, &KindOffsets::default())
+        .expect("search");
     assert_eq!(hits.len(), 2);
 }
 
@@ -198,7 +206,7 @@ fn search_vector_filters_by_tags() {
 
     let tags = vec!["privacy".to_string()];
     let hits = index
-        .search_vector(&q, 10, Some(&tags), false, None, None)
+        .search_vector(&q, 10, Some(&tags), false, None, None, &KindOffsets::default())
         .expect("privacy");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_path, "notes/privacy.md");
@@ -214,7 +222,7 @@ fn search_vector_filters_by_tags() {
         .expect("insert note_tags");
     let tags = vec!["cooking".to_string()];
     let hits = index
-        .search_vector(&q, 10, Some(&tags), false, None, None)
+        .search_vector(&q, 10, Some(&tags), false, None, None, &KindOffsets::default())
         .expect("cooking");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_path, "notes/other.md");
@@ -229,12 +237,12 @@ fn search_vector_filters_by_tags() {
         .expect("insert note_tags");
     let both = vec!["privacy".to_string(), "cooking".to_string()];
     let hits = index
-        .search_vector(&q, 10, Some(&both), true, None, None)
+        .search_vector(&q, 10, Some(&both), true, None, None, &KindOffsets::default())
         .expect("tags_all");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].note_path, "notes/privacy.md");
     let hits = index
-        .search_vector(&q, 10, Some(&both), false, None, None)
+        .search_vector(&q, 10, Some(&both), false, None, None, &KindOffsets::default())
         .expect("tags any");
     assert_eq!(hits.len(), 2, "OR mode keeps both notes");
 }
@@ -259,7 +267,7 @@ fn search_vector_filters_by_note_type_and_status() {
 
     let paths = |note_type: Option<&str>, status: Option<&str>| -> Vec<String> {
         index
-            .search_vector(&q, 10, None, false, note_type, status)
+            .search_vector(&q, 10, None, false, note_type, status, &KindOffsets::default())
             .expect("search")
             .into_iter()
             .map(|h| h.note_path)
@@ -286,7 +294,7 @@ fn search_vector_rejects_dim_mismatch_against_active_model() {
     // error (not a panic).
     let q = vec![0.0_f32; 16];
     let err = index
-        .search_vector(&q, 5, None, false, None, None)
+        .search_vector(&q, 5, None, false, None, None, &KindOffsets::default())
         .expect_err("dim mismatch");
     assert!(format!("{err}").contains("does not match"));
 }
@@ -607,7 +615,9 @@ fn search_vector_returns_no_row_for_examined_sentinel_note() {
     upsert_summary(&index, &m, "notes/real.md", "durable execution temporal", 100);
 
     let q = m.embed_one("durable execution").expect("q");
-    let hits = index.search_vector(&q, 10, None, false, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 10, None, false, None, None, &KindOffsets::default())
+        .expect("search");
     let paths: Vec<&str> = hits.iter().map(|h| h.note_path.as_str()).collect();
     assert!(paths.contains(&"notes/real.md"), "the embedded note must be found");
     assert!(
@@ -862,7 +872,9 @@ fn search_vector_returns_one_row_per_note_when_chunks_exist() {
         .expect("swap");
 
     let q = m.embed_one("query").expect("q");
-    let hits = index.search_vector(&q, 10, None, false, None, None).expect("search");
+    let hits = index
+        .search_vector(&q, 10, None, false, None, None, &KindOffsets::default())
+        .expect("search");
     // Even though 4 rows back this note (1 summary + 3 chunks), the
     // result must contain exactly one entry for it.
     let v_hits: Vec<&VectorHit> = hits.iter().filter(|h| h.note_path == "notes/v.md").collect();
@@ -900,7 +912,7 @@ fn search_vector_max_pool_picks_best_representation_min_distance() {
         .expect("swap");
 
     let hits = index
-        .search_vector(&q_vec, 10, None, false, None, None)
+        .search_vector(&q_vec, 10, None, false, None, None, &KindOffsets::default())
         .expect("search");
     let h = hits
         .iter()
@@ -1256,4 +1268,104 @@ fn cosine_between_returns_none_when_either_note_unembedded() {
         both_bare.is_none(),
         "a note with no embedding at all is uncomputable even against itself"
     );
+}
+
+/// `strong` has an exact transcript-chunk match and an unrelated summary;
+/// `weak` has a middling summary. Returns the ranked paths for the query.
+fn offset_ranking(offsets: &KindOffsets) -> Vec<String> {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-offsets");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    insert_note(&index, "notes/strong.md", "audio", 100);
+    insert_note(&index, "notes/weak.md", "article", 100);
+
+    let query_text = "temporal durable execution restate";
+    upsert_summary(&index, &m, "notes/strong.md", "kubernetes operator pattern", 100);
+    upsert_summary(&index, &m, "notes/weak.md", "react hooks effect tutorial", 100);
+    let chunk_vec = m.embed_one(query_text).expect("chunk vec");
+    index
+        .swap_transcript_chunks(
+            "notes/strong.md",
+            &[(query_text.to_string(), chunk_vec)],
+            m.model_version(),
+            100,
+        )
+        .expect("swap");
+
+    let q = m.embed_one(query_text).expect("q");
+    index
+        .search_vector(&q, 10, None, false, None, None, offsets)
+        .expect("search")
+        .into_iter()
+        .map(|h| h.note_path)
+        .collect()
+}
+
+#[test]
+fn kind_offset_on_transcript_chunks_demotes_chunk_won_notes() {
+    let zero = offset_ranking(&KindOffsets::default());
+    assert_eq!(zero, ["notes/strong.md", "notes/weak.md"], "the chunk wins at zero");
+
+    let pushed = offset_ranking(&KindOffsets {
+        transcript_chunk: 2.0,
+        ..KindOffsets::default()
+    });
+    assert_eq!(
+        pushed,
+        ["notes/weak.md", "notes/strong.md"],
+        "a large chunk offset lets the weak summary outrank the chunk-won note"
+    );
+}
+
+#[test]
+fn kind_offset_is_added_to_the_winning_rows_distance() {
+    let mut index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-offsets-d");
+    index.set_active_embedding(m.model_version(), m.dim()).expect("set");
+    insert_note(&index, "notes/n.md", "audio", 100);
+    upsert_summary(&index, &m, "notes/n.md", "kubernetes operator pattern", 100);
+    let q = m.embed_one("kubernetes operator pattern").expect("q");
+
+    let base = index
+        .search_vector(&q, 1, None, false, None, None, &KindOffsets::default())
+        .expect("s")[0]
+        .distance;
+    let moved = index
+        .search_vector(
+            &q,
+            1,
+            None,
+            false,
+            None,
+            None,
+            &KindOffsets {
+                summary: 0.25,
+                ..KindOffsets::default()
+            },
+        )
+        .expect("s")[0]
+        .distance;
+    assert!((moved - base - 0.25).abs() < 1e-6, "base {base}, moved {moved}");
+}
+
+#[test]
+fn kind_offsets_reject_non_finite_values() {
+    let index = SearchIndex::open_memory().expect("open");
+    let m = MockEmbedder::new(16, "mock-offsets-nan");
+    let q = m.embed_one("x").expect("q");
+    let err = index
+        .search_vector(
+            &q,
+            1,
+            None,
+            false,
+            None,
+            None,
+            &KindOffsets {
+                claim: f32::NAN,
+                ..KindOffsets::default()
+            },
+        )
+        .expect_err("NaN offset must fail loudly");
+    assert!(err.to_string().contains("kind-offsets.claim"), "{err}");
 }

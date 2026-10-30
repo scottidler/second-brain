@@ -22,7 +22,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use vault::embedding::{EmbeddingModel, MockEmbedder};
-use vault::search::{BatchUpsert, EmbeddingKind, K_RRF_INPUT, RRF_K, SearchIndex, reciprocal_rank_fusion};
+use vault::search::{BatchUpsert, EmbeddingKind, K_RRF_INPUT, KindOffsets, RRF_K, SearchIndex, reciprocal_rank_fusion};
 
 const N: usize = 7_000;
 
@@ -68,7 +68,7 @@ fn hybrid_dispatch(c: &mut Criterion) {
                 .search(&q, None, false, None, None, Some(K_RRF_INPUT))
                 .expect("bm25");
             let vec_hits = index
-                .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None)
+                .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None, &KindOffsets::default())
                 .expect("vec");
             let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
             let vec_paths: Vec<String> = vec_hits.iter().map(|h| h.note_path.clone()).collect();

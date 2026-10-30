@@ -358,6 +358,9 @@ pub use schema::migrated_model_id;
 
 mod graph;
 
+mod offsets;
+pub use offsets::KindOffsets;
+
 pub use graph::{Edge, EntityRow, FactEdge, GraphNoteRow, GraphReach};
 
 mod cold;

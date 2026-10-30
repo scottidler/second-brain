@@ -3,6 +3,7 @@
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use vault::search::KindOffsets;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -124,6 +125,10 @@ pub struct VectorMethod {
     /// Candidate depth fed into fusion.
     #[serde(default = "default_top_k")]
     pub top_k: u32,
+    /// Distance added to a row of each kind before the per-note min-reduce.
+    /// All zero (the default) is the plain min-reduce.
+    #[serde(default)]
+    pub kind_offsets: KindOffsets,
 }
 
 impl Default for VectorMethod {
@@ -131,6 +136,7 @@ impl Default for VectorMethod {
         Self {
             enabled: true,
             top_k: default_top_k(),
+            kind_offsets: KindOffsets::default(),
         }
     }
 }

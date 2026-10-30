@@ -12,7 +12,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 - `search(query, tags, tags_all, note_type, status, limit) -> Vec<NoteRow>` (BM25).
   `tags_all` picks the facet combinator: `false` = OR (any), `true` = AND (all).
   Every browse/stats query here takes the same pair (`Filter::and_tags`). All dynamic WHERE clauses are built by `search/filter.rs` `Filter` (bare `?` only, never numbered `?N`).
-- `search_vector(query_vec, limit, …) -> Vec<VectorHit>` (cosine; feature `vec`).
+- `search_vector(query_vec, limit, …, &KindOffsets) -> Vec<VectorHit>` (cosine; feature `vec`).
 - `reciprocal_rank_fusion(bm25_paths, vec_paths, k=60, limit) -> Vec<FusedHit>`.
 - `vector::{stale_embedding_targets, upsert_embedding, upsert_embeddings_batch, swap_embeddings_batch, swap_kind_chunks, mark_nothing_to_embed_batch, drop_embedding_kind}` (cortex re-embed loop and its rollback verb); `EmbeddingKind::recipe()` and the per-kind `*_RECIPE` constants.
 - Graph/browse: `tag_search`, `cold_notes`, `inbound_links`, `outbound_links`.
@@ -22,7 +22,7 @@ SQLite-backed search for vault notes: BM25 via FTS5, brute-force cosine vector s
 ## Three Modes
 
 1. **BM25 FTS5** - virtual table over (title, tags, type, status, body, summary); `AND`/`OR`/phrase/`-` syntax; zero embedding cost.
-2. **Vector brute-force cosine** — scans every `note_embeddings` row, zero-copy dot-product from the BLOB; distance `1.0 - dot` for L2-normalized vectors; max-pool (min distance) per note; SQL filters (tags/type/status) applied before the dot loop.
+2. **Vector brute-force cosine** — scans every `note_embeddings` row, zero-copy dot-product from the BLOB; distance `1.0 - dot` for L2-normalized vectors; max-pool (min distance) per note, after adding each row's `KindOffsets` distance for its kind (`retrieval.methods.vector.kind-offsets`; all zero is the plain min); SQL filters (tags/type/status) applied before the dot loop.
 3. **Hybrid RRF** — pull top `K_RRF_INPUT` (50) from each list, fuse via `reciprocal_rank_fusion(k=60, limit=20)`; per-note score `Σ 1/(60 + rank + 1)`; a note in only one list still scores.
 
 ## SQLite Schema Contracts

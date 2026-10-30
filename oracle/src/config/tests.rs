@@ -246,3 +246,22 @@ fn inference_unknown_key_fails_config_load() {
         .to_string();
     assert!(err.contains("workers"), "{err}");
 }
+
+#[test]
+fn vector_kind_offsets_default_to_zero_and_parse_kebab_case() {
+    let cfg: Config = serde_yaml::from_str("").expect("empty yaml loads");
+    assert_eq!(cfg.retrieval.methods.vector.kind_offsets, KindOffsets::default());
+
+    let cfg: Config = serde_yaml::from_str(
+        "retrieval:\n  methods:\n    vector:\n      kind-offsets:\n        transcript-chunk: 0.05\n",
+    )
+    .expect("kind-offsets loads");
+    let o = cfg.retrieval.methods.vector.kind_offsets;
+    assert_eq!((o.summary, o.transcript_chunk, o.claim), (0.0, 0.05, 0.0));
+
+    let bad = "retrieval:\n  methods:\n    vector:\n      kind-offsets:\n        transcript_chunk: 0.05\n";
+    assert!(
+        serde_yaml::from_str::<Config>(bad).is_err(),
+        "snake_case key must be rejected"
+    );
+}

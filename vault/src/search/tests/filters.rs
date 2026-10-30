@@ -172,7 +172,7 @@ fn vector_filter_all_set_has_exact_sql_and_params() {
     let f = crate::search::vector::vector_filter("m1".to_string(), Some(&tags), false, Some("article"), Some("active"));
     assert_eq!(
         f.sql,
-        "SELECT e.note_path, e.embedding, e.dim
+        "SELECT e.note_path, e.embedding, e.dim, e.kind
              FROM note_embeddings e
              JOIN notes n ON n.path = e.note_path
              WHERE e.model_version = ? AND EXISTS (SELECT 1 FROM note_tags t WHERE t.path = n.path AND t.tag IN (?, ?)) AND n.note_type = ? AND n.status = ?"

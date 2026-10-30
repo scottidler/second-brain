@@ -20,8 +20,8 @@ use super::{optional_row, warn_row};
 use eyre::Result;
 use rusqlite::{TransactionBehavior, params};
 
-use super::SearchIndex;
 use super::filter::Filter;
+use super::{KindOffsets, SearchIndex};
 use crate::schema::NoteType;
 
 /// One row of the `note_embeddings` scan. `search_vector` returns these
@@ -46,8 +46,8 @@ pub enum EmbeddingKind {
     /// Added so the default vector-only retrieval pipeline reaches claim
     /// text, which is otherwise only FTS-indexed. `search_vector` scans
     /// this kind automatically (no kind filter); it must only *add
-    /// recall*, never displace summary precision - see the max-pool
-    /// contingency note in `search_vector`.
+    /// recall*, never displace summary precision - `KindOffsets` is the
+    /// lever.
     Claim,
 }
 
@@ -252,7 +252,7 @@ pub(super) fn vector_filter(
     status: Option<&str>,
 ) -> Filter {
     Filter::new(
-        "SELECT e.note_path, e.embedding, e.dim
+        "SELECT e.note_path, e.embedding, e.dim, e.kind
              FROM note_embeddings e
              JOIN notes n ON n.path = e.note_path
              WHERE e.model_version = ?",
@@ -273,17 +273,11 @@ impl SearchIndex {
     /// space smaller is closer, so the minimum over the rows is the
     /// max-pool similarity.
     ///
-    /// NAMED CONTINGENCY (retrieval invariant "claim rows add
-    /// recall, never displace precision"): the max-pool below is
-    /// kind-agnostic, so a note's up-to-24 narrow `claim` vectors get the
-    /// same weight as its `summary` vector and can let it win on a
-    /// tangential sentence. If the operator eval shows a per-query
-    /// nDCG regression on the calibration set, the fix is **kind-weighted
-    /// pooling here**: pull `e.kind` in the SELECT and apply a per-kind
-    /// distance penalty (e.g. add a small epsilon to claim-row distances)
-    /// so claims can only rescue a note the summary missed, never outrank
-    /// a note whose summary answered the query. Not implemented until the
-    /// eval demands it - see the claim-embedding measurement step.
+    /// `offsets` adds a per-kind distance to every row before the min, so an
+    /// operator can make a kind win a note less often (the retrieval
+    /// invariant "claim rows add recall, never displace precision"). All
+    /// zero is the plain min-reduce. A returned `VectorHit::distance`
+    /// includes the winning row's offset.
     ///
     /// The note-side filters (`tags`, `note_type`, `status`) are
     /// pushed into SQL so the scan only visits rows that pass them;
@@ -307,7 +301,9 @@ impl SearchIndex {
         tags_all: bool,
         note_type: Option<&str>,
         status: Option<&str>,
+        offsets: &KindOffsets,
     ) -> Result<Vec<VectorHit>> {
+        offsets.validate()?;
         let active_model = self.active_embedding_model()?;
         let active_dim = self.active_embedding_dim()?;
         if query_vec.len() != active_dim {
@@ -339,8 +335,9 @@ impl SearchIndex {
                     query_vec.len(),
                 );
             }
+            let kind: String = row.get(3)?;
             let dot = dot_product_from_bytes(query_vec, &bytes);
-            let distance = 1.0_f32 - dot;
+            let distance = 1.0_f32 - dot + offsets.for_kind(&kind)?;
             best.entry(note_path)
                 .and_modify(|d| {
                     if distance < *d {

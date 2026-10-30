@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 
 use vault::embedding::{EmbeddingModel, MockEmbedder};
-use vault::search::{BatchUpsert, EmbeddingKind, K_RRF_INPUT, RRF_K, SearchIndex, reciprocal_rank_fusion};
+use vault::search::{BatchUpsert, EmbeddingKind, K_RRF_INPUT, KindOffsets, RRF_K, SearchIndex, reciprocal_rank_fusion};
 
 /// 20 synthetic notes with bodies that exercise both lexical (BM25) and
 /// semantic (mock-embedder hash) signals. Each line is `(path, title,
@@ -233,14 +233,9 @@ fn transcript_queries() -> Vec<&'static str> {
     ]
 }
 
-#[test]
-fn hybrid_recovers_union_top3_with_transcript_chunks() {
-    // Build a small vault that mixes summary-only notes with notes
-    // whose semantic signal lives in transcript chunks. The
-    // max-pool aggregation must let the chunk-only matches surface
-    // via the vector path; RRF then keeps them in the fused result.
+/// Summary rows plus transcript-chunk rows, one index per `MockEmbedder`.
+fn build_transcript_index(m: &MockEmbedder) -> SearchIndex {
     let mut index = SearchIndex::open_memory().expect("open");
-    let m = MockEmbedder::new(64, "mock-b4-v1");
     index.set_active_embedding(m.model_version(), m.dim()).expect("set");
 
     for (path, ntype, summary, transcript) in transcript_corpus() {
@@ -274,6 +269,17 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
                 .expect("swap chunks");
         }
     }
+    index
+}
+
+#[test]
+fn hybrid_recovers_union_top3_with_transcript_chunks() {
+    // Build a small vault that mixes summary-only notes with notes
+    // whose semantic signal lives in transcript chunks. The
+    // max-pool aggregation must let the chunk-only matches surface
+    // via the vector path; RRF then keeps them in the fused result.
+    let m = MockEmbedder::new(64, "mock-b4-v1");
+    let index = build_transcript_index(&m);
 
     let mut recovered = 0;
     let total = transcript_queries().len();
@@ -283,7 +289,7 @@ fn hybrid_recovers_union_top3_with_transcript_chunks() {
             .expect("bm25");
         let q_vec = m.embed_one(q).expect("q vec");
         let vec_hits = index
-            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None)
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None, &KindOffsets::default())
             .expect("vec");
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
@@ -324,7 +330,7 @@ fn hybrid_recovers_union_top3() {
             .expect("bm25");
         let q_vec = m.embed_one(q).expect("q");
         let vec_hits = index
-            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None)
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None, &KindOffsets::default())
             .expect("vec");
 
         let bm25_paths: Vec<String> = bm25.iter().map(|n| n.path.clone()).collect();
@@ -353,4 +359,75 @@ fn hybrid_recovers_union_top3() {
         recovered >= total * 18 / 20,
         "hybrid recovered union top-3 for {recovered}/{total}; threshold is 18/20"
     );
+}
+
+/// The plain per-note min-reduce, written out from the fixture's own texts and
+/// independent of `search_vector`: every note's best `1 - cosine` over its
+/// summary and chunk vectors, ordered by distance then path.
+fn reference_ranking(m: &MockEmbedder, query: &str) -> Vec<(String, f32)> {
+    let q = m.embed_one(query).expect("q");
+    let dist = |text: &str| -> f32 {
+        let v = m.embed_one(text).expect("row vec");
+        1.0 - q.iter().zip(&v).map(|(a, b)| a * b).sum::<f32>()
+    };
+    let mut ranked: Vec<(String, f32)> = transcript_corpus()
+        .into_iter()
+        .map(|(path, _, summary, transcript)| {
+            let best = std::iter::once(dist(summary))
+                .chain(m.chunk("", transcript).expect("chunk").iter().map(|c| dist(c)))
+                .fold(f32::INFINITY, f32::min);
+            (path.to_string(), best)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("finite").then_with(|| a.0.cmp(&b.0)));
+    ranked
+}
+
+#[test]
+fn kind_offsets_zero_is_identity() {
+    let m = MockEmbedder::new(64, "mock-b4-v1");
+    let index = build_transcript_index(&m);
+    let zero = KindOffsets {
+        summary: 0.0,
+        transcript_chunk: 0.0,
+        claim: 0.0,
+    };
+
+    let mut chunk_won = 0;
+    for q in transcript_queries() {
+        let q_vec = m.embed_one(q).expect("q vec");
+        let hits = index
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None, &zero)
+            .expect("vec");
+        let default_hits = index
+            .search_vector(&q_vec, K_RRF_INPUT, None, false, None, None, &KindOffsets::default())
+            .expect("vec");
+        let reference = reference_ranking(&m, q);
+
+        let got: Vec<&str> = hits.iter().map(|h| h.note_path.as_str()).collect();
+        let want: Vec<&str> = reference.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(got, want, "all-zero offsets must keep today's ranking for {q:?}");
+        for (h, (path, d)) in hits.iter().zip(&reference) {
+            assert!(
+                (h.distance - d).abs() < 1e-5,
+                "{path} distance {} drifted from the plain min-reduce {d} for {q:?}",
+                h.distance
+            );
+        }
+        assert_eq!(hits.len(), default_hits.len());
+        for (a, b) in hits.iter().zip(&default_hits) {
+            assert_eq!((&a.note_path, a.distance), (&b.note_path, b.distance));
+        }
+        // The fixture is only a test of the min-reduce if chunks actually win.
+        let summary_only = transcript_corpus()
+            .into_iter()
+            .map(|(_, _, summary, _)| summary)
+            .map(|s| m.embed_one(s).expect("summary vec"))
+            .map(|v| 1.0 - q_vec.iter().zip(&v).map(|(a, b)| a * b).sum::<f32>())
+            .fold(f32::INFINITY, f32::min);
+        if reference[0].1 < summary_only - 1e-6 {
+            chunk_won += 1;
+        }
+    }
+    assert!(chunk_won > 0, "the fixture must have a query a chunk row wins");
 }

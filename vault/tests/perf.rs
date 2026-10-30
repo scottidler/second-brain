@@ -57,7 +57,7 @@ const SEARCH_VECTOR_P50_CEILING: Duration = Duration::from_millis(450);
 #[test]
 #[ignore = "timing test; run via `otto perf` (release profile)"]
 fn perf_search_vector_21k() {
-    use vault::search::EmbeddingKind;
+    use vault::search::{EmbeddingKind, KindOffsets};
 
     const ROWS: usize = 21_000;
     const DIM: usize = 384;
@@ -78,14 +78,14 @@ fn perf_search_vector_21k() {
 
     let query = unit_vector(ROWS as u64 + 1, DIM);
     index
-        .search_vector(&query, 10, None, false, None, None)
+        .search_vector(&query, 10, None, false, None, None, &KindOffsets::default())
         .expect("warmup search");
 
     let mut samples: Vec<Duration> = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let start = Instant::now();
         let hits = index
-            .search_vector(&query, 10, None, false, None, None)
+            .search_vector(&query, 10, None, false, None, None, &KindOffsets::default())
             .expect("search_vector");
         samples.push(start.elapsed());
         assert_eq!(hits.len(), 10, "expected a full page of hits");
