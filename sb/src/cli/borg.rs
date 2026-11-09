@@ -34,7 +34,7 @@ impl BorgCli {
             Some(Command::Daemon(a)) => {
                 let opts: borg::opts::DaemonOpts = a.into();
                 if opts.start {
-                    let (startup, handle) = borg::serve_init(config, env!("GIT_DESCRIBE").to_string()).await?;
+                    let (startup, handle) = borg::serve_init(config, env!("BUILD_VERSION").to_string()).await?;
                     print_server_banner(&startup);
                     handle.wait().await
                 } else {

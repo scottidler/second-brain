@@ -568,7 +568,7 @@ impl CortexCli {
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             _ => config.vault_root(self.vault.as_ref())?,
         };
-        log::debug!("cortex starting (version={})", env!("GIT_DESCRIBE"));
+        log::debug!("cortex starting (version={})", env!("BUILD_VERSION"));
         log::debug!("resolved vault root: {}", vault_root.display());
 
         match self.command {

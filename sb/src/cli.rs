@@ -14,7 +14,7 @@ pub mod status;
 #[command(
     name = "sb",
     about = "second-brain unified CLI: borg + cortex + oracle",
-    version = env!("GIT_DESCRIBE"),
+    version = env!("BUILD_VERSION"),
 )]
 pub struct Cli {
     /// Log level: trace, debug, info, warn, error.
