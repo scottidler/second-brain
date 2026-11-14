@@ -18,6 +18,8 @@ pub mod http;
 pub mod hygiene;
 pub mod identity;
 pub mod intake;
+#[cfg(feature = "kmeans")]
+pub mod kmeans;
 pub mod ledger;
 pub mod logging;
 pub mod note;

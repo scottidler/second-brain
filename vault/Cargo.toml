@@ -15,6 +15,8 @@ watcher = ["dep:notify", "dep:tokio"]
 # One reqwest client constructor (`vault::http`) and the borg-daemon client
 # (`vault::daemon::client`); borg and oracle enable it.
 http = ["dep:reqwest"]
+# `vault::kmeans`, the spherical k-means wrapper over e-means; cortex enables it.
+kmeans = ["dep:e-means"]
 
 # vec stays the public "embedding is on" flag. It pulls in `search` and
 # both backends: Candle (no AVX2 floor, runs on any x86_64 CPU) and ONNX
@@ -43,6 +45,7 @@ vec-onnx = [
 rusqlite = { workspace = true, optional = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+e-means = { workspace = true, optional = true }
 env_logger = { workspace = true }
 expand-tilde = { workspace = true, features = ["serde"] }
 eyre = { workspace = true }
