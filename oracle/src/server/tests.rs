@@ -624,6 +624,7 @@ fn note_returning_tools_advertise_trace_block() {
         "recent_activity",
         "find_links",
         "creator_browse",
+        "topic_map",
         "source_browse",
         "inbox_status",
         "quality_report",

@@ -384,6 +384,46 @@ pub struct FindLinksRequest {
     pub detail: Option<DetailLevel>,
 }
 
+/// Browse the vault by topic: the topic list, the topics inside a tag, or the
+/// notes inside one topic.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TopicMapRequest {
+    /// List this topic's notes. Omit to list every topic.
+    #[schemars(
+        description = "Topic id to list the notes of, nearest its centroid first. Omit to list every topic with at least one note. Ids are valid inside one generation: pass `generation` so a retrain cannot silently hand you a different subject."
+    )]
+    pub topic: Option<u32>,
+
+    /// The generation the caller's topic ids came from.
+    #[schemars(
+        description = "The generation your topic ids came from (every response carries `generation`). A mismatch with the stored generation is an error naming both numbers."
+    )]
+    pub generation: Option<i64>,
+
+    /// Filter to notes by tag, combined per `tags_mode` (default: any)
+    #[schemars(
+        description = "Filter to notes by tag. Combined per `tags_mode`: any (carry at least one, the default) or all (carry every one). In the topic list, `notes` then counts only the notes carrying the tags and empty topics are dropped; a topic's label tags never change."
+    )]
+    pub tags: Option<Vec<String>>,
+
+    /// How a multi-tag filter combines: any (default) or all
+    #[schemars(
+        description = "How the tags filter combines: any (carry at least one, the default) or all (carry every one)"
+    )]
+    pub tags_mode: Option<TagsMode>,
+
+    /// How much content to return per note (topic form)
+    #[schemars(description = "Detail level for the notes of one topic. Default: metadata")]
+    pub detail: Option<DetailLevel>,
+
+    /// Maximum number of notes (topic form)
+    #[schemars(
+        description = "Maximum number of notes in one topic's list (default: 20). The topic list is never truncated."
+    )]
+    pub limit: Option<u32>,
+}
+
 /// Browse notes by creator/channel.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use vault::detail::{self, DetailLevel};
 use vault::ledger;
 use vault::schema::{Method, NoteType, Origin, Status};
-use vault::search::{NoteRow, SearchIndex};
+use vault::search::{NoteRow, SearchIndex, TopicNotes, TopicSnapshot, TopicStatus, TopicTag};
 
 mod pipeline;
 pub use pipeline::{PipelineRun, RerankRun};
@@ -30,6 +30,9 @@ const FIND_SIMILAR_OVERFETCH: usize = 5;
 /// Char budget for the candidate text sent to the cross-encoder reranker. The
 /// tokenizer truncates to 512 tokens anyway; this bounds memory before that.
 const RERANK_TEXT_MAX_CHARS: usize = 2000;
+
+/// Topics `tag_brief` lists for the tag.
+const TAG_BRIEF_TOPICS: usize = 8;
 
 /// The receipts schema that added `scratch`, which `failure_history` filters on.
 const FAILURE_HISTORY_MIN_SCHEMA: i64 = 8;
@@ -165,6 +168,10 @@ impl OracleMcpServer {
             "creator_browse" => {
                 let req: CreatorBrowseRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
                 self.creator_browse(Parameters(req)).await
+            }
+            "topic_map" => {
+                let req: TopicMapRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
+                self.topic_map(Parameters(req)).await
             }
             "source_browse" => {
                 let req: SourceBrowseRequest = serde_json::from_value(args).map_err(|e| Self::deser_err(name, &e))?;
@@ -514,17 +521,22 @@ impl OracleMcpServer {
 
     /// Get an overview of the vault
     #[tool(
-        description = "Get an overview of the entire vault - total note count, distribution by tag, note type, and status, plus schema gaps showing notes with missing fields."
+        description = "Get an overview of the entire vault - total note count, distribution by tag, note type, and status, plus schema gaps showing notes with missing fields, and a `topics` block (status, generation, k, trained-at, assigned) saying whether the topic map exists."
     )]
     async fn vault_overview(&self, _params: Parameters<VaultOverviewRequest>) -> Result<CallToolResult, McpError> {
         let db = self.db.lock().map_err(Self::err)?;
         let stats = db.stats().map_err(Self::err)?;
-        Ok(CallToolResult::success(vec![Content::json(&stats)?]))
+        let snapshot = db.topic_snapshot().map_err(Self::err)?;
+        // One key beside the serialized `VaultStats`: the stats type is
+        // ungated and `sb oracle stats` prints it, the topic readers are not.
+        let mut payload = serde_json::to_value(&stats).map_err(Self::err)?;
+        payload["topics"] = Self::topics_status_block(&snapshot);
+        Ok(CallToolResult::success(vec![Content::json(payload)?]))
     }
 
     /// Get a briefing on a specific tag
     #[tool(
-        description = "Get a briefing on a specific tag - total notes, unread count, starred count, type breakdown, and recent notes. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+        description = "Get a briefing on a specific tag - total notes, unread count, starred count, type breakdown, and recent notes, plus `topics`: the top 8 topics holding that tag (null with `topics-status` when no topic map exists; see topic_map). Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
     )]
     async fn tag_brief(&self, params: Parameters<TagBriefRequest>) -> Result<CallToolResult, McpError> {
         let req = params.0;
@@ -554,6 +566,7 @@ impl OracleMcpServer {
                 Err(e) => (None, Some(e)),
             }
         };
+        let topics = db.in_tags(&req.tag, TAG_BRIEF_TOPICS).map_err(Self::err)?;
         let mut payload = json!({
             "tag": brief.tag,
             "known": known,
@@ -563,6 +576,24 @@ impl OracleMcpServer {
             "by_type": brief.by_type,
             "results": results,
         });
+        // `null` plus the status when there is no usable generation, never an
+        // empty list that reads as "this tag spans no topic".
+        match (&topics.snapshot.status, &topics.snapshot.meta) {
+            (TopicStatus::Valid, Some(meta)) => {
+                payload["topics"] = json!({
+                    "generation": meta.generation,
+                    "results": topics.topics.iter().map(|t| json!({
+                        "topic": t.topic,
+                        "notes": t.notes,
+                        "tags": Self::topic_tags_json(&t.tags),
+                    })).collect::<Vec<_>>(),
+                });
+            }
+            (status, _) => {
+                payload["topics"] = serde_json::Value::Null;
+                payload["topics-status"] = json!(status);
+            }
+        }
         if let Some(e) = vocabulary_error {
             payload["vocabulary-error"] = json!(e);
         } else if known == Some(false) {
@@ -1043,6 +1074,119 @@ impl OracleMcpServer {
         }
     }
 
+    /// Browse the vault by topic
+    #[tool(
+        description = "Browse the vault by topic: clusters of notes by subject, finer than tags. With no arguments, lists every topic with at least one note: {topic, notes, tags (label tags with lift), exemplars (3 titles)}, biggest first. With `tags` (and `tags_mode`), the same topics with `notes` counting only notes carrying those tags - the sub-themes inside a tag; labels do not change. With `topic`, lists that topic's notes nearest its centroid first, at `detail` and `limit`. Topic ids are valid only inside one generation: every response carries `generation`, and passing it back as `generation` turns a retrain into an error instead of a silently different subject. When no topic map exists (never trained, cleared, or trained under another embedding model) the response is {status: absent|stale, count: 0, results: []} with a `hint`; an operator trains with `sb cortex topics --train`. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
+    )]
+    async fn topic_map(&self, params: Parameters<TopicMapRequest>) -> Result<CallToolResult, McpError> {
+        let req = params.0;
+        let tags_all = req.tags_mode.unwrap_or_default().is_all();
+        let db = self.db.lock().map_err(Self::err)?;
+
+        let Some(topic) = req.topic else {
+            let overview = db.overview(req.tags.as_deref(), tags_all).map_err(Self::err)?;
+            if let Some(unavailable) = Self::topic_unavailable(&overview.snapshot) {
+                return Ok(CallToolResult::success(vec![Content::json(unavailable)?]));
+            }
+            let results: Vec<serde_json::Value> = overview
+                .topics
+                .iter()
+                .map(|t| {
+                    json!({
+                        "topic": t.topic,
+                        "notes": t.notes,
+                        "tags": Self::topic_tags_json(&t.tags),
+                        "exemplars": t.exemplars,
+                    })
+                })
+                .collect();
+            let mut payload = Self::topic_envelope(&overview.snapshot, results.len());
+            payload["results"] = json!(results);
+            return Ok(CallToolResult::success(vec![Content::json(payload)?]));
+        };
+
+        let limit = req.limit.unwrap_or(20) as usize;
+        let read = db
+            .notes(topic, req.generation, req.tags.as_deref(), tags_all, limit)
+            .map_err(Self::err)?;
+        match read {
+            TopicNotes::Unavailable(snapshot) => {
+                let unavailable = Self::topic_unavailable(&snapshot);
+                Ok(CallToolResult::success(vec![Content::json(
+                    unavailable.unwrap_or_else(|| Self::topic_envelope(&snapshot, 0)),
+                )?]))
+            }
+            TopicNotes::GenerationMismatch { requested, stored } => {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "topic_map: generation {requested} requested but the stored generation is {stored}; topic ids from generation {requested} no longer mean what they did. Re-list the topics (call topic_map with no topic) and pick again."
+                ))]))
+            }
+            TopicNotes::UnknownTopic { topic, k } => Ok(CallToolResult::error(vec![Content::text(format!(
+                "topic_map: topic {topic} does not exist; the stored generation has topics 0..{k}"
+            ))])),
+            TopicNotes::Notes { snapshot, notes } => {
+                let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
+                let rows = Self::resolve_note_paths(&db, notes.iter().map(|n| n.path.as_str()))?;
+                let results: Vec<serde_json::Value> =
+                    rows.iter().map(|n| Self::format_note(n, &detail_level)).collect();
+                let mut payload = Self::topic_envelope(&snapshot, results.len());
+                payload["topic"] = json!(topic);
+                payload["results"] = json!(results);
+                Ok(CallToolResult::success(vec![Content::json(payload)?]))
+            }
+        }
+    }
+
+    /// `{status, generation, trained-at, k, count}` of a usable generation.
+    fn topic_envelope(snapshot: &TopicSnapshot, count: usize) -> serde_json::Value {
+        let meta = snapshot.meta.as_ref();
+        json!({
+            "status": snapshot.status,
+            "generation": meta.map(|m| m.generation),
+            "trained-at": meta.and_then(|m| Self::unix_to_rfc3339(m.trained_at)),
+            "k": meta.map(|m| m.k),
+            "count": count,
+        })
+    }
+
+    /// The Absent / Stale answer: status, zero results and the hint, never an
+    /// error and never a bare empty list. `None` when the generation is Valid.
+    fn topic_unavailable(snapshot: &TopicSnapshot) -> Option<serde_json::Value> {
+        let hint = match snapshot.status {
+            TopicStatus::Valid => return None,
+            TopicStatus::Absent => "no topic map exists yet; an operator creates one with `sb cortex topics --train`",
+            TopicStatus::Stale => {
+                "the topic map was trained under a different embedding model; an operator retrains with `sb cortex topics --train`"
+            }
+        };
+        let mut payload = Self::topic_envelope(snapshot, 0);
+        payload["results"] = json!([]);
+        payload["hint"] = json!(hint);
+        Some(payload)
+    }
+
+    /// The `vault_overview` `topics` block.
+    fn topics_status_block(snapshot: &TopicSnapshot) -> serde_json::Value {
+        let meta = snapshot.meta.as_ref();
+        json!({
+            "status": snapshot.status,
+            "generation": meta.map(|m| m.generation),
+            "k": meta.map(|m| m.k),
+            "trained-at": meta.and_then(|m| Self::unix_to_rfc3339(m.trained_at)),
+            "assigned": snapshot.assigned,
+        })
+    }
+
+    fn topic_tags_json(tags: &[TopicTag]) -> Vec<serde_json::Value> {
+        tags.iter()
+            .map(|t| json!({ "tag": t.tag, "lift": (t.lift * 100.0).round() / 100.0, "notes": t.notes }))
+            .collect()
+    }
+
+    fn unix_to_rfc3339(secs: i64) -> Option<String> {
+        chrono::DateTime::from_timestamp(secs, 0).map(|d| d.to_rfc3339())
+    }
+
     /// Browse notes by source URL host
     #[tool(
         description = "Browse notes by source URL host. When host is provided, returns matching notes. When omitted, lists all source hosts with counts. Returned notes carry a `trace` block; when present it advertises a handle to the verbatim staged source (e.g. a full transcript), so prefer that source over the lossy summary when exact wording matters. Oracle advertises the handle only and never returns or fetches staged-source content."
@@ -1255,6 +1399,10 @@ impl ServerHandler for OracleMcpServer {
              metadata (fields only), tldr (one-liner), summary (summary section), full (complete body). \
              Use vault_overview for the big picture, tag_brief for tag-specific intelligence, \
              and knowledge_search for targeted queries. \
+             topic_map browses by subject, finer than tags: no arguments lists every topic with \
+             its label tags and exemplar titles, `tags` narrows it to the sub-themes inside a tag, \
+             and `topic` lists one topic's notes; pass the response's `generation` back with a \
+             `topic` so a retrain cannot silently change what an id means. \
              creator_browse with type=youtube lists channels with their `handle`; channel_search \
              takes such a handle plus a query, searches that channel through the borg daemon, and \
              marks hits the vault already has with `in-vault: <path>`. \
@@ -1306,3 +1454,6 @@ fn schema_values<T>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod topic;

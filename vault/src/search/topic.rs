@@ -615,6 +615,18 @@ impl SearchIndex {
         Ok((state, centroids, notes))
     }
 
+    /// Replace a note's `note_tags` rows with `tags` (the facet the topic
+    /// readers label from), leaving the `notes.tags` JSON column alone.
+    pub fn set_test_tags(&self, path: &str, tags: &[&str]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM note_tags WHERE path = ?1", params![path])?;
+        for tag in tags {
+            self.conn
+                .execute("INSERT INTO note_tags (path, tag) VALUES (?1, ?2)", params![path, tag])?;
+        }
+        Ok(())
+    }
+
     /// Set a note's `quality` column (`cortex-quality` in frontmatter).
     pub fn set_test_quality(&self, path: &str, quality: &str) -> Result<()> {
         self.conn
@@ -778,6 +790,9 @@ fn decode_f32(bytes: &[u8]) -> Vec<f32> {
         .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
+
+mod read;
+pub use read::{TopicNote, TopicNotes, TopicOverview, TopicSnapshot, TopicSummary, TopicTag, label_tags};
 
 #[cfg(test)]
 mod tests;
