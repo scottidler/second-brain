@@ -206,6 +206,9 @@ impl super::SearchIndex {
             INSERT OR IGNORE INTO embedding_config (key, value)
                 VALUES ('active_dim', '384');",
         )?;
+        // Before the model-id migration below: `topic_state.model_version` is one of
+        // the places that migration renames, so the table must exist when it probes.
+        self.ensure_topic_schema()?;
         self.ensure_recipe_columns()?;
         // Before the seed below: a pre-existing `-candle` pin is renamed in
         // place, and a fresh DB has no pin for the seed to collide with.
@@ -351,7 +354,7 @@ impl super::SearchIndex {
     /// Rename the backend-suffixed model ids in [`LEGACY_MODEL_IDS`] to their
     /// backend-free ids in every place a model id is stored:
     /// `embedding_config.active_model`, `note_embeddings.model_version` and
-    /// `embedding_examined.model_version` (the full set in this schema;
+    /// `embedding_examined.model_version` and `topic_state.model_version` (the full set in this schema;
     /// `docs/design/2026-10-27-cpu-tier-inference-backend.md`).
     ///
     /// Returns `true` if it changed anything. Guarantees:
@@ -397,14 +400,15 @@ impl super::SearchIndex {
         }
     }
 
-    /// Whether any legacy id remains in the pin or either embedding table.
+    /// Whether any legacy id remains in the pin or any table that stores a model id.
     #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
     fn legacy_model_ids_present(&self) -> Result<bool> {
         for (legacy, _) in LEGACY_MODEL_IDS {
             let present: bool = self.conn.query_row(
                 "SELECT EXISTS (SELECT 1 FROM embedding_config WHERE key = 'active_model' AND value = ?1)
                      OR EXISTS (SELECT 1 FROM note_embeddings WHERE model_version = ?1)
-                     OR EXISTS (SELECT 1 FROM embedding_examined WHERE model_version = ?1)",
+                     OR EXISTS (SELECT 1 FROM embedding_examined WHERE model_version = ?1)
+                     OR EXISTS (SELECT 1 FROM topic_state WHERE key = 'model_version' AND value = ?1)",
                 rusqlite::params![legacy],
                 |row| row.get(0),
             )?;
@@ -472,6 +476,13 @@ impl super::SearchIndex {
         )?;
         let examined_renamed = self.conn.execute(
             "UPDATE embedding_examined SET model_version = ?2 WHERE model_version = ?1",
+            params,
+        )?;
+
+        // A generation trained under the legacy id is the same vector space
+        // under the new id, so it is renamed, not stranded as `Stale`.
+        self.conn.execute(
+            "UPDATE topic_state SET value = ?2 WHERE key = 'model_version' AND value = ?1",
             params,
         )?;
 
