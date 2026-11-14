@@ -148,3 +148,36 @@ fn graph_rebuild_parses_into_opts_and_conflicts_with_backfill() {
     };
     assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
+
+#[derive(Parser)]
+struct TopicsHarness {
+    #[command(flatten)]
+    topics: TopicsArgs,
+}
+
+#[test]
+fn topics_train_overrides_parse_into_opts() {
+    let h = TopicsHarness::try_parse_from(["sb", "--train", "--k", "96", "--seed", "11"]).unwrap();
+    let opts: opts::TopicsOpts = (&h.topics).into();
+    assert!(opts.train && !opts.clear);
+    assert_eq!((opts.k, opts.seed), (Some(96), Some(11)));
+    let bare = TopicsHarness::try_parse_from(["sb"]).unwrap();
+    let opts: opts::TopicsOpts = (&bare.topics).into();
+    assert!(!opts.train && !opts.clear && opts.k.is_none() && opts.seed.is_none());
+}
+
+#[test]
+fn topics_k_and_seed_require_train_and_clear_conflicts_with_train() {
+    for argv in [
+        vec!["sb", "--k", "8"],
+        vec!["sb", "--seed", "3"],
+        vec!["sb", "--clear", "--k", "8"],
+        vec!["sb", "--clear", "--seed", "3"],
+        vec!["sb", "--train", "--clear"],
+    ] {
+        assert!(TopicsHarness::try_parse_from(&argv).is_err(), "{argv:?} must not parse");
+    }
+    assert!(TopicsHarness::try_parse_from(["sb", "--clear"]).unwrap().topics.clear);
+    let json = TopicsHarness::try_parse_from(["sb", "--format", "JSON"]).unwrap();
+    assert_eq!(json.topics.format, Some(crate::cli::output::Format::Json));
+}

@@ -92,3 +92,33 @@ fn ragged_rows_and_too_few_rows_are_typed_errors() {
     assert_eq!(train(&rows, 0, 3, 1, 1.0), Err(KmeansError::ZeroDimension));
     assert!(matches!(train(&rows, D, 11, 1, 1.0), Err(KmeansError::Fit(_))));
 }
+
+#[test]
+fn e_means_version_matches_the_workspace_dependency() {
+    let manifest = include_str!("../../../Cargo.toml");
+    let line = manifest
+        .lines()
+        .find(|l| l.trim_start().starts_with("e-means"))
+        .expect("workspace Cargo.toml has an e-means line");
+    assert!(
+        line.contains(&format!("version = \"{E_MEANS_VERSION}\"")),
+        "E_MEANS_VERSION {E_MEANS_VERSION} does not match `{line}`"
+    );
+}
+
+#[test]
+fn check_row_accepts_a_unit_row_and_names_a_bad_one() {
+    let rows = noise_rows(1);
+    assert_eq!(check_row(0, &rows), Ok(()));
+    let doubled: Vec<f32> = rows.iter().map(|v| v * 2.0).collect();
+    assert!(matches!(
+        check_row(9, &doubled),
+        Err(KmeansError::NotUnit { row: 9, .. })
+    ));
+    let mut nan = rows.clone();
+    nan[1] = f32::INFINITY;
+    assert!(matches!(
+        check_row(4, &nan),
+        Err(KmeansError::NonFinite { row: 4, column: 1, .. })
+    ));
+}

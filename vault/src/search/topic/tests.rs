@@ -538,3 +538,72 @@ fn a_model_id_rename_carries_the_topic_generation_with_it() {
         TopicStatus::Valid
     );
 }
+
+#[test]
+fn in_scope_summaries_returns_assigned_and_unassigned_notes_alike() {
+    let mut index = index_with_embedded_notes(3);
+    index.insert_test_note_row("e.md", "entity", 1_000).expect("note");
+    embed(&mut index, "e.md", [0.0, 0.0, 1.0, 0.0]);
+    train(&mut index, &[0, 1], 5_000);
+    let paths: Vec<_> = index
+        .in_scope_summaries(&[NoteType::Entity])
+        .unwrap()
+        .into_iter()
+        .map(|r| r.note_path)
+        .collect();
+    assert_eq!(paths, ["notes/0.md", "notes/1.md", "notes/2.md"]);
+}
+
+#[test]
+fn remove_out_of_scope_topics_drops_rows_that_left_scope_and_keeps_the_rest() {
+    let mut index = index_with_embedded_notes(4);
+    let a = assignments(&index, &[0, 1, 0, 1]);
+    let c = centroids(2);
+    index
+        .replace_generation(&generation(&c, &[2, 2], &a, 5_000))
+        .expect("replace");
+    assert_eq!(index.remove_out_of_scope_topics(&[]).unwrap(), 0, "all in scope");
+
+    index.set_test_quality("notes/1.md", "low").unwrap();
+    index
+        .conn
+        .execute("UPDATE notes SET note_type = 'entity' WHERE path = 'notes/2.md'", [])
+        .unwrap();
+    index
+        .conn
+        .execute("DELETE FROM note_embeddings WHERE note_path = 'notes/3.md'", [])
+        .unwrap();
+
+    let before = dump(&index);
+    assert_eq!(index.remove_out_of_scope_topics(&[NoteType::Entity]).unwrap(), 3);
+    let after = dump(&index);
+    assert_eq!(after.2.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["notes/0.md"]);
+    assert_eq!(before.0, after.0, "state untouched");
+    assert_eq!(before.1, after.1, "centroids untouched");
+}
+
+#[test]
+fn topic_scope_counts_eligible_in_scope_assigned_and_the_unembedded() {
+    let mut index = index_with_embedded_notes(3);
+    index.insert_test_note_row("e.md", "entity", 1_000).expect("note");
+    index.insert_test_note_row("bare.md", "article", 1_000).expect("note");
+    index.insert_test_note_row("low.md", "article", 1_000).expect("note");
+    index.set_test_quality("low.md", "low").unwrap();
+
+    let empty = index.topic_scope(&[NoteType::Entity]).unwrap();
+    assert_eq!(
+        (empty.eligible, empty.in_scope, empty.assigned, empty.mean_cosine),
+        (4, 3, 0, None)
+    );
+    assert_eq!(empty.eligible_unembedded, ["bare.md"]);
+
+    train(&mut index, &[0, 1], 5_000);
+    let trained = index.topic_scope(&[NoteType::Entity]).unwrap();
+    assert_eq!(trained.assigned, 2);
+    let mean = trained.mean_cosine.expect("mean");
+    assert!((mean - 0.9).abs() < 1e-6, "{mean}");
+
+    let with_entities = index.topic_scope(&[]).unwrap();
+    assert_eq!((with_entities.eligible, with_entities.in_scope), (5, 3));
+    assert_eq!(with_entities.eligible_unembedded, ["bare.md", "e.md"]);
+}

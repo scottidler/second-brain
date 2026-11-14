@@ -143,6 +143,33 @@ entities:
     # genuinely intended. Default 20.
     # max-render-resets-per-run: 20
 
+# `sb cortex topics` (docs/plan/2026-11-14-topic-map.md): spherical k-means
+# over in-scope summary vectors into `k` topics, stored in oracle's index.
+# No `enabled` flag: until `sb cortex topics --train` runs once there is no
+# generation and nothing happens. Centroids are frozen; a retrain is an
+# operator's order and renumbers every topic. All fields optional; defaults
+# live in cortex/src/config.rs TopicsConfig.
+topics:
+  # Topics per generation. Read by `--train` only (`--k` overrides it for one
+  # run); a stored generation keeps its own k, and `sb cortex topics` prints
+  # both when they differ. Default 64.
+  k: 64
+  # Training seed, recorded with every generation (`--seed` overrides it).
+  # Two seeds disagree on membership, which is why centroids are frozen.
+  seed: 7
+  # Passes over the training rows. Default 5.0.
+  epochs: 5.0
+  # Rayon threads in a pool built for each `--train` call; never the global
+  # pool governance uses, never the embed inference pool. Default 2.
+  workers: 2
+  # Daemon cadence (seconds) for assigning newly embedded notes. Default 900.
+  interval-secs: 900
+  # Note types that never get a topic: generated and aggregate notes form
+  # topics of their own (hub-only, daily-only) and carry no tags to label
+  # them. Values are `type:` names; an unknown name is a load error. Quality
+  # `low` notes and merge tombstones are always out of scope.
+  exclude-types: [entity, daily, digest, review, system, moc]
+
 # `sb cortex associate`: groups harvest session notes sharing a
 # content-derived `slug:` (borg's harvest naming, v0.12.2) and, per pairwise
 # similarity, merges same-subject sessions or cross-links distinct-but-related

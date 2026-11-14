@@ -39,6 +39,7 @@ pub mod sweep;
 pub mod tags;
 #[cfg(test)]
 pub mod testutil;
+pub mod topics;
 pub mod unlink;
 pub mod vault;
 

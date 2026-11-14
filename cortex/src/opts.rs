@@ -257,6 +257,19 @@ pub struct GraphOpts {
     pub rebuild: bool,
 }
 
+/// `sb cortex topics`: assign by default, or train, or clear.
+#[derive(Debug, Clone, Default)]
+pub struct TopicsOpts {
+    /// Train a new generation and replace the stored one.
+    pub train: bool,
+    /// Empty the topic tables, keeping the generation counter.
+    pub clear: bool,
+    /// Per-run override of `topics.k`; meaningful only with `train`.
+    pub k: Option<usize>,
+    /// Per-run override of `topics.seed`; meaningful only with `train`.
+    pub seed: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SummarizeOpts {
     /// Backfill legacy notes into the structured L2 (`Distilled`) contract.

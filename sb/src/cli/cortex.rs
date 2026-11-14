@@ -81,6 +81,9 @@ pub enum Command {
     Embed(EmbedArgs),
     /// Build the deterministic edge graph oracle's graph retrieval reads
     Graph(GraphArgs),
+    /// Assign notes to topics against frozen centroids (--train makes a new
+    /// generation, --clear backs out)
+    Topics(TopicsArgs),
     /// Merge or cross-link same-slug harvest session notes (dry-run unless --apply)
     Associate(AssociateArgs),
     /// Stub/refresh entity hub notes (concepts, creators, sources, dense tags)
@@ -454,6 +457,39 @@ impl From<GraphArgs> for opts::GraphOpts {
 }
 
 #[derive(Args)]
+pub struct TopicsArgs {
+    /// Train a new generation from the `topics:` config and replace the stored
+    /// one. Refuses while any eligible note is pending a summary embedding.
+    #[arg(long)]
+    pub train: bool,
+    /// Topics in this generation, overriding `topics.k`
+    // `conflicts_with = "clear"` is load-bearing: clap waives `requires` when
+    // a present arg conflicts with the required one, so `--clear --k 8`
+    // would otherwise parse.
+    #[arg(long, requires = "train", conflicts_with = "clear")]
+    pub k: Option<usize>,
+    /// Training seed, overriding `topics.seed`
+    #[arg(long, requires = "train", conflicts_with = "clear")]
+    pub seed: Option<u64>,
+    /// Empty the topic tables, keeping the generation counter
+    #[arg(long, conflicts_with = "train")]
+    pub clear: bool,
+    /// Output format. Default: yaml on a TTY, json when piped
+    #[arg(long, value_enum, ignore_case = true)]
+    pub format: Option<crate::cli::output::Format>,
+}
+impl From<&TopicsArgs> for opts::TopicsOpts {
+    fn from(a: &TopicsArgs) -> Self {
+        Self {
+            train: a.train,
+            clear: a.clear,
+            k: a.k,
+            seed: a.seed,
+        }
+    }
+}
+
+#[derive(Args)]
 pub struct AssociateArgs {
     /// Execute the plan: merge/cross-link same-slug session note groups
     /// (default: dry-run reporting what would happen, writes zero bytes).
@@ -703,6 +739,13 @@ impl CortexCli {
                     stats.source_member,
                     stats.skipped,
                 );
+            }
+            Command::Topics(a) => {
+                let report = cortex::topics::run(&config, &(&a).into())?;
+                crate::cli::output::emit(&report, a.format)?;
+                if report.status == vault::search::TopicStatus::Stale {
+                    return Err(crate::error::SilentFailure.into());
+                }
             }
             Command::Associate(a) => {
                 let apply = a.apply;

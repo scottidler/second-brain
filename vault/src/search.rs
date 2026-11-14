@@ -359,8 +359,10 @@ pub use schema::migrated_model_id;
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 mod topic;
 
+#[cfg(all(any(feature = "vec-candle", feature = "vec-onnx"), any(test, feature = "test-util")))]
+pub use topic::TopicTables;
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
-pub use topic::{Assignment, NewGeneration, TopicMeta, TopicState, TopicStatus, UnassignedRow};
+pub use topic::{Assignment, NewGeneration, SummaryVector, TopicMeta, TopicScope, TopicState, TopicStatus};
 
 mod graph;
 

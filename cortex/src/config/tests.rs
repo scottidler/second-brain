@@ -406,3 +406,37 @@ fn embed_backend_unknown_value_fails_config_load() {
     assert!(err.contains("fastembed"), "{err}");
     assert!(err.contains("auto, candle, onnx"), "{err}");
 }
+
+#[test]
+fn topics_config_defaults_match_the_design_doc() {
+    let topics = TopicsConfig::default();
+    assert_eq!(
+        (topics.k, topics.seed, topics.workers, topics.interval_secs),
+        (64, 7, 2, 900)
+    );
+    assert_eq!(topics.epochs, 5.0);
+    let names: Vec<&str> = topics.exclude_types.iter().map(|t| t.as_str()).collect();
+    assert_eq!(names, ["entity", "daily", "digest", "review", "system", "moc"]);
+}
+
+#[test]
+fn topics_config_deserializes_kebab_case_and_note_types() {
+    let config: Config =
+        serde_yaml::from_str("topics:\n  k: 32\n  interval-secs: 60\n  exclude-types: [entity, session]\n")
+            .expect("parse");
+    assert_eq!(config.topics.k, 32);
+    assert_eq!(config.topics.interval_secs, 60);
+    assert_eq!(config.topics.seed, 7, "unset keys keep their default");
+    assert_eq!(
+        config.topics.exclude_types,
+        [vault::schema::NoteType::Entity, vault::schema::NoteType::Session]
+    );
+}
+
+#[test]
+fn topics_config_rejects_an_unknown_field_and_an_unknown_note_type() {
+    let typo = serde_yaml::from_str::<Config>("topics:\n  kk: 32\n").expect_err("unknown field");
+    assert!(typo.to_string().contains("kk"), "{typo}");
+    let bad_type = serde_yaml::from_str::<Config>("topics:\n  exclude-types: [entities]\n").expect_err("unknown type");
+    assert!(bad_type.to_string().contains("entities"), "{bad_type}");
+}

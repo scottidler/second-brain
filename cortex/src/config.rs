@@ -22,6 +22,7 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub graph: GraphConfig,
     pub entities: EntitiesConfig,
+    pub topics: TopicsConfig,
     pub tags: TagsSection,
     /// Root of borg's per-trace staging directories. cortex reads
     /// `<staging-root>/<trace>/distilled.yml` READ-ONLY from two places: the
@@ -74,6 +75,7 @@ impl Default for Config {
             embed: EmbedConfig::default(),
             graph: GraphConfig::default(),
             entities: EntitiesConfig::default(),
+            topics: TopicsConfig::default(),
             tags: TagsSection::default(),
             staging_root: vault::paths::borg_stages_dir(),
             archive_root: vault::paths::borg_sources_dir(),
@@ -113,6 +115,52 @@ impl Default for EntitiesConfig {
             fabric_timeout_secs: 120,
             discover_interval_secs: 86_400,
             render: RenderConfig::default(),
+        }
+    }
+}
+
+/// Knobs for `sb cortex topics` (`docs/plan/2026-11-14-topic-map.md`):
+/// spherical k-means over in-scope summary vectors, frozen centroids,
+/// assignment of new notes against them. There is no `enabled` flag: until an
+/// operator runs `--train` there is no generation and nothing runs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct TopicsConfig {
+    /// Topics per generation. Read by `--train` only; a stored generation
+    /// keeps the `k` it was trained with.
+    pub k: usize,
+    /// Training seed, recorded with every generation.
+    pub seed: u64,
+    /// Passes over the training rows.
+    pub epochs: f64,
+    /// Rayon threads in the pool built for one `--train` call. Never the
+    /// global pool and never the embed inference pool.
+    pub workers: usize,
+    /// Daemon cadence (seconds) for the assign tick.
+    pub interval_secs: u64,
+    /// Note types that never get a topic. Generated and aggregate notes
+    /// (hubs, daily notes, digests) form topics of their own and carry no
+    /// tags to label them.
+    pub exclude_types: Vec<vault::schema::NoteType>,
+}
+
+impl Default for TopicsConfig {
+    fn default() -> Self {
+        use vault::schema::NoteType;
+        Self {
+            k: 64,
+            seed: 7,
+            epochs: 5.0,
+            workers: 2,
+            interval_secs: 900,
+            exclude_types: vec![
+                NoteType::Entity,
+                NoteType::Daily,
+                NoteType::Digest,
+                NoteType::Review,
+                NoteType::System,
+                NoteType::Moc,
+            ],
         }
     }
 }

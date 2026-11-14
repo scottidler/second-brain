@@ -11,6 +11,10 @@ use log::debug;
 /// How far a row's L2 norm may sit from 1.0 before [`train`] refuses it.
 pub const NORM_TOLERANCE: f32 = 1e-3;
 
+/// The `e-means` release this wrapper is built against, recorded with every
+/// generation. A test pins it to the workspace `Cargo.toml` dependency line.
+pub const E_MEANS_VERSION: &str = "0.2.1";
+
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum KmeansError {
     #[error("d must be at least 1")]
@@ -82,17 +86,24 @@ fn validate(rows: &[f32], d: usize) -> Result<(), KmeansError> {
         return Err(KmeansError::RaggedRows { len: rows.len(), d });
     }
     for (row, values) in rows.chunks_exact(d).enumerate() {
-        if let Some(column) = values.iter().position(|v| !v.is_finite()) {
-            return Err(KmeansError::NonFinite {
-                row,
-                column,
-                value: values[column],
-            });
-        }
-        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if (norm - 1.0).abs() > NORM_TOLERANCE {
-            return Err(KmeansError::NotUnit { row, norm });
-        }
+        check_row(row, values)?;
+    }
+    Ok(())
+}
+
+/// One row's check, the same one [`train`] runs: every value finite and the
+/// L2 norm within [`NORM_TOLERANCE`] of 1.0. `row` only labels the error.
+pub fn check_row(row: usize, values: &[f32]) -> Result<(), KmeansError> {
+    if let Some(column) = values.iter().position(|v| !v.is_finite()) {
+        return Err(KmeansError::NonFinite {
+            row,
+            column,
+            value: values[column],
+        });
+    }
+    let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if (norm - 1.0).abs() > NORM_TOLERANCE {
+        return Err(KmeansError::NotUnit { row, norm });
     }
     Ok(())
 }

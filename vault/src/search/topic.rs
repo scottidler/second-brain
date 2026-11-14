@@ -80,10 +80,10 @@ pub struct NewGeneration<'a> {
     pub exclude_types: &'a [NoteType],
 }
 
-/// An in-scope note whose topic is missing or was assigned from an older
-/// embedding.
+/// An in-scope note's active-model summary vector, as read by
+/// [`SearchIndex::unassigned`] and [`SearchIndex::in_scope_summaries`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct UnassignedRow {
+pub struct SummaryVector {
     pub note_path: String,
     pub embedding_id: i64,
     pub embedding: Vec<f32>,
@@ -105,7 +105,27 @@ pub struct TopicMeta {
     pub exclude_types: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Counts over the topic scope, read in one transaction by
+/// [`SearchIndex::topic_scope`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopicScope {
+    /// Notes whose type is not excluded, whose quality is not `low`, and that
+    /// are not merge tombstones.
+    pub eligible: usize,
+    /// Eligible notes holding an active-model `summary` row.
+    pub in_scope: usize,
+    /// Rows in `note_topics`.
+    pub assigned: usize,
+    /// Mean `note_topics.cosine`, `None` when there are no rows.
+    pub mean_cosine: Option<f64>,
+    /// Eligible notes with no active-model `summary` row, ordered by path.
+    /// Which of them are pending is the embed loop's call
+    /// (`stale_embedding_targets`), not this module's.
+    pub eligible_unembedded: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TopicStatus {
     /// No generation: never trained, or cleared.
     Absent,
@@ -404,40 +424,127 @@ impl SearchIndex {
     /// rules that `quality` is not `low` and the note is not a merge tombstone.
     /// In scope also means holding an active-model `summary` row. Ordered by
     /// `note_path`, at most `limit`.
-    pub fn unassigned(&self, exclude_types: &[NoteType], limit: usize) -> Result<Vec<UnassignedRow>> {
+    pub fn unassigned(&self, exclude_types: &[NoteType], limit: usize) -> Result<Vec<SummaryVector>> {
         log::debug!(
             "search::unassigned: exclude_types={} limit={limit}",
             exclude_types.len()
         );
+        self.summary_vectors(exclude_types, true, Some(limit))
+    }
+
+    /// Every in-scope note's active-model summary vector, ordered by
+    /// `note_path`: the training set for a new generation. Same scope rule as
+    /// [`unassigned`](Self::unassigned).
+    pub fn in_scope_summaries(&self, exclude_types: &[NoteType]) -> Result<Vec<SummaryVector>> {
+        log::debug!("search::in_scope_summaries: exclude_types={}", exclude_types.len());
+        self.summary_vectors(exclude_types, false, None)
+    }
+
+    /// Delete the `note_topics` rows of notes that left scope: a type now
+    /// excluded, quality now `low`, a merge tombstone, or no active-model
+    /// `summary` row any more. One `BEGIN IMMEDIATE`; returns the rows removed.
+    pub fn remove_out_of_scope_topics(&mut self, exclude_types: &[NoteType]) -> Result<usize> {
+        let (eligible, mut args) = eligible_filter(exclude_types);
+        let sql = format!(
+            "DELETE FROM note_topics
+              WHERE note_path NOT IN (
+                    SELECT n.path
+                      FROM notes n
+                      JOIN note_embeddings e
+                        ON e.note_path = n.path AND e.kind = ? AND e.model_version = ?
+                     WHERE {eligible})"
+        );
+        let active_model = self.active_embedding_model()?;
+        let mut all: Vec<rusqlite::types::Value> =
+            vec![EmbeddingKind::Summary.as_str().to_string().into(), active_model.into()];
+        all.append(&mut args);
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = tx.execute(&sql, params_from_iter(all))?;
+        tx.commit()?;
+        log::debug!("search::remove_out_of_scope_topics: removed={removed}");
+        Ok(removed)
+    }
+
+    /// Eligible, in-scope and assigned counts, the mean assigned cosine, and
+    /// the eligible notes with no active-model summary row, from one read
+    /// transaction.
+    pub fn topic_scope(&self, exclude_types: &[NoteType]) -> Result<TopicScope> {
+        let active_model = self.active_embedding_model()?;
+        let (eligible_sql, args) = eligible_filter(exclude_types);
+        let summary_row = "SELECT 1 FROM note_embeddings e
+                            WHERE e.note_path = n.path AND e.kind = ? AND e.model_version = ?";
+        let with_summary_args = || {
+            let mut all: Vec<rusqlite::types::Value> = vec![
+                EmbeddingKind::Summary.as_str().to_string().into(),
+                active_model.clone().into(),
+            ];
+            all.extend(args.iter().cloned());
+            all
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        let eligible: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM notes n WHERE {eligible_sql}"),
+            params_from_iter(args.iter().cloned()),
+            |row| row.get(0),
+        )?;
+        let in_scope: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM notes n WHERE EXISTS ({summary_row}) AND {eligible_sql}"),
+            params_from_iter(with_summary_args()),
+            |row| row.get(0),
+        )?;
+        let eligible_unembedded = tx
+            .prepare(&format!(
+                "SELECT n.path FROM notes n WHERE NOT EXISTS ({summary_row}) AND {eligible_sql} ORDER BY n.path"
+            ))?
+            .query_map(params_from_iter(with_summary_args()), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let (assigned, mean_cosine): (i64, Option<f64>) =
+            tx.query_row("SELECT COUNT(*), AVG(cosine) FROM note_topics", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        tx.commit()?;
+        Ok(TopicScope {
+            eligible: eligible as usize,
+            in_scope: in_scope as usize,
+            assigned: assigned as usize,
+            mean_cosine,
+            eligible_unembedded,
+        })
+    }
+
+    fn summary_vectors(
+        &self,
+        exclude_types: &[NoteType],
+        only_unassigned: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<SummaryVector>> {
         let active_model = self.active_embedding_model()?;
         let dim = self.active_embedding_dim()?;
-        let placeholders = vec!["?"; exclude_types.len()].join(",");
-        let type_clause = if exclude_types.is_empty() {
-            String::new()
+        let (eligible, eligible_args) = eligible_filter(exclude_types);
+        let unassigned_clause = if only_unassigned {
+            "AND (t.note_path IS NULL OR t.embedding_id != e.id)"
         } else {
-            format!("AND n.note_type NOT IN ({placeholders})")
+            ""
         };
+        let limit_clause = if limit.is_some() { "LIMIT ?" } else { "" };
         let sql = format!(
             "SELECT n.path, e.id, e.embedding
                FROM notes n
                JOIN note_embeddings e
                  ON e.note_path = n.path AND e.kind = ? AND e.model_version = ?
                LEFT JOIN note_topics t ON t.note_path = n.path
-              WHERE (t.note_path IS NULL OR t.embedding_id != e.id)
-                AND COALESCE(n.quality, '') != 'low'
-                AND COALESCE(n.superseded_by, '') = ''
-                {type_clause}
+              WHERE {eligible}
+                {unassigned_clause}
               ORDER BY n.path
-              LIMIT ?"
+              {limit_clause}"
         );
         let mut args: Vec<rusqlite::types::Value> =
             vec![EmbeddingKind::Summary.as_str().to_string().into(), active_model.into()];
-        args.extend(
-            exclude_types
-                .iter()
-                .map(|t| rusqlite::types::Value::from(t.as_str().to_string())),
-        );
-        args.push((limit as i64).into());
+        args.extend(eligible_args);
+        if let Some(limit) = limit {
+            args.push((limit as i64).into());
+        }
 
         let mut stmt = self.conn.prepare(&sql)?;
         let raw = stmt
@@ -452,7 +559,7 @@ impl SearchIndex {
         raw.into_iter()
             .map(|(note_path, embedding_id, blob)| {
                 validate_embedding_bytes(&blob, dim).map_err(|e| eyre!("{note_path}: {e}"))?;
-                Ok(UnassignedRow {
+                Ok(SummaryVector {
                     note_path,
                     embedding_id,
                     embedding: decode_f32(&blob),
@@ -473,6 +580,64 @@ impl SearchIndex {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Raw contents of the three topic tables, for tests in other crates:
+/// `topic_state` key/value pairs, `(topic, centroid, trained_rows)`, and
+/// `(note_path, topic, embedding_id, assigned_at)`, each ordered by key.
+#[cfg(any(test, feature = "test-util"))]
+pub type TopicTables = (
+    Vec<(String, String)>,
+    Vec<(i64, Vec<u8>, i64)>,
+    Vec<(String, i64, i64, i64)>,
+);
+
+#[cfg(any(test, feature = "test-util"))]
+impl SearchIndex {
+    /// Dump the three topic tables, so a test can prove a failed write left
+    /// them byte-identical.
+    pub fn test_topic_tables(&self) -> Result<TopicTables> {
+        let state = self
+            .conn
+            .prepare("SELECT key, value FROM topic_state ORDER BY key")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let centroids = self
+            .conn
+            .prepare("SELECT topic, centroid, trained_rows FROM topic_centroids ORDER BY topic")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let notes = self
+            .conn
+            .prepare("SELECT note_path, topic, embedding_id, assigned_at FROM note_topics ORDER BY note_path")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((state, centroids, notes))
+    }
+
+    /// Set a note's `quality` column (`cortex-quality` in frontmatter).
+    pub fn set_test_quality(&self, path: &str, quality: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE notes SET quality = ?2 WHERE path = ?1", params![path, quality])?;
+        Ok(())
+    }
+}
+
+/// The eligibility rule over `notes n`, defined without reference to
+/// embeddings: type not in `exclude_types` (a note with no type is not in the
+/// list), `quality` is not `low`, and not a merge tombstone. Returns the SQL
+/// fragment and its bound values, in order.
+fn eligible_filter(exclude_types: &[NoteType]) -> (String, Vec<rusqlite::types::Value>) {
+    let mut sql = "COALESCE(n.quality, '') != 'low' AND COALESCE(n.superseded_by, '') = ''".to_string();
+    if !exclude_types.is_empty() {
+        let placeholders = vec!["?"; exclude_types.len()].join(",");
+        sql.push_str(&format!(" AND COALESCE(n.note_type, '') NOT IN ({placeholders})"));
+    }
+    let args = exclude_types
+        .iter()
+        .map(|t| rusqlite::types::Value::from(t.as_str().to_string()))
+        .collect();
+    (sql, args)
 }
 
 fn load_state(tx: &rusqlite::Transaction<'_>) -> Result<TopicState> {
