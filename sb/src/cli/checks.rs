@@ -104,6 +104,10 @@ pub fn all_sections() -> Vec<Section> {
             findings: embedding_findings(),
         },
         Section {
+            name: "topics",
+            findings: topics::findings(),
+        },
+        Section {
             name: "borg",
             findings: borg_findings(),
         },
@@ -1424,4 +1428,5 @@ mod fabric_patterns;
 mod stop_timeout;
 #[cfg(test)]
 mod tests;
+mod topics;
 mod vocab;

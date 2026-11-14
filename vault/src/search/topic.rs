@@ -627,6 +627,107 @@ impl SearchIndex {
 /// embeddings: type not in `exclude_types` (a note with no type is not in the
 /// list), `quality` is not `low`, and not a merge tombstone. Returns the SQL
 /// fragment and its bound values, in order.
+/// What `sb doctor` reports about the topic map, read without opening the
+/// index for write. See [`SearchIndex::peek_topics`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopicPeek {
+    pub status: TopicStatus,
+    /// `None` when there is no generation.
+    pub meta: Option<TopicMeta>,
+    /// Eligible notes holding an active-model summary row.
+    pub in_scope: usize,
+    /// Rows in `note_topics`.
+    pub assigned: usize,
+    /// Rows with `assigned_at > trained_at`: notes the daemon tick assigned
+    /// after the train. Zero when there is no generation.
+    pub assigned_since_train: usize,
+    /// Mean cosine of those rows, `None` when there are none.
+    pub since_train_mean_cosine: Option<f64>,
+}
+
+impl SearchIndex {
+    /// The topic map's health at `db_path`, through a read-only connection:
+    /// never creates the file, never runs the schema migration, never takes a
+    /// write lock. `Ok(None)` when the file or the model pin is absent; an
+    /// index that predates the topic tables reads as `Absent` with zero
+    /// counts. Corrupt topic state is an error.
+    pub fn peek_topics(db_path: &std::path::Path, exclude_types: &[NoteType]) -> Result<Option<TopicPeek>> {
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let conn = rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| eyre!("open {} read-only: {e}", db_path.display()))?;
+        let tx = conn.unchecked_transaction()?;
+        let pin = |key: &str| -> Result<Option<String>> {
+            match tx.query_row("SELECT value FROM embedding_config WHERE key = ?1", [key], |row| {
+                row.get::<_, String>(0)
+            }) {
+                Ok(v) => Ok(Some(v)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(eyre!("read embedding_config.{key} from {}: {e}", db_path.display())),
+            }
+        };
+        let (Some(model), Some(dim)) = (pin("active_model")?, pin("active_dim")?) else {
+            return Ok(None);
+        };
+        let dim: usize = dim
+            .parse()
+            .map_err(|e| eyre!("embedding_config.active_dim is not an integer: {dim} ({e})"))?;
+        let tables: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+               AND name IN ('topic_state', 'topic_centroids', 'note_topics')",
+            [],
+            |row| row.get(0),
+        )?;
+        if tables < 3 {
+            return Ok(Some(TopicPeek {
+                status: TopicStatus::Absent,
+                meta: None,
+                in_scope: 0,
+                assigned: 0,
+                assigned_since_train: 0,
+                since_train_mean_cosine: None,
+            }));
+        }
+        let state = load_state(&tx)?;
+        let status = state.status(&model, dim)?;
+        let meta = state.meta()?;
+
+        let (eligible, eligible_args) = eligible_filter(exclude_types);
+        let mut args: Vec<rusqlite::types::Value> =
+            vec![EmbeddingKind::Summary.as_str().to_string().into(), model.into()];
+        args.extend(eligible_args);
+        let in_scope: i64 = tx.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM notes n
+                  WHERE EXISTS (SELECT 1 FROM note_embeddings e
+                                 WHERE e.note_path = n.path AND e.kind = ? AND e.model_version = ?)
+                    AND {eligible}"
+            ),
+            params_from_iter(args),
+            |row| row.get(0),
+        )?;
+        let assigned: i64 = tx.query_row("SELECT COUNT(*) FROM note_topics", [], |row| row.get(0))?;
+        let (since, since_mean): (i64, Option<f64>) = match &meta {
+            Some(m) => tx.query_row(
+                "SELECT COUNT(*), AVG(cosine) FROM note_topics WHERE assigned_at > ?1",
+                [m.trained_at],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?,
+            None => (0, None),
+        };
+        tx.commit()?;
+        Ok(Some(TopicPeek {
+            status,
+            meta,
+            in_scope: in_scope as usize,
+            assigned: assigned as usize,
+            assigned_since_train: since as usize,
+            since_train_mean_cosine: since_mean,
+        }))
+    }
+}
+
 fn eligible_filter(exclude_types: &[NoteType]) -> (String, Vec<rusqlite::types::Value>) {
     let mut sql = "COALESCE(n.quality, '') != 'low' AND COALESCE(n.superseded_by, '') = ''".to_string();
     if !exclude_types.is_empty() {

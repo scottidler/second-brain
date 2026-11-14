@@ -223,6 +223,18 @@ fn train_index(
 }
 
 fn assign_index(index: &mut SearchIndex, topics: &TopicsConfig, now: i64) -> Result<TopicsReport> {
+    assign_index_until(index, topics, now, &|| false).map(|(report, _stopped)| report)
+}
+
+/// [`assign_index`] that reads `stopped` before the removal write and before
+/// each batch's read, and returns whether it stopped early. A stopped run
+/// leaves every batch it did write whole; the next run finishes the rest.
+fn assign_index_until(
+    index: &mut SearchIndex,
+    topics: &TopicsConfig,
+    now: i64,
+    stopped: &dyn Fn() -> bool,
+) -> Result<(TopicsReport, bool)> {
     let active_model = index.active_embedding_model()?;
     let dim = index.active_embedding_dim()?;
     let status = index.topic_state()?.status(&active_model, dim)?;
@@ -230,19 +242,27 @@ fn assign_index(index: &mut SearchIndex, topics: &TopicsConfig, now: i64) -> Res
     match status {
         TopicStatus::Absent => {
             log::debug!("cortex::topics::assign: no generation; nothing to assign");
-            return report(index, topics, 0, 0);
+            return Ok((report(index, topics, 0, 0)?, false));
         }
         TopicStatus::Stale => {
             log::debug!("cortex::topics::assign: stale generation; nothing written");
-            return report(index, topics, 0, 0);
+            return Ok((report(index, topics, 0, 0)?, false));
         }
         TopicStatus::Valid => {}
     }
 
+    if stopped() {
+        return Ok((report(index, topics, 0, 0)?, true));
+    }
     let removed = index.remove_out_of_scope_topics(&topics.exclude_types)?;
     let (meta, centroids) = index.topic_centroids()?;
     let mut assigned = 0;
+    let mut was_stopped = false;
     loop {
+        if stopped() {
+            was_stopped = true;
+            break;
+        }
         let rows = index.unassigned(&topics.exclude_types, ASSIGN_BATCH)?;
         if rows.is_empty() {
             break;
@@ -271,7 +291,83 @@ fn assign_index(index: &mut SearchIndex, topics: &TopicsConfig, now: i64) -> Res
         "cortex::topics::assign: generation={} assigned={assigned} removed={removed}",
         meta.generation
     );
-    report(index, topics, assigned, removed)
+    Ok((report(index, topics, assigned, removed)?, was_stopped))
+}
+
+/// What one daemon tick did, so a test (and the daemon's log line) can say.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TickOutcome {
+    /// A train, `--clear` or embed run holds the lock; the next tick retries.
+    LockHeld,
+    /// No generation: nothing to assign against.
+    NoGeneration,
+    /// The generation was trained under a model or dim the index no longer
+    /// pins. Nothing was written; one WARN named `sb cortex topics --train`.
+    Stale,
+    /// The daemon's stop flag was set before the read or the write.
+    Stopped,
+    Assigned {
+        generation: i64,
+        assigned: usize,
+        removed: usize,
+    },
+}
+
+/// The daemon's assign tick: [`assign`] under the embed lock, which it skips
+/// rather than waits for. No generation is a no-op, a stale one writes nothing
+/// and warns. `stopped` is read before the read and before each write.
+pub fn daemon_tick(config: &Config, stopped: &dyn Fn() -> bool) -> Result<TickOutcome> {
+    let lock = match crate::embed::acquire_lock() {
+        Ok(lock) => lock,
+        Err(e) if e.downcast_ref::<crate::embed::EmbedLockHeld>().is_some() => {
+            log::debug!("cortex::topics::daemon_tick: lock held; will retry next tick");
+            return Ok(TickOutcome::LockHeld);
+        }
+        Err(e) => return Err(e),
+    };
+    if stopped() {
+        return Ok(TickOutcome::Stopped);
+    }
+    let mut index = open_index(config)?;
+    let outcome = tick_index(&mut index, &config.topics, now_secs(), stopped)?;
+    drop(lock);
+    Ok(outcome)
+}
+
+fn tick_index(
+    index: &mut SearchIndex,
+    topics: &TopicsConfig,
+    now: i64,
+    stopped: &dyn Fn() -> bool,
+) -> Result<TickOutcome> {
+    let active_model = index.active_embedding_model()?;
+    let dim = index.active_embedding_dim()?;
+    match index.topic_state()?.status(&active_model, dim)? {
+        TopicStatus::Absent => {
+            log::debug!("cortex::topics::daemon_tick: no generation; nothing to do");
+            Ok(TickOutcome::NoGeneration)
+        }
+        TopicStatus::Stale => {
+            log::warn!(
+                "cortex::topics::daemon_tick: the topic generation does not match the index's embedding model; \
+                 assigning nothing until `sb cortex topics --train` runs"
+            );
+            Ok(TickOutcome::Stale)
+        }
+        TopicStatus::Valid => {
+            let (report, was_stopped) = assign_index_until(index, topics, now, stopped)?;
+            if was_stopped {
+                return Ok(TickOutcome::Stopped);
+            }
+            Ok(TickOutcome::Assigned {
+                generation: report
+                    .generation
+                    .ok_or_else(|| eyre!("a valid generation reported none"))?,
+                assigned: report.assigned_this_run,
+                removed: report.removed_this_run,
+            })
+        }
+    }
 }
 
 fn clear_index(index: &mut SearchIndex, topics: &TopicsConfig) -> Result<TopicsReport> {

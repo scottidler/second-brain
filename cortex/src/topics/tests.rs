@@ -432,3 +432,89 @@ fn the_report_serializes_in_kebab_case_with_a_lowercase_status() {
     }
     assert!(json.get("exclude-types-drift").is_none());
 }
+
+fn never() -> bool {
+    false
+}
+
+#[test]
+fn tick_assigns_a_post_train_note_and_leaves_the_generation_alone() {
+    let mut index = fixture();
+    let topics = topics_config(3);
+    train_index(&mut index, &topics, None, None, 5_000).expect("train");
+    let axis1_topic = topic_of(&index, "notes/a1-0.md").expect("assigned");
+    add_embedded(&mut index, "notes/late.md", "article", &blob_vector(1, 4242));
+
+    let outcome = tick_index(&mut index, &topics, 6_000, &never).expect("tick");
+    assert_eq!(
+        outcome,
+        TickOutcome::Assigned {
+            generation: 1,
+            assigned: 1,
+            removed: 0
+        }
+    );
+    assert_eq!(topic_of(&index, "notes/late.md"), Some(axis1_topic));
+    let state = tables(&index).0;
+    assert!(state.contains(&("generation".to_string(), "1".to_string())));
+
+    let idle = tick_index(&mut index, &topics, 7_000, &never).expect("idle tick");
+    assert_eq!(
+        idle,
+        TickOutcome::Assigned {
+            generation: 1,
+            assigned: 0,
+            removed: 0
+        }
+    );
+}
+
+#[test]
+fn tick_with_no_generation_writes_nothing_and_is_a_no_op() {
+    let mut index = fixture();
+    let before = tables(&index);
+    let outcome = tick_index(&mut index, &topics_config(3), 6_000, &never).expect("tick");
+    assert_eq!(outcome, TickOutcome::NoGeneration);
+    assert_eq!(tables(&index), before);
+    assert!(before.2.is_empty(), "the fixture holds no assignments");
+}
+
+#[test]
+fn tick_with_a_stale_generation_writes_nothing() {
+    let mut index = fixture();
+    let topics = topics_config(3);
+    train_index(&mut index, &topics, None, None, 5_000).expect("train");
+    index.set_active_embedding("other-model", DIM).expect("repin");
+    index
+        .insert_test_note_row("notes/late.md", "article", 100)
+        .expect("note");
+    let before = tables(&index);
+
+    let outcome = tick_index(&mut index, &topics, 6_000, &never).expect("tick");
+    assert_eq!(outcome, TickOutcome::Stale);
+    assert_eq!(tables(&index), before, "a stale tick writes no row and no state");
+}
+
+#[test]
+fn tick_stopped_before_the_write_writes_nothing() {
+    let mut index = fixture();
+    let topics = topics_config(3);
+    train_index(&mut index, &topics, None, None, 5_000).expect("train");
+    add_embedded(&mut index, "notes/late.md", "article", &blob_vector(1, 4242));
+    let before = tables(&index);
+
+    let outcome = tick_index(&mut index, &topics, 6_000, &|| true).expect("tick");
+    assert_eq!(outcome, TickOutcome::Stopped);
+    assert_eq!(tables(&index), before);
+}
+
+#[test]
+fn daemon_tick_skips_when_the_embed_lock_is_held() {
+    let _env = crate::testutil::lock_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::set("XDG_DATA_HOME", tmp.path());
+    let held = crate::embed::acquire_lock().expect("hold the lock");
+    let outcome = daemon_tick(&Config::default(), &never).expect("tick");
+    assert_eq!(outcome, TickOutcome::LockHeld);
+    drop(held);
+}

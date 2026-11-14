@@ -15,7 +15,8 @@ Each command exposes `run(vault_root, config, opts)` returning typed reports/out
 - `embed::run` — read/infer/write loop: pull stale rows → batch-embed → upsert `note_embeddings`.
 - `summarize::run` — `--backfill`: walk vault, infer distill kind, invoke Fabric, rewrite legacy notes with rendered sections.
 - `migrate::run` — planned file moves + frontmatter/value transforms + `field-to-tags` / `tags-remove` tag transforms (a `field-to-tags` value outside the loaded vocabulary is dropped with a log line, never written; the dry-run flags notes that would exceed the cap and notes already carrying two or more of the migrated names).
-- `daemon::run` — long-running watcher + scheduled sweep/intel/embed ticks; systemd install/uninstall.
+- `daemon::run` — long-running watcher + scheduled sweep/intel/embed/topics ticks; systemd install/uninstall.
+- `topics::daemon_tick` — the daemon's `topics.interval-secs` arm (after the embed arm, under `block_in_place`): assign under the embed lock, skipped on `EmbedLockHeld`; no generation is a DEBUG no-op, a `Stale` generation writes nothing and logs one WARN naming `sb cortex topics --train`. Returns a `TickOutcome`; takes a `stopped` closure, read before the read and before each write.
 - `lib::lint` / `lib::link` — dispatch enabled lint/linking rules.
 - `lib::unlink` — retract stoplisted wikilink markup the linker already landed.
 - `intel::run` — weekly/daily summary generation.

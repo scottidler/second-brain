@@ -607,3 +607,94 @@ fn topic_scope_counts_eligible_in_scope_assigned_and_the_unembedded() {
     assert_eq!((with_entities.eligible, with_entities.in_scope), (5, 3));
     assert_eq!(with_entities.eligible_unembedded, ["bare.md", "e.md"]);
 }
+
+fn db_with_trained_generation() -> (tempfile::TempDir, std::path::PathBuf, SearchIndex) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("oracle.db");
+    let mut index = SearchIndex::open(&path).expect("open");
+    index.set_active_embedding(MODEL, DIM).expect("pin");
+    for i in 0..3 {
+        let note = format!("notes/{i}.md");
+        index.insert_test_note_row(&note, "article", 1_000).expect("note");
+        embed(&mut index, &note, [1.0, i as f32, 0.0, 0.0]);
+    }
+    train(&mut index, &[0, 0, 1], 5_000);
+    (dir, path, index)
+}
+
+#[test]
+fn peek_topics_is_none_without_a_file_or_a_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("absent.db");
+    assert_eq!(SearchIndex::peek_topics(&path, &[]).expect("absent file"), None);
+    assert!(!path.exists(), "peeking must not create the file");
+
+    let unpinned = dir.path().join("unpinned.db");
+    let index = SearchIndex::open(&unpinned).expect("open");
+    index.conn.execute("DELETE FROM embedding_config", []).expect("unpin");
+    drop(index);
+    assert_eq!(SearchIndex::peek_topics(&unpinned, &[]).expect("no pin"), None);
+}
+
+#[test]
+fn peek_topics_reports_counts_and_the_since_train_cosine() {
+    let (_dir, path, mut index) = db_with_trained_generation();
+    index
+        .insert_test_note_row("notes/late.md", "article", 1_000)
+        .expect("note");
+    embed(&mut index, "notes/late.md", [0.0, 1.0, 0.0, 0.0]);
+    let late = Assignment {
+        embedding_id: embedding_id(&index, "notes/late.md"),
+        note_path: "notes/late.md".to_string(),
+        topic: 1,
+        cosine: 0.5,
+    };
+    index.assign_batch(&[late], 6_000).expect("assign");
+
+    let peek = SearchIndex::peek_topics(&path, &[]).expect("peek").expect("some");
+    assert_eq!(peek.status, TopicStatus::Valid);
+    assert_eq!(peek.meta.expect("meta").generation, 1);
+    assert_eq!((peek.in_scope, peek.assigned), (4, 4));
+    assert_eq!(
+        peek.assigned_since_train, 1,
+        "train-time rows carry assigned_at == trained_at"
+    );
+    assert_eq!(peek.since_train_mean_cosine, Some(0.5));
+}
+
+#[test]
+fn peek_topics_reads_stale_and_writes_nothing() {
+    let (_dir, path, mut index) = db_with_trained_generation();
+    index.set_active_embedding("next-model", DIM).expect("repin");
+    let before = index.test_topic_tables().expect("dump");
+
+    let peek = SearchIndex::peek_topics(&path, &[]).expect("peek").expect("some");
+    assert_eq!(peek.status, TopicStatus::Stale);
+    assert_eq!(peek.in_scope, 0, "no summary row under the new pin");
+    assert_eq!(index.test_topic_tables().expect("dump"), before);
+}
+
+#[test]
+fn peek_topics_on_an_index_without_topic_tables_is_absent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("old.db");
+    let mut index = SearchIndex::open(&path).expect("open");
+    index.set_active_embedding(MODEL, DIM).expect("pin");
+    index
+        .conn
+        .execute_batch("DROP TABLE note_topics; DROP TABLE topic_centroids; DROP TABLE topic_state;")
+        .expect("drop");
+    let peek = SearchIndex::peek_topics(&path, &[]).expect("peek").expect("some");
+    assert_eq!(peek.status, TopicStatus::Absent);
+    assert_eq!(peek.assigned, 0);
+}
+
+#[test]
+fn peek_topics_errors_on_corrupt_topic_state() {
+    let (_dir, path, index) = db_with_trained_generation();
+    index
+        .conn
+        .execute("DELETE FROM topic_state WHERE key = 'trained_at'", [])
+        .expect("corrupt");
+    assert!(SearchIndex::peek_topics(&path, &[]).is_err());
+}

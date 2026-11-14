@@ -362,7 +362,7 @@ mod topic;
 #[cfg(all(any(feature = "vec-candle", feature = "vec-onnx"), any(test, feature = "test-util")))]
 pub use topic::TopicTables;
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
-pub use topic::{Assignment, NewGeneration, SummaryVector, TopicMeta, TopicScope, TopicState, TopicStatus};
+pub use topic::{Assignment, NewGeneration, SummaryVector, TopicMeta, TopicPeek, TopicScope, TopicState, TopicStatus};
 
 mod graph;
 

@@ -221,6 +221,9 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
     let mut association_interval = tokio::time::interval(Duration::from_secs(config.actions.association.interval_secs));
     association_interval.tick().await; // consume the immediate first tick
 
+    let mut topics_interval = tokio::time::interval(Duration::from_secs(config.topics.interval_secs));
+    topics_interval.tick().await; // consume the immediate first tick
+
     // LLM entity-discovery pass. Daily by default; LLM-bound and
     // bounded by `entities.max_per_run`, so it never fans unbounded calls.
     let mut entities_interval = tokio::time::interval(Duration::from_secs(config.entities.discover_interval_secs));
@@ -368,6 +371,16 @@ async fn start_watching(vault_root: &Path, config: &Config) -> Result<()> {
                         // Idle tick - nothing to embed. Stay quiet to keep the log readable.
                     }
                     Err(e) => log::error!("daemon embed tick failed: {e}"),
+                }
+            }
+            _ = topics_interval.tick() => {
+                // Topic assign tick; block_in_place like the embed arm above.
+                match tokio::task::block_in_place(|| crate::topics::daemon_tick(config, &|| stop.is_stopped())) {
+                    Ok(crate::topics::TickOutcome::Assigned { generation, assigned, removed }) if assigned + removed > 0 => {
+                        log::info!("daemon topics tick: generation={generation} assigned={assigned} removed={removed}");
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::error!("daemon topics tick failed: {e}"),
                 }
             }
             _ = graph_interval.tick() => {
