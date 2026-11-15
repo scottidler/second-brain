@@ -215,7 +215,7 @@ tasks:
 
   ci:
     help: "Full CI pipeline (lint + bloat + check + test in parallel)"
-    before: [lint, bloat, agents-map, source-lint, check, test, eval-test, promptfoo]
+    before: [lint, bloat, agents-map, source-lint, check, test, eval-test, extension-test, promptfoo]
     bash: |
       echo "✅ All CI checks passed!"
 
@@ -223,6 +223,11 @@ tasks:
     help: "Run the eval/ uv project's pytest suite (the GEPA search glue and bin/promptfoo-check's run/skip rule)"
     bash: |
       uv run --directory eval pytest -q
+
+  extension-test:
+    help: "Run the extension's JS tests (node --test; fallback.js walk with a mock fetch)"
+    bash: |
+      node --test borg/tests/js/
 
   promptfoo:
     help: "promptfoo llm-rubric + context-faithfulness over the regenerated fixtures, only when borg/patterns/distill-*.md differs from origin/main; report only, never fails ci"

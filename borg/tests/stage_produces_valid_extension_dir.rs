@@ -7,25 +7,30 @@ use borg::extension::{self, extension_dir};
 /// again for good. The daemon is fire-and-forget (returns "Queued" in ~17ms), so the
 /// POST completes before any focus-loss close and keepalive is unnecessary. If this test
 /// fails, someone re-added keepalive - do NOT; see borg/clients/extension/popup.js header.
+/// The fetch itself lives in fallback.js (`postWithFallback`), so both files are scanned.
 #[test]
 fn popup_js_must_not_use_fetch_keepalive() {
     let repo_root = extension::repo_root().expect("locate repo root");
-    let popup_js = std::fs::read_to_string(extension_dir(&repo_root).join("popup.js")).expect("read popup.js");
-    // Truncate each line at the first `//` so comments explaining the ban (header block and
-    // trailing notes) do not trip the guard. URLs contain `//` but never the word "keepalive".
-    let code: String = popup_js
-        .lines()
-        .map(|line| match line.find("//") {
-            Some(i) => &line[..i],
-            None => line,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !code.contains("keepalive"),
-        "popup.js re-introduced `keepalive` on the fetch - it breaks capture on snap Firefox. \
-         Remove it (see the popup.js header comment and commit 1c3deb0)."
-    );
+    for file in ["popup.js", "fallback.js"] {
+        let source = std::fs::read_to_string(extension_dir(&repo_root).join(file))
+            .unwrap_or_else(|e| panic!("read {file}: {e}"));
+        // Truncate each line at the first `//` so comments explaining the ban (header block
+        // and trailing notes) do not trip the guard. URLs contain `//` but never the word
+        // "keepalive".
+        let code: String = source
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("keepalive"),
+            "{file} re-introduced `keepalive` on the fetch - it breaks capture on snap Firefox. \
+             Remove it (see the popup.js header comment and commit 1c3deb0)."
+        );
+    }
 }
 
 #[test]

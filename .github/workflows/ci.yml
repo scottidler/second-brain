@@ -26,7 +26,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y curl build-essential git pkg-config libssl-dev \
-            cmake protobuf-compiler clang libclang-dev ffmpeg ripgrep
+            cmake protobuf-compiler clang libclang-dev ffmpeg ripgrep nodejs
 
       - uses: actions/checkout@v4
         with:
@@ -96,6 +96,11 @@ jobs:
             exit 1
           fi
           echo "All files within $LIMIT line limit"
+
+      # Mirrors the `extension-test` task in .otto.yml: the extension's JS
+      # tests (fallback.js walk), node's built-in runner, no npm deps.
+      - name: Run extension JS tests
+        run: node --test borg/tests/js/
 
       # Mirrors the `agents-map` task (.otto.yml:50-53): CI and otto call the
       # same script, so there is one implementation.

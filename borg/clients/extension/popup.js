@@ -13,16 +13,22 @@
 //      fa79724), so the POST completes before the popup can lose focus; the
 //      focus-loss-abort case keepalive guarded against does not occur in practice.
 //      DO NOT re-add keepalive - the design doc was wrong on this and is corrected.
-//   2. Check `res.ok` - fetch does not reject on 4xx/5xx.
+//      The POST itself lives in fallback.js, which carries the same ban.
+//   2. Check `response.ok` - fetch does not reject on 4xx/5xx.
 //   3. No scheme filter - guard only on `!tab.url`, forward any scheme
 //      (including file://) to the daemon.
+//
+// The daemon addresses and the per-attempt timeout come from BORG_DAEMON
+// (daemon.js, generated at stage time from borg.yml extension.*); the walk over
+// them is postWithFallback (fallback.js).
 
-async function getConfig() {
-  const data = await chrome.storage.local.get(["endpoint", "authToken"]);
-  return {
-    endpoint: data.endpoint || "http://localhost:8181",
-    authToken: data.authToken || "",
-  };
+async function getAuthToken() {
+  const data = await chrome.storage.local.get(["authToken"]);
+  return data.authToken || "";
+}
+
+function hostOf(endpoint) {
+  return new URL(endpoint).hostname;
 }
 
 function fail(status, message) {
@@ -60,27 +66,39 @@ async function capture() {
     button.disabled = false;
     return;
   }
-  const { endpoint, authToken } = await getConfig();
+  const authToken = await getAuthToken();
   const headers = { "Content-Type": "application/json" };
   if (authToken) {                         // optional Bearer; daemon requires it only when configured
     headers["Authorization"] = `Bearer ${authToken}`;
   }
   try {
-    const res = await fetch(`${endpoint}/ingest`, {
-      method: "POST",
+    const result = await postWithFallback({
+      endpoints: BORG_DAEMON.endpoints,
+      timeoutMs: BORG_DAEMON.attemptTimeoutMs,
+      path: "/ingest",
       headers,
       body: JSON.stringify(buildBody(tab.url, noteField.value)),
-    });                                    // NO keepalive - see requirement 1 above
-    if (!res.ok) {                         // fetch does not reject on 4xx/5xx
-      fail(status, `Daemon error: HTTP ${res.status}`);
+      onAttempt: (endpoint) => {
+        status.textContent = `Trying ${hostOf(endpoint)}...`;
+      },
+    });
+    if (!result.ok) {                      // no endpoint answered; after a timeout delivery is unknown
+      const detail = result.attempts.map((a) => `${hostOf(a.endpoint)}: ${a.error}`).join("; ");
+      fail(status, `No response from ${detail}`);
       button.disabled = false;
       return;
     }
-    await res.json();
-    status.textContent = "Queued";
+    const host = hostOf(result.endpoint);
+    if (!result.response.ok) {             // fetch does not reject on 4xx/5xx
+      fail(status, `Daemon error: HTTP ${result.response.status} (${host})`);
+      button.disabled = false;
+      return;
+    }
+    await result.response.json();
+    status.textContent = `Queued via ${host}`;
     setTimeout(() => window.close(), 400);
   } catch (err) {
-    fail(status, `Error: ${err.message}`);  // network-level failure
+    fail(status, `Error: ${err.message}`);  // e.g. an unparseable response body
     button.disabled = false;
   }
 }
