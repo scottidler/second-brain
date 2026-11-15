@@ -100,7 +100,7 @@ jobs:
       # Mirrors the `extension-test` task in .otto.yml: the extension's JS
       # tests (fallback.js walk), node's built-in runner, no npm deps.
       - name: Run extension JS tests
-        run: node --test borg/tests/js/
+        run: node --test borg/tests/js/*.test.mjs
 
       # Mirrors the `agents-map` task (.otto.yml:50-53): CI and otto call the
       # same script, so there is one implementation.

@@ -227,7 +227,7 @@ tasks:
   extension-test:
     help: "Run the extension's JS tests (node --test; fallback.js walk with a mock fetch)"
     bash: |
-      node --test borg/tests/js/
+      node --test borg/tests/js/*.test.mjs
 
   promptfoo:
     help: "promptfoo llm-rubric + context-faithfulness over the regenerated fixtures, only when borg/patterns/distill-*.md differs from origin/main; report only, never fails ci"

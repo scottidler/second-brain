@@ -1,5 +1,5 @@
 // Tests for postWithFallback (borg/clients/extension/fallback.js).
-// Run: node --test borg/tests/js/   (otto extension-test). No package.json, no deps.
+// Run: node --test borg/tests/js/*.test.mjs   (otto extension-test). No package.json, no deps.
 //
 // fallback.js is a classic browser script that declares one global function, so
 // it is evaluated in a node:vm context carrying node's AbortSignal, and every
@@ -46,9 +46,23 @@ const networkError = async () => {
 
 // Rejects with the signal's reason when it aborts, and never resolves otherwise,
 // the way a fetch to a dead peer hangs until AbortSignal.timeout fires.
+//
+// AbortSignal.timeout's timer is unref'd, so on its own it does not keep the
+// event loop alive: on Node 20/22 the loop drains first and node:test cancels
+// the case ("Promise resolution is still pending but the event loop has already
+// resolved"). A real fetch holds a socket open; the keepalive interval stands in
+// for it and is cleared the moment the abort fires.
 const hang = (init) =>
   new Promise((_resolve, reject) => {
-    init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    const keepalive = setInterval(() => {}, 1000);
+    init.signal.addEventListener(
+      "abort",
+      () => {
+        clearInterval(keepalive);
+        reject(init.signal.reason);
+      },
+      { once: true },
+    );
   });
 
 function walk(fetchImpl, extra = {}) {

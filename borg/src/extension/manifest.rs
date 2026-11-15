@@ -7,7 +7,8 @@ const DEFAULT_ORIGIN_PATTERNS: &[&str] = &["localhost", "*.lan", "*.local"];
 
 /// Origin patterns for `host_permissions` and the CSP: the explicit
 /// `origin-patterns` list, or the defaults plus `server.host`, then every
-/// endpoint hostname not already covered (exact or wildcard).
+/// endpoint hostname not already permitted by both host_permissions and the
+/// CSP (see [`permits`]).
 ///
 /// Infallible by signature, so an invalid `extension.endpoints` contributes
 /// nothing here and logs a warning. The loud failure is
@@ -23,8 +24,7 @@ pub fn origin_patterns(config: &Config) -> Vec<String> {
         Ok(endpoints) => {
             for endpoint in &endpoints {
                 if let Some(host) = endpoint.host_str()
-                    && !patterns.iter().any(|p| p == host)
-                    && !covered_by_wildcard(&patterns, host)
+                    && !permits(&patterns, host)
                 {
                     patterns.push(host.to_string());
                 }
@@ -61,6 +61,17 @@ fn covered_by_wildcard(patterns: &[String], host: &str) -> bool {
         } else {
             false
         }
+    })
+}
+
+/// Whether `patterns` let the extension reach `host` through BOTH
+/// `host_permissions` and the CSP `connect-src`: an exact entry, or a `*.`
+/// entry the host is a strict subdomain of. The apex of a `*.` entry does not
+/// count: a match pattern covers it, a CSP host-source does not.
+pub fn permits(patterns: &[String], host: &str) -> bool {
+    patterns.iter().any(|p| match p.strip_prefix("*.") {
+        Some(suffix) => host.ends_with(&format!(".{suffix}")),
+        None => p == host,
     })
 }
 

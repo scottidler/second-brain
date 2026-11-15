@@ -134,3 +134,26 @@ fn render_daemon_js_rejects_bad_config() {
     config.extension.attempt_timeout_ms = Some(0);
     assert!(render_daemon_js(&config).is_err());
 }
+
+#[test]
+fn render_daemon_js_rejects_default_endpoint_outside_explicit_origin_patterns() {
+    let mut config = Config::default();
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    let err = render_daemon_js(&config).unwrap_err().to_string();
+    assert!(err.contains("http://localhost:8181"), "{err}");
+    assert!(err.contains("extension.endpoints"), "{err}");
+}
+
+#[test]
+fn render_daemon_js_accepts_endpoint_under_explicit_origin_patterns() {
+    let mut config = with_endpoints(&["http://borg.example.com:8181"]);
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    assert!(render_daemon_js(&config).is_ok());
+}
+
+#[test]
+fn baked_config_hash_rejects_unpermitted_default_endpoint() {
+    let mut config = Config::default();
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    assert!(baked_config_hash(&config).is_err());
+}

@@ -172,3 +172,48 @@ const BORG_DAEMON = Object.freeze({
 - `rg -n 'extension.endpoints' config/templates/borg.yml.example borg/clients/AGENTS.md borg/AGENTS.md` returned lines in all three files (`borg.yml.example` via the commented block, `borg/AGENTS.md:55`, `borg/clients/AGENTS.md:11,31,42`).
 - `rg -n 'Don.t hardcode the daemon endpoint' borg/clients/AGENTS.md` returned no lines (rc=1).
 - A ripgrep count of U+2014 across `docs/plan/` returned nothing.
+
+## Phase 6 Verification correction (supersedes the first Phase 6 Verification bullet)
+- The Phase 6 Verification claim that `rg -n 'extension.endpoints' config/templates/borg.yml.example ...` "returned lines in all three files (`borg.yml.example` via the commented block ...)" was false. The commented block spells `extension:` and `endpoints:` on separate lines, so the template returned no line and the Phase 6 criterion failed. Found by the implementation audit; fixed in "Implementation audit round 1 fixes" below, which records the rerun output.
+
+## Implementation audit round 1 fixes
+### Design decisions
+- JS timeout tests cancelled on Node 20/22: `borg/tests/js/fallback.test.mjs:hang`: `AbortSignal.timeout`'s timer is unref'd, so with a mock fetch nothing kept the event loop alive and node:test cancelled the pending cases (Node 26 happened not to). `hang` now holds a referenced `setInterval` that it clears when the abort fires, standing in for the socket a real fetch would hold. Covers both cases that use `hang` (timeout, all-reject).
+- Fail loudly on an unreachable endpoint: `borg/src/extension/daemon.rs:ensure_permitted`, called from `render_daemon_js`: every resolved endpoint, the unset default `http://localhost:8181` included, must be permitted by `manifest::origin_patterns`; otherwise an error naming the endpoint, the patterns, `extension.endpoints` and `extension.origin-patterns`. `stage`, `extension show` and `baked_config_hash` (sign) all go through `render_daemon_js`, so all three refuse.
+- Apex under a `*.` pattern: `borg/src/extension/manifest.rs:permits`: new predicate: exact entry, or a `*.` entry the host is a strict subdomain of. The endpoint merge in `origin_patterns` and `ensure_permitted` both use it, so `example.com` under `*.example.com` is pushed explicitly and reaches both `host_permissions` and the CSP. `ripr.lan` under `*.lan` still adds nothing (`lan_endpoint_adds_no_pattern_because_wildcard_covers_it` unchanged, passes). `covered_by_wildcard` is left as is for the `server.host` path in `base_patterns`.
+- Template comment names `extension.endpoints` and `extension.attempt-timeout-ms` literally on its first line: `config/templates/borg.yml.example`.
+- Phase 1 success criterion amended in the design doc to `cargo test --workspace --lib extension::` with a one-line reason (doc defect).
+
+### Deviations
+- The `extension-test` command changed from `node --test borg/tests/js/` to `node --test borg/tests/js/*.test.mjs` in `.otto.yml`, `.github/workflows/ci.yml` and the test file header. Node 22 (`/usr/bin/node` v22.22.1) does not accept a directory operand: the directory form exits with `Error: Cannot find module '.../borg/tests/js'` before any test runs, so the requested "5 pass on /usr/bin/node with the directory form" cannot hold. The shell-expanded file glob runs on Node 20, 22 and 26 alike. Not in the audit's fix list; disclosed here.
+- `sign/tests.rs:origin_patterns_change_alters_hash` used `origin-patterns: ["http://*.example/*"]` with endpoints unset, a config that now (correctly) errors because the default localhost endpoint is not permitted. Changed to `["localhost", "*.example"]`; the test still asserts the hash differs from the default.
+
+### Tradeoffs
+- A new `permits` predicate vs changing `covered_by_wildcard` in place: changing it would also alter the `server.host` path in `base_patterns`, outside this audit's fix list. `permits` is the one the endpoint merge and the reachability check share.
+- Keepalive inside `hang` vs a suite-wide handle: per-mock is tied to the exact lifetime that needs it and cannot leak past the case.
+
+### Open questions
+- The tailnet hostname in tests, template and docs (audit item 5) is untouched, pending the owner's decision.
+
+### Verification
+- `otto ci`: rc=0, `All CI checks passed!`; extension-test `pass 5, fail 0, cancelled 0` (mise node v26.10.0).
+- `/usr/bin/node --test borg/tests/js/*.test.mjs` (v22.22.1): `# pass 5`, `# fail 0`, `# cancelled 0`. Before the fix: `# pass 1`, `# cancelled 4`.
+- CI image, `docker run --rm -v $PWD:/w -w /w debian:trixie` with apt `nodejs`: `node --version` -> `v20.19.2`; `node --test borg/tests/js/*.test.mjs` -> `# tests 5`, `# pass 5`, `# fail 0`, `# cancelled 0`, rc=0. The directory form in the same container also gives `# pass 5`, `# cancelled 0`.
+- JS break-test on Node 22: catch body in `fallback.js` replaced with `throw err`: `not ok 1` (TypeError case), `not ok 2` (timeout), `not ok 5` (all reject); `# pass 2`, `# fail 3`, `# cancelled 0`. Reverted.
+- `cargo test --workspace --lib extension::`: 74 passed (69 before plus 5 new: `render_daemon_js_rejects_default_endpoint_outside_explicit_origin_patterns`, `render_daemon_js_accepts_endpoint_under_explicit_origin_patterns`, `baked_config_hash_rejects_unpermitted_default_endpoint`, `apex_endpoint_under_wildcard_is_added_explicitly`, `permits_matches_exact_and_strict_subdomain_but_not_apex`).
+- Break-test, `ensure_permitted` call removed from `render_daemon_js`: the two `*_rejects_*default*` tests failed (72 passed, 2 failed). Reverted.
+- Break-test, `permits` made apex-inclusive (`host == suffix ||`): `apex_endpoint_under_wildcard_is_added_explicitly` and `permits_matches_exact_and_strict_subdomain_but_not_apex` failed (72 passed, 2 failed). Reverted.
+- Probe, built `target/debug/sb`, scratch `XDG_CONFIG_HOME` holding the local `borg.yml` plus an `extension:` block:
+  - `origin-patterns: ["borg.example.com"]`, endpoints unset: `extension show` and `extension stage` both rc=1 with `Error: extension endpoint http://localhost:8181 is not permitted by the manifest origin patterns ["borg.example.com"]; set extension.endpoints to the daemon you reach, or add "localhost" to extension.origin-patterns`.
+  - `origin-patterns: ["*.example.com"]`, `endpoints: ["http://example.com:8181"]`: `extension show` rc=0, `host_permissions` has `http://*.example.com/*` and `http://example.com/*`, CSP `connect-src http://*.example.com:* http://example.com:*`.
+  - Local `borg.yml` with no `extension:` block: `extension show` rc=0.
+- Phase 6 criterion rerun:
+  ```
+  borg/AGENTS.md:55: ... `extension/daemon.rs` validates `extension.endpoints` / `extension.attempt-timeout-ms`, ...
+  config/templates/borg.yml.example:422:# Firefox capture extension (extension.endpoints, extension.attempt-timeout-ms).
+  borg/clients/AGENTS.md:11: ... (set by `extension.endpoints` in `borg.yml`) ...
+  borg/clients/AGENTS.md:31: ... come from `extension.endpoints` and `extension.attempt-timeout-ms` in `borg.yml` ...
+  borg/clients/AGENTS.md:42:- The endpoint list comes from `extension.endpoints` at stage time; never a literal in source.
+  ```
+  rc=0, one or more lines per file. `rg -n 'Don.t hardcode the daemon endpoint' borg/clients/AGENTS.md`: no lines, rc=1.
+- Phase 1 `-p` form at HEAD: `cargo test -p borg extension::` -> `error[E0433]: cannot find 'search' in 'vault'`, `could not compile 'borg' (lib test)`. The v0.22.0 failure is the audit's observation, not rerun here.

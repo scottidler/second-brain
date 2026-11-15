@@ -189,7 +189,7 @@ Rules:
   - `https://`, empty list, unparseable URL, path, timeout 0 -> each an error
   - unset -> `[http://localhost:8181]`, 3000
 - **Success criteria:**
-  - `cargo test -p borg extension::` passes, including the cases above
+  - `cargo test --workspace --lib extension::` passes, including the cases above (amended after the implementation audit: the `-p borg` form does not build because the vault `search` feature is only unified across the workspace; it fails at v0.22.0 too)
   - existing `default_host_permissions_match_default_origins` test passes unchanged (no endpoints set -> no new patterns)
 
 #### Phase 2: Stage writes daemon.js

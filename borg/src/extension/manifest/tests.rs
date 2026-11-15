@@ -259,3 +259,32 @@ fn unset_endpoints_leave_explicit_origin_patterns_untouched() {
     config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
     assert_eq!(origin_patterns(&config), vec!["borg.example.com".to_string()]);
 }
+
+#[test]
+fn apex_endpoint_under_wildcard_is_added_explicitly() {
+    let mut config = config_with_endpoints(&["http://example.com:8181"]);
+    config.extension.origin_patterns = Some(vec!["*.example.com".to_string()]);
+    assert_eq!(
+        origin_patterns(&config),
+        vec!["*.example.com".to_string(), "example.com".to_string()]
+    );
+    let manifest = build_manifest("0.0.0-test", &config);
+    let hosts: Vec<&str> = manifest["host_permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(hosts.contains(&"http://example.com/*"), "{hosts:?}");
+    let csp = manifest["content_security_policy"]["extension_pages"].as_str().unwrap();
+    assert!(csp.contains("http://example.com:*"), "{csp}");
+}
+
+#[test]
+fn permits_matches_exact_and_strict_subdomain_but_not_apex() {
+    let patterns = vec!["*.lan".to_string(), "localhost".to_string()];
+    assert!(permits(&patterns, "ripr.lan"));
+    assert!(permits(&patterns, "localhost"));
+    assert!(!permits(&patterns, "lan"));
+    assert!(!permits(&patterns, "ripr.local"));
+}

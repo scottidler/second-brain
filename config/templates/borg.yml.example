@@ -419,8 +419,9 @@ ingest:
   # --clipboard is never a bulk.
   bulk-threshold: 5
 
-# Firefox capture extension. Read on the host that signs the extension; the
-# values are baked into the signed .xpi at stage time. Changing any of them
+# Firefox capture extension (extension.endpoints, extension.attempt-timeout-ms).
+# Read on the host that signs the extension; the values are baked into the
+# signed .xpi at stage time. Changing any of them
 # without a version bump is an error (`sb borg extension install` exits 3).
 # extension:
 #   # Ordered. The popup tries each in turn; it moves on only when no HTTP

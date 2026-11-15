@@ -50,7 +50,7 @@ fn timeout_change_alters_hash() {
 fn origin_patterns_change_alters_hash() {
     let a = Config::default();
     let mut b = Config::default();
-    b.extension.origin_patterns = Some(vec!["http://*.example/*".to_string()]);
+    b.extension.origin_patterns = Some(vec!["localhost".to_string(), "*.example".to_string()]);
     assert_ne!(baked_config_hash(&a).unwrap(), baked_config_hash(&b).unwrap());
 }
 
