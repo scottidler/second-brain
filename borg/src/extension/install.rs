@@ -132,7 +132,7 @@ fn which_firefox() -> Result<Option<PathBuf>> {
 pub fn policy_path(install: &FirefoxInstall) -> Result<PathBuf> {
     match install {
         FirefoxInstall::Tarball(root) => Ok(root.join("distribution").join("policies.json")),
-        FirefoxInstall::AptOrDeb => Ok(PathBuf::from("/etc/firefox/policies/policies.json")),
+        FirefoxInstall::AptOrDeb => Ok(PathBuf::from(SYSTEM_POLICY_PATH)),
         FirefoxInstall::Snap => eyre::bail!(SNAP_UNSUPPORTED),
         FirefoxInstall::Flatpak => {
             let home = dirs::home_dir().ok_or_else(|| eyre::eyre!("cannot resolve $HOME"))?;
@@ -155,6 +155,33 @@ pub enum InstallStrategy {
     /// .xpi. Firefox picks the extension up from the `file://` URL on next
     /// launch. Used for apt/deb, tarball, and flatpak Firefox.
     PolicyFile { path: PathBuf },
+}
+
+/// The system-wide policy file. Every Linux Firefox reads it, tarball included.
+const SYSTEM_POLICY_PATH: &str = "/etc/firefox/policies/policies.json";
+
+/// A tarball Firefox reads both `<root>/distribution/policies.json` and the
+/// system-wide file. When our entry lives only in the system-wide file (an
+/// install made before tarball detection existed), that file is the one in
+/// effect: check and rewrite it rather than report "not installed" or plant a
+/// second, competing entry in `distribution/`.
+fn prefer_policy_with_ours(primary: PathBuf, system: &Path) -> PathBuf {
+    if !policy_contains_ours(&primary) && policy_contains_ours(system) {
+        system.to_path_buf()
+    } else {
+        primary
+    }
+}
+
+/// `install_strategy`, plus the tarball fallback to the system-wide policy
+/// file that already carries our entry.
+pub fn resolve_install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
+    match (install, install_strategy(install)?) {
+        (FirefoxInstall::Tarball(_), InstallStrategy::PolicyFile { path }) => Ok(InstallStrategy::PolicyFile {
+            path: prefer_policy_with_ours(path, Path::new(SYSTEM_POLICY_PATH)),
+        }),
+        (_, strategy) => Ok(strategy),
+    }
 }
 
 pub fn install_strategy(install: &FirefoxInstall) -> Result<InstallStrategy> {
@@ -386,7 +413,7 @@ pub fn run(repo_root: &Path, config: &Config, opts: InstallOpts, version: &str) 
                     );
                 }
             }
-            ff => Some(install_strategy(&ff)?),
+            ff => Some(resolve_install_strategy(&ff)?),
         }
     };
 
@@ -498,7 +525,7 @@ pub fn run(_repo_root: &Path, _config: &Config, _opts: InstallOpts, _version: &s
 #[cfg(target_os = "linux")]
 pub fn uninstall(opts: UninstallOpts) -> Result<UninstallResult> {
     log::debug!("extension::install::uninstall: purge={}", opts.purge);
-    let strategy = detect_firefox().ok().and_then(|i| install_strategy(&i).ok());
+    let strategy = detect_firefox().ok().and_then(|i| resolve_install_strategy(&i).ok());
 
     let mut policy_path_out = None;
     if let Some(InstallStrategy::PolicyFile { path: target }) = strategy

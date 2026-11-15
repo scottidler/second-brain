@@ -243,3 +243,35 @@ fn install_url_uses_file_scheme_and_repo_relative_path() {
     assert!(url.starts_with("file:///home/u/second-brain/borg/clients/extension/web-ext-artifacts/"));
     assert!(url.ends_with(LATEST_XPI_NAME));
 }
+
+fn write_policy(path: &Path, value: serde_json::Value) {
+    std::fs::write(path, serde_json::to_string(&value).expect("serialize")).expect("write policy");
+}
+
+#[test]
+fn tarball_policy_falls_back_to_system_file_that_carries_our_entry() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dist = tmp.path().join("distribution-policies.json");
+    let system = tmp.path().join("system-policies.json");
+    write_policy(&system, merge_policy(json!({}), "file:///old.xpi"));
+    assert_eq!(prefer_policy_with_ours(dist.clone(), &system), system);
+}
+
+#[test]
+fn tarball_policy_keeps_distribution_file_when_it_carries_our_entry() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dist = tmp.path().join("distribution-policies.json");
+    let system = tmp.path().join("system-policies.json");
+    write_policy(&dist, merge_policy(json!({}), "file:///new.xpi"));
+    write_policy(&system, merge_policy(json!({}), "file:///old.xpi"));
+    assert_eq!(prefer_policy_with_ours(dist.clone(), &system), dist);
+}
+
+#[test]
+fn tarball_policy_keeps_distribution_file_when_neither_carries_our_entry() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dist = tmp.path().join("distribution-policies.json");
+    let system = tmp.path().join("system-policies.json");
+    write_policy(&system, json!({ "policies": { "ExtensionSettings": {} } }));
+    assert_eq!(prefer_policy_with_ours(dist.clone(), &system), dist);
+}

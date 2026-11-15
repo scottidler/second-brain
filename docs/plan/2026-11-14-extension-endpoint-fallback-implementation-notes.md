@@ -252,3 +252,21 @@ const BORG_DAEMON = Object.freeze({
 
 ### Verification
 - Closes audit defer item 8 (Phase 0 used a copied `prefs.js` only). On ltl-7007, the whole daily profile `8r3vpj3l.default-release` was rsynced into a throwaway dir (excluding the lock files, FxA sign-in, logins, cookies, storage, cache and session store), with `browser.startup.page` 0, and loaded headless: `firefox --headless --no-remote --profile <copy> --screenshot ... http://ripr.example.ts.net:8181/health` (real tailnet name on the command line). rc=0; the screenshot shows the JSON viewer with `status: "ok"`, `service: "obsidian-borg"`, `version: "v0.22.0"`. No DNS error page, no `https://` redirect. The profile's extensions, add-ons and DoH-rollout state all rode along; no `network.trr.excluded-domains` step is needed.
+
+## Post-release fix: tarball Firefox honors the system-wide policy file
+
+### Design decisions
+- `resolve_install_strategy` (`borg/src/extension/install.rs`) wraps `install_strategy`: for a tarball Firefox, when `<root>/distribution/policies.json` lacks our entry and `/etc/firefox/policies/policies.json` carries it, the system-wide file is the strategy's path. Used by `run` (the `--if-installed` check and any policy write) and `uninstall`. `policy_path` stays pure (no filesystem read) so its tests stay host-independent.
+- Why: on ripr (tarball `/opt/firefox`), the borg extension is force-installed from `/etc/firefox/policies/policies.json`, and `--if-installed` read only `distribution/`, so `otto deploy` printed "extension not installed on this machine; skipping" while Firefox ran extension v0.15.14. Scott ordered the fix (2026-11-15).
+
+### Deviations
+- The Rollout Plan's ripr step ("a stale entry in `/etc/firefox/policies/policies.json` ... is not read by this check") no longer holds: the check now reads it, so ripr's deploy signs. ripr's `borg.yml` must carry the same `extension:` block as the signing host, or ripr signs a build with the default `localhost` list.
+
+### Tradeoffs
+- Prefer the file that already carries our entry vs always writing both: one entry, in the file Firefox already honors, avoids two competing `force_installed` entries.
+
+### Open questions
+- None.
+
+### Verification
+- `cargo test --workspace --lib tarball_policy`: 3 passed. Break-test (condition replaced with `false && ...`): `tarball_policy_falls_back_to_system_file_that_carries_our_entry` FAILED, the other two ok; restored.
