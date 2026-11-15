@@ -698,3 +698,46 @@ fn peek_topics_errors_on_corrupt_topic_state() {
         .expect("corrupt");
     assert!(SearchIndex::peek_topics(&path, &[]).is_err());
 }
+
+#[test]
+fn peek_topics_errors_when_only_some_topic_tables_exist() {
+    for drop in [
+        "DROP TABLE note_topics;",
+        "DROP TABLE note_topics; DROP TABLE topic_centroids;",
+    ] {
+        let (_dir, path, index) = db_with_trained_generation();
+        index.conn.execute_batch(drop).expect("drop");
+        let err = SearchIndex::peek_topics(&path, &[]).expect_err("partial schema is corrupt");
+        assert!(err.to_string().contains("topic tables"), "{err}");
+    }
+}
+
+#[test]
+fn a_surviving_unparseable_generation_with_no_trained_keys_is_an_error() {
+    let (_dir, path, index) = db_with_trained_generation();
+    index
+        .conn
+        .execute_batch(
+            "DELETE FROM note_topics; DELETE FROM topic_centroids;
+             DELETE FROM topic_state WHERE key != 'generation';",
+        )
+        .expect("clear");
+    assert_eq!(
+        SearchIndex::peek_topics(&path, &[])
+            .expect("a cleared index")
+            .expect("pinned")
+            .status,
+        TopicStatus::Absent
+    );
+    index
+        .conn
+        .execute("UPDATE topic_state SET value = 'x' WHERE key = 'generation'", [])
+        .expect("corrupt");
+    assert!(SearchIndex::peek_topics(&path, &[]).is_err());
+}
+
+#[test]
+fn unix_to_rfc3339_spells_z_at_seconds_and_errors_out_of_range() {
+    assert_eq!(unix_to_rfc3339(1_700_000_000).expect("ok"), "2023-11-14T22:13:20Z");
+    assert!(unix_to_rfc3339(i64::MAX).is_err());
+}

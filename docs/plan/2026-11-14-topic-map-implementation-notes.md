@@ -128,3 +128,27 @@ Bite check for the two-connection tests: in `overview_with` and `notes_with`, ri
 ### Open questions
 - Rollback: after this migration an older binary (v0.21.1 or the Phase 1-5 builds) can still read and embed (its NULL hashes are healed on the next new-binary open), but its graph pass fails, because `record_edge_build` and `semantic_edge_targets` name the dropped `semantic_built_at`. The doc rules the column dropped; the operator should know a rollback past this commit breaks `sb cortex graph` until roll-forward.
 - A local index that already holds a Phase 3-5 `note_topics` table (with `embedding_id`) keeps that shape, since the doc changed the `CREATE TABLE` in place with no migration; `assign_batch` against it fails loudly on the missing column. Only matters on a dev machine that trained before this commit: `sb cortex topics --clear` does not fix it, dropping the three topic tables (or a fresh index) does. ripr runs the installed v0.21.1, which predates Phase 3.
+
+## Phase 7: Audit cheap-wins
+### Design decisions
+- One helper, `vault::search::unix_to_rfc3339(secs) -> Result<String>` (`vault/src/search/topic.rs`, re-exported from `vault::search`): seconds precision, `Z` spelling, error on an unrepresentable time. Cortex's private `rfc3339` and oracle's `unix_to_rfc3339` (`Option`, `+00:00`) are deleted; both call the vault one.
+- Oracle's `topic_envelope`, `topic_unavailable` and `topics_status_block` return `eyre::Result`, so an unrepresentable `trained-at` is a tool error on `topic_map` and `vault_overview`, not `null` (`oracle/src/server.rs`).
+- `topic_map` browse and `tags` forms check `generation` through `generation_mismatch` against the Valid snapshot, sharing `generation_mismatch_error` with the topic form (one message, both numbers). Absent/Stale still answers with its status envelope: no stored generation to compare.
+- `TopicState::meta` parses a surviving `generation` in its Absent branch; `peek_topics` errors on 1 or 2 of the 3 topic tables and reads 0 as Absent (`vault/src/search/topic.rs`).
+- `assign_index_until` re-reads `stopped()` after building the batch, before `assign_batch`; a stop there sets `was_stopped` and breaks (`cortex/src/topics.rs`).
+- Out-of-range topic error reads `topics 0 to {k-1}`.
+### Deviations
+- The helper's own test (`unix_to_rfc3339_spells_z_at_seconds_and_errors_out_of_range`) cannot fail before the fix: the function did not exist. The bite for item 5 is carried by the two oracle tests that go through the surfaces.
+- Two older oracle tests (`topic_map_browse_returns_every_non_empty_topic_with_the_envelope`, `vault_overview_carries_a_topics_status_block`) pinned the `+00:00` spelling; inverted to `Z`.
+- The unknown-topic test's pinned text changed from `0..2` to `0 to 1` (item 6).
+### Tradeoffs
+- Fail the whole `topic_map` / `vault_overview` call on an unrepresentable `trained-at` vs. dropping the field: fail-loudly rule, and the state is corrupt anyway.
+### Open questions
+- None.
+
+Bite evidence (each test run against the unfixed code before its fix):
+- Item 2: `topic_map_browse_and_tags_forms_check_generation_too` FAILED (browse and tags returned success).
+- Item 3: `assign_stopped_between_the_read_and_the_write_writes_nothing` FAILED (cortex).
+- Item 5: `trained_at_is_rfc3339_with_a_z_and_seconds_on_every_surface` and `an_unrepresentable_trained_at_is_an_error_not_a_null` FAILED (oracle).
+- Item 6: `topic_map_unknown_topic_and_unknown_arguments_fail_loudly` FAILED on the new `0 to 1` assertion.
+- Item 7: `peek_topics_errors_when_only_some_topic_tables_exist` and `a_surviving_unparseable_generation_with_no_trained_keys_is_an_error` FAILED (vault, `--features vec-candle`).

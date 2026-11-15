@@ -226,8 +226,8 @@ fn assign_index(index: &mut SearchIndex, topics: &TopicsConfig, now: i64) -> Res
     assign_index_until(index, topics, now, &|| false).map(|(report, _stopped)| report)
 }
 
-/// [`assign_index`] that reads `stopped` before the removal write and before
-/// each batch's read, and returns whether it stopped early. A stopped run
+/// [`assign_index`] that reads `stopped` before the removal write, before
+/// each batch's read and before its write, and returns whether it stopped early. A stopped run
 /// leaves every batch it did write whole; the next run finishes the rest.
 fn assign_index_until(
     index: &mut SearchIndex,
@@ -281,6 +281,10 @@ fn assign_index_until(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        if stopped() {
+            was_stopped = true;
+            break;
+        }
         assigned += index.assign_batch(&batch, now)?;
         log::debug!(
             "cortex::topics::assign: assigned {} this step, {assigned} so far",
@@ -460,7 +464,10 @@ fn report(
         generation: meta.as_ref().map(|m| m.generation),
         k: meta.as_ref().map(|m| m.k),
         configured_k: topics.k,
-        trained_at: meta.as_ref().map(|m| rfc3339(m.trained_at)).transpose()?,
+        trained_at: meta
+            .as_ref()
+            .map(|m| vault::search::unix_to_rfc3339(m.trained_at))
+            .transpose()?,
         eligible: scope.eligible,
         pending: pending.len(),
         in_scope: scope.in_scope,
@@ -472,12 +479,6 @@ fn report(
         exclude_types_drift,
         hint,
     })
-}
-
-fn rfc3339(secs: i64) -> Result<String> {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .ok_or_else(|| eyre!("topic_state trained_at {secs} is not a representable time"))
 }
 
 #[cfg(test)]

@@ -530,7 +530,7 @@ impl OracleMcpServer {
         // One key beside the serialized `VaultStats`: the stats type is
         // ungated and `sb oracle stats` prints it, the topic readers are not.
         let mut payload = serde_json::to_value(&stats).map_err(Self::err)?;
-        payload["topics"] = Self::topics_status_block(&snapshot);
+        payload["topics"] = Self::topics_status_block(&snapshot).map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::json(payload)?]))
     }
 
@@ -1085,8 +1085,11 @@ impl OracleMcpServer {
 
         let Some(topic) = req.topic else {
             let overview = db.overview(req.tags.as_deref(), tags_all).map_err(Self::err)?;
-            if let Some(unavailable) = Self::topic_unavailable(&overview.snapshot) {
+            if let Some(unavailable) = Self::topic_unavailable(&overview.snapshot).map_err(Self::err)? {
                 return Ok(CallToolResult::success(vec![Content::json(unavailable)?]));
+            }
+            if let Some(mismatch) = Self::generation_mismatch(&overview.snapshot, req.generation) {
+                return Ok(mismatch);
             }
             let results: Vec<serde_json::Value> = overview
                 .topics
@@ -1100,7 +1103,7 @@ impl OracleMcpServer {
                     })
                 })
                 .collect();
-            let mut payload = Self::topic_envelope(&overview.snapshot, results.len());
+            let mut payload = Self::topic_envelope(&overview.snapshot, results.len()).map_err(Self::err)?;
             payload["results"] = json!(results);
             return Ok(CallToolResult::success(vec![Content::json(payload)?]));
         };
@@ -1111,25 +1114,25 @@ impl OracleMcpServer {
             .map_err(Self::err)?;
         match read {
             TopicNotes::Unavailable(snapshot) => {
-                let unavailable = Self::topic_unavailable(&snapshot);
-                Ok(CallToolResult::success(vec![Content::json(
-                    unavailable.unwrap_or_else(|| Self::topic_envelope(&snapshot, 0)),
-                )?]))
+                let payload = match Self::topic_unavailable(&snapshot).map_err(Self::err)? {
+                    Some(unavailable) => unavailable,
+                    None => Self::topic_envelope(&snapshot, 0).map_err(Self::err)?,
+                };
+                Ok(CallToolResult::success(vec![Content::json(payload)?]))
             }
             TopicNotes::GenerationMismatch { requested, stored } => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "topic_map: generation {requested} requested but the stored generation is {stored}; topic ids from generation {requested} no longer mean what they did. Re-list the topics (call topic_map with no topic) and pick again."
-                ))]))
+                Ok(Self::generation_mismatch_error(requested, stored))
             }
             TopicNotes::UnknownTopic { topic, k } => Ok(CallToolResult::error(vec![Content::text(format!(
-                "topic_map: topic {topic} does not exist; the stored generation has topics 0..{k}"
+                "topic_map: topic {topic} does not exist; the stored generation has topics 0 to {}",
+                k.saturating_sub(1)
             ))])),
             TopicNotes::Notes { snapshot, notes } => {
                 let detail_level = req.detail.unwrap_or(DetailLevel::Metadata);
                 let rows = Self::resolve_note_paths(&db, notes.iter().map(|n| n.path.as_str()))?;
                 let results: Vec<serde_json::Value> =
                     rows.iter().map(|n| Self::format_note(n, &detail_level)).collect();
-                let mut payload = Self::topic_envelope(&snapshot, results.len());
+                let mut payload = Self::topic_envelope(&snapshot, results.len()).map_err(Self::err)?;
                 payload["topic"] = json!(topic);
                 payload["results"] = json!(results);
                 Ok(CallToolResult::success(vec![Content::json(payload)?]))
@@ -1138,53 +1141,72 @@ impl OracleMcpServer {
     }
 
     /// `{status, generation, trained-at, k, count}` of a usable generation.
-    fn topic_envelope(snapshot: &TopicSnapshot, count: usize) -> serde_json::Value {
+    fn topic_envelope(snapshot: &TopicSnapshot, count: usize) -> eyre::Result<serde_json::Value> {
         let meta = snapshot.meta.as_ref();
-        json!({
+        Ok(json!({
             "status": snapshot.status,
             "generation": meta.map(|m| m.generation),
-            "trained-at": meta.and_then(|m| Self::unix_to_rfc3339(m.trained_at)),
+            "trained-at": Self::trained_at(snapshot)?,
             "k": meta.map(|m| m.k),
             "count": count,
-        })
+        }))
+    }
+
+    /// The generation's `trained-at` in the one shared spelling; `null` with
+    /// no generation, an error for a timestamp that cannot be spelled.
+    fn trained_at(snapshot: &TopicSnapshot) -> eyre::Result<Option<String>> {
+        snapshot
+            .meta
+            .as_ref()
+            .map(|m| vault::search::unix_to_rfc3339(m.trained_at))
+            .transpose()
+    }
+
+    fn generation_mismatch_error(requested: i64, stored: i64) -> CallToolResult {
+        CallToolResult::error(vec![Content::text(format!(
+            "topic_map: generation {requested} requested but the stored generation is {stored}; topic ids from generation {requested} no longer mean what they did. Re-list the topics (call topic_map with no topic) and pick again."
+        ))])
+    }
+
+    /// The error result when the caller named a generation and the Valid
+    /// snapshot holds another; `None` when none was named or it matches.
+    fn generation_mismatch(snapshot: &TopicSnapshot, requested: Option<i64>) -> Option<CallToolResult> {
+        let (requested, meta) = (requested?, snapshot.meta.as_ref()?);
+        (requested != meta.generation).then(|| Self::generation_mismatch_error(requested, meta.generation))
     }
 
     /// The Absent / Stale answer: status, zero results and the hint, never an
     /// error and never a bare empty list. `None` when the generation is Valid.
-    fn topic_unavailable(snapshot: &TopicSnapshot) -> Option<serde_json::Value> {
+    fn topic_unavailable(snapshot: &TopicSnapshot) -> eyre::Result<Option<serde_json::Value>> {
         let hint = match snapshot.status {
-            TopicStatus::Valid => return None,
+            TopicStatus::Valid => return Ok(None),
             TopicStatus::Absent => "no topic map exists yet; an operator creates one with `sb cortex topics --train`",
             TopicStatus::Stale => {
                 "the topic map was trained under a different embedding model; an operator retrains with `sb cortex topics --train`"
             }
         };
-        let mut payload = Self::topic_envelope(snapshot, 0);
+        let mut payload = Self::topic_envelope(snapshot, 0)?;
         payload["results"] = json!([]);
         payload["hint"] = json!(hint);
-        Some(payload)
+        Ok(Some(payload))
     }
 
     /// The `vault_overview` `topics` block.
-    fn topics_status_block(snapshot: &TopicSnapshot) -> serde_json::Value {
+    fn topics_status_block(snapshot: &TopicSnapshot) -> eyre::Result<serde_json::Value> {
         let meta = snapshot.meta.as_ref();
-        json!({
+        Ok(json!({
             "status": snapshot.status,
             "generation": meta.map(|m| m.generation),
             "k": meta.map(|m| m.k),
-            "trained-at": meta.and_then(|m| Self::unix_to_rfc3339(m.trained_at)),
+            "trained-at": Self::trained_at(snapshot)?,
             "assigned": snapshot.assigned,
-        })
+        }))
     }
 
     fn topic_tags_json(tags: &[TopicTag]) -> Vec<serde_json::Value> {
         tags.iter()
             .map(|t| json!({ "tag": t.tag, "lift": (t.lift * 100.0).round() / 100.0, "notes": t.notes }))
             .collect()
-    }
-
-    fn unix_to_rfc3339(secs: i64) -> Option<String> {
-        chrono::DateTime::from_timestamp(secs, 0).map(|d| d.to_rfc3339())
     }
 
     /// Browse notes by source URL host

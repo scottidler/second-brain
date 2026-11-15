@@ -50,6 +50,15 @@ const TRAINED_KEYS: [&str; 10] = [
     KEY_EXCLUDE_TYPES,
 ];
 
+/// The one spelling of a unix-seconds timestamp on every topic surface:
+/// RFC 3339, seconds precision, `Z` for UTC. A timestamp chrono cannot
+/// represent is an error, never a silent `null`.
+pub fn unix_to_rfc3339(secs: i64) -> Result<String> {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .ok_or_else(|| eyre!("timestamp {secs} is not a representable time"))
+}
+
 /// One note's topic, as written by [`SearchIndex::assign_batch`] and
 /// [`SearchIndex::replace_generation`].
 #[derive(Debug, Clone, PartialEq)]
@@ -172,6 +181,9 @@ impl TopicState {
                     "topic_centroids holds {} rows but topic_state has no `{KEY_TRAINED_AT}`: corrupt topic state",
                     self.centroids.len()
                 );
+            }
+            if self.values.contains_key(KEY_GENERATION) {
+                self.parsed::<i64>(KEY_GENERATION)?;
             }
             return Ok(None);
         }
@@ -695,7 +707,13 @@ impl SearchIndex {
             [],
             |row| row.get(0),
         )?;
-        if tables < 3 {
+        if tables != 0 && tables != 3 {
+            bail!(
+                "{} holds {tables} of the 3 topic tables (topic_state, topic_centroids, note_topics): corrupt topic state",
+                db_path.display()
+            );
+        }
+        if tables == 0 {
             return Ok(Some(TopicPeek {
                 status: TopicStatus::Absent,
                 meta: None,

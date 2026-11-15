@@ -364,7 +364,7 @@ pub use topic::TopicTables;
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 pub use topic::{
     Assignment, NewGeneration, SummaryVector, TopicMeta, TopicNote, TopicNotes, TopicOverview, TopicPeek, TopicScope,
-    TopicSnapshot, TopicState, TopicStatus, TopicSummary, TopicTag, label_tags,
+    TopicSnapshot, TopicState, TopicStatus, TopicSummary, TopicTag, label_tags, unix_to_rfc3339,
 };
 
 mod graph;

@@ -45,6 +45,10 @@ fn index_with_notes(tags: &[Vec<&str>]) -> SearchIndex {
 
 /// Train a `k`-topic generation; `rows` is `(note index, topic, cosine)`.
 fn train(index: &mut SearchIndex, k: usize, rows: &[(usize, u32, f32)]) -> i64 {
+    train_at(index, k, rows, 1_700_000_000)
+}
+
+fn train_at(index: &mut SearchIndex, k: usize, rows: &[(usize, u32, f32)], trained_at: i64) -> i64 {
     let assignments: Vec<Assignment> = rows
         .iter()
         .map(|(note, topic, cosine)| Assignment {
@@ -65,7 +69,7 @@ fn train(index: &mut SearchIndex, k: usize, rows: &[(usize, u32, f32)]) -> i64 {
             dim: DIM,
             model_version: MODEL,
             assignments: &assignments,
-            trained_at: 1_700_000_000,
+            trained_at,
             seed: 7,
             epochs: 5.0,
             e_means_version: "0.2.1",
@@ -163,7 +167,7 @@ async fn topic_map_browse_returns_every_non_empty_topic_with_the_envelope() {
     assert_eq!(v["status"], "valid");
     assert_eq!(v["generation"], 1);
     assert_eq!(v["k"], 4);
-    assert_eq!(v["trained-at"], "2023-11-14T22:13:20+00:00");
+    assert_eq!(v["trained-at"], "2023-11-14T22:13:20Z");
     assert_eq!(v["count"], 3);
     let topics: Vec<u64> = v["results"]
         .as_array()
@@ -244,6 +248,57 @@ async fn topic_map_generation_one_below_stored_is_an_error_naming_both() {
 }
 
 #[tokio::test]
+async fn topic_map_browse_and_tags_forms_check_generation_too() {
+    let mut index = index_with_notes(&[vec!["a"], vec!["a"]]);
+    train(&mut index, 2, &[(0, 0, 0.9), (1, 1, 0.9)]);
+    train(&mut index, 2, &[(0, 0, 0.9), (1, 1, 0.9)]);
+    let server = server(index);
+
+    for args in [json!({"generation": 1}), json!({"tags": ["a"], "generation": 1})] {
+        let stale = call(&server, "topic_map", args.clone()).await;
+        assert_eq!(stale.is_error, Some(true), "{args}");
+        let message = text_of(&stale);
+        assert!(
+            message.contains("generation 1") && message.contains("generation is 2"),
+            "{message}"
+        );
+    }
+    for args in [json!({"generation": 2}), json!({"tags": ["a"], "generation": 2})] {
+        let fresh = call(&server, "topic_map", args.clone()).await;
+        assert_ne!(fresh.is_error, Some(true), "{args}");
+        assert_eq!(json_of(&fresh)["generation"], 2);
+    }
+}
+
+#[tokio::test]
+async fn trained_at_is_rfc3339_with_a_z_and_seconds_on_every_surface() {
+    let mut index = index_with_notes(&[vec![], vec![]]);
+    train(&mut index, 2, &[(0, 0, 0.9), (1, 1, 0.9)]);
+    let server = server(index);
+    let browse = json_of(&call(&server, "topic_map", json!({})).await);
+    assert_eq!(browse["trained-at"], "2023-11-14T22:13:20Z", "{browse}");
+    let overview = json_of(&call(&server, "vault_overview", json!({})).await);
+    assert_eq!(overview["topics"]["trained-at"], "2023-11-14T22:13:20Z", "{overview}");
+}
+
+#[tokio::test]
+async fn an_unrepresentable_trained_at_is_an_error_not_a_null() {
+    let mut index = index_with_notes(&[vec![], vec![]]);
+    train_at(&mut index, 2, &[(0, 0, 0.9), (1, 1, 0.9)], i64::MAX);
+    let server = server(index);
+    let browse = server.dispatch("topic_map", json!({})).await;
+    assert!(
+        browse.as_ref().map_or(true, |r| r.is_error == Some(true)),
+        "browse must fail loudly: {browse:?}"
+    );
+    let overview = server.dispatch("vault_overview", json!({})).await;
+    assert!(
+        overview.as_ref().map_or(true, |r| r.is_error == Some(true)),
+        "overview must fail loudly: {overview:?}"
+    );
+}
+
+#[tokio::test]
 async fn topic_map_topic_form_lists_notes_nearest_first_at_the_requested_detail() {
     let mut index = index_with_notes(&[vec!["a"], vec!["b"], vec!["a"], vec![]]);
     train(&mut index, 2, &[(0, 0, 0.5), (1, 0, 0.9), (2, 0, 0.7), (3, 1, 0.99)]);
@@ -277,7 +332,7 @@ async fn topic_map_unknown_topic_and_unknown_arguments_fail_loudly() {
     let server = server(index);
     let unknown = call(&server, "topic_map", json!({"topic": 7})).await;
     assert_eq!(unknown.is_error, Some(true));
-    assert!(text_of(&unknown).contains("0..2"), "{}", text_of(&unknown));
+    assert!(text_of(&unknown).contains("0 to 1"), "{}", text_of(&unknown));
 
     let err = server
         .dispatch("topic_map", json!({"cluster": 1}))
@@ -341,5 +396,5 @@ async fn vault_overview_carries_a_topics_status_block() {
     assert_eq!(v["topics"]["generation"], 1);
     assert_eq!(v["topics"]["k"], 2);
     assert_eq!(v["topics"]["assigned"], 2);
-    assert_eq!(v["topics"]["trained-at"], "2023-11-14T22:13:20+00:00");
+    assert_eq!(v["topics"]["trained-at"], "2023-11-14T22:13:20Z");
 }

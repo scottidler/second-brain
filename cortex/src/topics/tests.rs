@@ -535,6 +535,32 @@ fn tick_with_a_stale_generation_writes_nothing() {
 }
 
 #[test]
+fn assign_stopped_between_the_read_and_the_write_writes_nothing() {
+    let mut index = fixture();
+    let topics = topics_config(3);
+    train_index(&mut index, &topics, None, None, 5_000).expect("train");
+    add_embedded(&mut index, "notes/late.md", "article", &blob_vector(1, 4242));
+    let before = tables(&index);
+
+    // Reads: before the removal write, at the loop top, then before the
+    // batch write. The third read flips to stopped, after the batch was read.
+    let reads = std::cell::Cell::new(0);
+    let stopped = || {
+        reads.set(reads.get() + 1);
+        reads.get() >= 3
+    };
+    let (report, was_stopped) = assign_index_until(&mut index, &topics, 6_000, &stopped).expect("assign");
+    assert!(was_stopped);
+    assert_eq!(reads.get(), 3, "the write check is the third read");
+    assert_eq!(report.assigned_this_run, 0);
+    assert_eq!(
+        tables(&index),
+        before,
+        "a stop between the read and the write writes nothing"
+    );
+}
+
+#[test]
 fn tick_stopped_before_the_write_writes_nothing() {
     let mut index = fixture();
     let topics = topics_config(3);
