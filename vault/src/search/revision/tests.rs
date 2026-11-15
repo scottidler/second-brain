@@ -23,12 +23,14 @@ fn vector_hash_is_lowercase_hex_sha256_of_the_exact_bytes() {
 
 #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
 mod vec {
+    use std::cell::RefCell;
     use std::path::Path;
 
     use rusqlite::{Connection, params};
 
     use super::vector_hash;
-    use crate::search::{BatchUpsert, EmbeddingKind, SearchIndex};
+    use crate::search::revision::{BACKFILL_BATCH, MigrationStep};
+    use crate::search::{BUSY_TIMEOUT, BatchUpsert, EmbeddingKind, SearchIndex};
 
     const MODEL: &str = "revision-model";
     const DIM: usize = 4;
@@ -258,6 +260,125 @@ mod vec {
         drop(index);
         let index = SearchIndex::open(&db).expect("reopen");
         assert_eq!(snapshot(&index.conn), before, "ensure_schema again changes nothing");
+    }
+
+    /// A pre-marker index file with more rows than one small batch: three
+    /// summaries plus three transcript chunks, `fresh.md` fresh under the old
+    /// rule and `stale.md` not.
+    fn pre_marker_index(db: &Path) {
+        let mut index = index_with_notes(Some(db), &["fresh.md", "stale.md", "never.md"]);
+        embed(&index, "fresh.md", [1.0, 0.0, 0.0, 0.0]);
+        embed(&index, "stale.md", [0.0, 1.0, 0.0, 0.0]);
+        embed(&index, "never.md", [0.0, 0.0, 1.0, 0.0]);
+        index
+            .swap_kind_chunks(
+                "fresh.md",
+                EmbeddingKind::TranscriptChunk,
+                &[
+                    ("one".to_string(), vec![0.5, 0.5, 0.5, 0.5]),
+                    ("two".to_string(), vec![0.0, 0.5, 0.5, 0.5]),
+                    ("three".to_string(), vec![0.0, 0.0, 0.5, 0.5]),
+                ],
+                MODEL,
+                100,
+            )
+            .expect("chunks");
+        drop(index);
+        downgrade_to_pre_marker(
+            db,
+            &[("fresh.md", 1_000), ("stale.md", 2_000), ("never.md", 1_000)],
+            &[("fresh.md", 1_000), ("stale.md", 1_500)],
+        );
+    }
+
+    /// A connection set up exactly as `SearchIndex::open` sets it up, without
+    /// running `ensure_schema`, so a test drives the migration by hand.
+    fn open_without_schema(db: &Path) -> SearchIndex {
+        let conn = Connection::open(db).expect("open");
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .expect("pragmas");
+        conn.busy_timeout(BUSY_TIMEOUT).expect("busy timeout");
+        SearchIndex { conn }
+    }
+
+    fn unhashed_rows(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM note_embeddings WHERE vector_hash IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count")
+    }
+
+    /// Both openers' end state: every row hashed, `edge_build_state` swapped,
+    /// `fresh.md` carried over, `stale.md` and `never.md` targets.
+    fn assert_migrated(db: &Path) {
+        let index = SearchIndex::open(db).expect("reopen");
+        assert_every_row_hashes_its_blob(&index.conn);
+        let edge_columns = columns(&index.conn, "edge_build_state");
+        assert!(
+            !edge_columns.contains(&"semantic_built_at".to_string()),
+            "{edge_columns:?}"
+        );
+        assert_eq!(
+            index.semantic_edge_targets().expect("targets"),
+            ["never.md", "stale.md"]
+        );
+    }
+
+    /// Opener B arrives while opener A is between two backfill batches, the
+    /// first-open race the round 2 audit reproduced on a ripr copy. A must not
+    /// hold the write lock across batches, so B's own `ensure_schema` writes
+    /// get it at once and B opens, instead of failing `database is locked`
+    /// after `BUSY_TIMEOUT`.
+    #[test]
+    fn a_second_opener_mid_backfill_opens_without_waiting_for_the_backfill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("index.db");
+        pre_marker_index(&db);
+        let opener_a = open_without_schema(&db);
+        let opener_b = RefCell::new(None);
+
+        opener_a
+            .migrate_vector_hash_with(2, &|step| {
+                if step != MigrationStep::Batch || opener_b.borrow().is_some() {
+                    return;
+                }
+                assert!(unhashed_rows(&opener_a.conn) > 0, "A is mid-backfill when B opens");
+                let started = std::time::Instant::now();
+                let opened = SearchIndex::open(&db).map(drop).map_err(|e| format!("{e:#}"));
+                *opener_b.borrow_mut() = Some((opened, started.elapsed()));
+            })
+            .expect("opener A finishes after B did the rest");
+
+        let (opened, waited) = opener_b.into_inner().expect("B ran mid-backfill");
+        opened.expect("opener B opens while A is mid-migration");
+        assert!(waited < BUSY_TIMEOUT, "B waited {waited:?} on A's lock");
+        assert_migrated(&db);
+    }
+
+    /// Opener A's read-only first look sees the pre-marker shape, then opener
+    /// B runs the whole migration before A takes any lock. Every step A tries
+    /// re-reads the schema after its lock, so A neither re-adds the column
+    /// (`duplicate column name`) nor swaps an already-swapped
+    /// `edge_build_state` (`no such column: semantic_built_at`).
+    #[test]
+    fn an_opener_whose_first_look_went_stale_skips_the_steps_another_opener_did() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("index.db");
+        pre_marker_index(&db);
+        let opener_a = open_without_schema(&db);
+
+        let report = opener_a
+            .migrate_vector_hash_with(BACKFILL_BATCH, &|step| {
+                if step == MigrationStep::Planned {
+                    SearchIndex::open(&db).expect("opener B runs the whole migration");
+                }
+            })
+            .expect("opener A must not error on a step B already did");
+
+        assert_eq!(report, Default::default(), "B did every step, A did none");
+        assert_migrated(&db);
     }
 
     #[test]
