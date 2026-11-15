@@ -247,3 +247,8 @@ const BORG_DAEMON = Object.freeze({
 - Break-test: with the old `AbortSignal.timeout` code restored (and `AbortSignal` in the context), `# pass 5 / # fail 1`, `not ok 5 - timeout stops at the response`; the other 5 pass. Fix restored.
 - `/usr/bin/node --test borg/tests/js/*.test.mjs`: `# tests 6 # pass 6 # fail 0`.
 - `otto extension-test`: `pass 6 fail 0`, `finished successfully`.
+
+## Orchestrator: Phase 0 rerun on the full daily profile
+
+### Verification
+- Closes audit defer item 8 (Phase 0 used a copied `prefs.js` only). On ltl-7007, the whole daily profile `8r3vpj3l.default-release` was rsynced into a throwaway dir (excluding the lock files, FxA sign-in, logins, cookies, storage, cache and session store), with `browser.startup.page` 0, and loaded headless: `firefox --headless --no-remote --profile <copy> --screenshot ... http://ripr.example.ts.net:8181/health` (real tailnet name on the command line). rc=0; the screenshot shows the JSON viewer with `status: "ok"`, `service: "obsidian-borg"`, `version: "v0.22.0"`. No DNS error page, no `https://` redirect. The profile's extensions, add-ons and DoH-rollout state all rode along; no `network.trr.excluded-domains` step is needed.
