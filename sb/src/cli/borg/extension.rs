@@ -6,6 +6,9 @@ use eyre::{Context, Result};
 use borg::config::Config;
 use borg::extension::{self, install};
 
+/// `sb borg extension install`: baked config differs from the signed `.xpi`.
+const EXIT_CONFIG_MISMATCH: u8 = 3;
+
 #[derive(Args)]
 pub struct ExtensionCli {
     #[command(subcommand)]
@@ -80,7 +83,16 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
                 policy_file,
                 if_installed,
             };
-            let result = install::run(&repo_root, &config, opts, version)?;
+            let result = match install::run(&repo_root, &config, opts, version) {
+                Ok(result) => result,
+                Err(err) if err.downcast_ref::<extension::sign::ConfigMismatch>().is_some() => {
+                    // Distinct exit code so `otto deploy` can fail on a stale
+                    // extension while every other refresh failure stays non-fatal.
+                    eprintln!("Error: {err:#}");
+                    return Err(crate::error::ExitWith(EXIT_CONFIG_MISMATCH).into());
+                }
+                Err(err) => return Err(err),
+            };
             if result.skipped_not_installed {
                 println!(
                     "extension not installed on this machine; skipping (use without --if-installed to bootstrap)."

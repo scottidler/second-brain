@@ -356,8 +356,16 @@ tasks:
       # First-machine bootstrap is `sudo sb borg extension install` (or
       # `sudo sb bootstrap --extension`); from then on `bump && otto deploy`
       # is the entire day-to-day workflow.
-      if sb borg extension install --no-policy --if-installed; then
+      # Exit 3 = the signed .xpi carries a different extension config than
+      # borg.yml now renders; that is a stale extension, so fail the deploy
+      # (daemons are already restarted). Any other failure stays non-fatal.
+      # `&& ... || ...` keeps a non-zero exit from tripping `set -e` here.
+      sb borg extension install --no-policy --if-installed && EXT_RC=0 || EXT_RC=$?
+      if [ "$EXT_RC" -eq 0 ]; then
         echo "✅ Extension refresh: handled"
+      elif [ "$EXT_RC" -eq 3 ]; then
+        echo "❌ Extension config changed without a version bump; bump to re-sign (daemon redeploy succeeded)"
+        exit 3
       else
         echo "⚠️  Extension refresh failed (non-fatal; daemon redeploy succeeded)"
       fi

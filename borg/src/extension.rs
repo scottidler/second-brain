@@ -68,8 +68,7 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
         std::fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     }
 
-    let manifest_content =
-        serde_json::to_string_pretty(&manifest::build_manifest(version, config)).context("serialize manifest")? + "\n";
+    let manifest_content = render_manifest(version, config)?;
     std::fs::write(target_dir.join("manifest.json"), manifest_content).context("write manifest.json")?;
 
     std::fs::write(target_dir.join("daemon.js"), daemon_js).context("write daemon.js")?;
@@ -80,6 +79,12 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
     Ok(StageResult {
         target_dir: target_dir.to_path_buf(),
     })
+}
+
+/// The exact `manifest.json` text `stage()` writes. Shared with
+/// `daemon::baked_config_hash` so the sign-time hash covers what ships.
+pub fn render_manifest(version: &str, config: &Config) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&manifest::build_manifest(version, config)).context("serialize manifest")? + "\n")
 }
 
 pub fn repo_root() -> Result<PathBuf> {

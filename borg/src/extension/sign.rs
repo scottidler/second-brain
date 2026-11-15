@@ -1,10 +1,61 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use std::fmt;
+
 use eyre::{Context, ContextCompat, Result};
 
 use crate::config::Config;
 use crate::extension::{self, SignResult};
+
+/// The reuse path found a signed `.xpi` whose baked config no longer matches
+/// this host's `borg.yml` (or has no sidecar to compare). AMO holds the
+/// version already, so the only re-sign is a version bump. `sb borg extension
+/// install` maps this to exit 3.
+#[derive(Debug)]
+pub struct ConfigMismatch {
+    pub version: String,
+    pub detail: &'static str,
+}
+
+impl fmt::Display for ConfigMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "extension v{} {}; bump the version to re-sign",
+            self.version, self.detail
+        )
+    }
+}
+
+impl std::error::Error for ConfigMismatch {}
+
+fn sidecar_path(artifacts_dir: &Path, version: &str) -> PathBuf {
+    artifacts_dir.join(format!("{version}.config-hash"))
+}
+
+fn check_sidecar(artifacts_dir: &Path, version: &str, current_hash: &str) -> Result<()> {
+    let path = sidecar_path(artifacts_dir, version);
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ConfigMismatch {
+                version: version.to_string(),
+                detail: "has a signed .xpi but no config-hash sidecar, so its baked config is unknown",
+            }
+            .into());
+        }
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    if recorded.trim() != current_hash {
+        return Err(ConfigMismatch {
+            version: version.to_string(),
+            detail: "was signed with different extension config",
+        }
+        .into());
+    }
+    Ok(())
+}
 
 pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResult> {
     log::debug!(
@@ -27,7 +78,9 @@ pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResul
     // attempt always returns `Version X.Y.Z already exists` from AMO and
     // exits non-zero, which breaks multi-machine deploys and any retry of a
     // single-machine deploy.
+    let config_hash = extension::daemon::baked_config_hash(config).context("hash baked extension config")?;
     if let Ok(existing) = locate_versioned_xpi(&artifacts_dir, version) {
+        check_sidecar(&artifacts_dir, version, &config_hash)?;
         log::info!(
             "extension::sign::run: reusing existing signed .xpi for v{version} ({}); skipping AMO upload",
             existing.display()
@@ -47,6 +100,11 @@ pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResul
     let tempdir = tempfile::TempDir::new().context("create staging tempdir")?;
     let staging_dir = tempdir.path();
     extension::stage(staging_dir, version, config).context("stage extension for signing")?;
+
+    // Written BEFORE the upload: a sidecar with no .xpi is never read, and a
+    // sign that dies after AMO accepted the version still leaves the record.
+    let sidecar = sidecar_path(&artifacts_dir, version);
+    std::fs::write(&sidecar, format!("{config_hash}\n")).with_context(|| format!("write {}", sidecar.display()))?;
 
     log::info!(
         "signing extension v{version} (staged at {}, artifacts -> {})",
@@ -76,7 +134,9 @@ pub fn run(repo_root: &Path, config: &Config, version: &str) -> Result<SignResul
         .context("Failed to run web-ext - is it installed?")?;
 
     if !status.success() {
-        eyre::bail!("web-ext sign failed with exit {status}");
+        eyre::bail!(
+            "web-ext sign failed with exit {status}; if AMO reported \"already exists\", another host published v{version} first; bump to re-sign"
+        );
     }
 
     let xpi_path = locate_versioned_xpi(&artifacts_dir, version)?;
@@ -109,3 +169,6 @@ fn locate_versioned_xpi(artifacts_dir: &Path, version: &str) -> Result<PathBuf> 
         n => eyre::bail!("expected exactly 1 .xpi for version {version}, found {n}: {matches:?}"),
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -52,6 +52,23 @@ pub fn render_daemon_js(config: &Config) -> Result<String> {
     ))
 }
 
+/// Hex SHA-256 of the config-derived files `stage()` renders: `manifest.json`
+/// with its `version` blanked, then `daemon.js`. Hashing the rendered output
+/// covers every config input (`extension.*`, `server.host`) without listing
+/// them. Each part is length-prefixed so the two cannot blur together.
+pub fn baked_config_hash(config: &Config) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    log::debug!("extension::daemon::baked_config_hash");
+    let manifest = crate::extension::render_manifest("", config)?;
+    let daemon_js = render_daemon_js(config)?;
+    let mut hasher = Sha256::new();
+    for part in [manifest, daemon_js] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// An endpoint as the popup concatenates it with a path: no trailing `/`.
 pub fn endpoint_base(endpoint: &Url) -> String {
     endpoint.as_str().trim_end_matches('/').to_string()
