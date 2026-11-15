@@ -346,16 +346,24 @@ impl Default for DistillConfig {
     }
 }
 
-/// Browser-extension lifecycle settings. The only field today is
-/// `origin-patterns`, an optional explicit list of match-pattern hosts the
-/// extension is permitted to talk to. When `None` (default), the extension
-/// manifest generator merges `DEFAULT_ORIGIN_PATTERNS` (localhost, *.lan,
-/// *.local) with `server.host`. Users running borg on Tailscale, ZeroTier, a
-/// VPS, or any host not covered by the defaults set this list explicitly.
+/// Browser-extension lifecycle settings.
+///
+/// - `origin-patterns`: optional explicit list of match-pattern hosts the
+///   extension is permitted to talk to. When `None` (default), the manifest
+///   generator merges `DEFAULT_ORIGIN_PATTERNS` (localhost, *.lan, *.local)
+///   with `server.host`.
+/// - `endpoints`: ordered daemon base URLs the popup tries in turn. Unset means
+///   `[http://localhost:8181]`; an empty list is an error. Every endpoint
+///   hostname is added to the manifest patterns on top of `origin-patterns`.
+///   Validated by `extension::daemon::resolved_endpoints`.
+/// - `attempt-timeout-ms`: per-endpoint ceiling. Unset means 3000; 0 is an
+///   error.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ExtensionConfig {
     pub origin_patterns: Option<Vec<String>>,
+    pub endpoints: Option<Vec<String>>,
+    pub attempt_timeout_ms: Option<u64>,
 }
 
 /// Bounded-wait configuration for the ingestion pipeline. All timeouts are

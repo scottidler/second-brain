@@ -190,3 +190,72 @@ fn action_opens_popup_and_background_is_removed() {
         "background context must be removed; its presence reintroduces the crashable capture path"
     );
 }
+
+fn config_with_endpoints(endpoints: &[&str]) -> Config {
+    let mut config = Config::default();
+    config.extension.endpoints = Some(endpoints.iter().map(|s| s.to_string()).collect());
+    config
+}
+
+#[test]
+fn endpoint_host_is_added_to_host_permissions_and_csp_with_defaults_kept() {
+    let config = config_with_endpoints(&["http://ripr.example.ts.net:8181", "http://ripr.lan:8181"]);
+    let patterns = origin_patterns(&config);
+    for default in DEFAULT_ORIGIN_PATTERNS {
+        assert!(patterns.iter().any(|p| p == default), "{default} missing: {patterns:?}");
+    }
+    let manifest = build_manifest("0.0.0-test", &config);
+    let hosts: Vec<&str> = manifest["host_permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(hosts.contains(&"http://ripr.example.ts.net/*"), "{hosts:?}");
+    let csp = manifest["content_security_policy"]["extension_pages"].as_str().unwrap();
+    assert!(csp.contains("http://ripr.example.ts.net:*"), "{csp}");
+}
+
+#[test]
+fn endpoint_hosts_are_added_to_explicit_origin_patterns() {
+    let mut config = config_with_endpoints(&["http://ripr.example.ts.net:8181"]);
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    let patterns = origin_patterns(&config);
+    assert_eq!(
+        patterns,
+        vec!["borg.example.com".to_string(), "ripr.example.ts.net".to_string()]
+    );
+}
+
+#[test]
+fn lan_endpoint_adds_no_pattern_because_wildcard_covers_it() {
+    let patterns = origin_patterns(&config_with_endpoints(&["http://ripr.lan:8181"]));
+    assert_eq!(patterns, origin_patterns(&Config::default()));
+}
+
+#[test]
+fn endpoint_already_listed_exactly_is_not_duplicated() {
+    let mut config = config_with_endpoints(&["http://borg.example.com:8181", "http://borg.example.com:9000"]);
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    assert_eq!(origin_patterns(&config), vec!["borg.example.com".to_string()]);
+}
+
+#[test]
+fn two_endpoints_on_one_new_host_add_one_pattern() {
+    let config = config_with_endpoints(&["http://ripr.ts.net:8181", "http://ripr.ts.net:9000"]);
+    let count = origin_patterns(&config).iter().filter(|p| *p == "ripr.ts.net").count();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn invalid_endpoints_add_no_pattern() {
+    let patterns = origin_patterns(&config_with_endpoints(&["https://ripr.example.ts.net:8181"]));
+    assert_eq!(patterns, origin_patterns(&Config::default()));
+}
+
+#[test]
+fn unset_endpoints_leave_explicit_origin_patterns_untouched() {
+    let mut config = Config::default();
+    config.extension.origin_patterns = Some(vec!["borg.example.com".to_string()]);
+    assert_eq!(origin_patterns(&config), vec!["borg.example.com".to_string()]);
+}

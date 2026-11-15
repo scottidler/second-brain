@@ -4,6 +4,7 @@ use eyre::{Context, Result};
 
 use crate::config::Config;
 
+pub mod daemon;
 pub mod install;
 pub mod manifest;
 pub mod schema;

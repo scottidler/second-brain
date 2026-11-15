@@ -1,10 +1,41 @@
 use serde_json::{Value, json};
 
+use super::daemon;
 use crate::config::Config;
 
 const DEFAULT_ORIGIN_PATTERNS: &[&str] = &["localhost", "*.lan", "*.local"];
 
+/// Origin patterns for `host_permissions` and the CSP: the explicit
+/// `origin-patterns` list, or the defaults plus `server.host`, then every
+/// endpoint hostname not already covered (exact or wildcard).
+///
+/// Infallible by signature, so an invalid `extension.endpoints` contributes
+/// nothing here and logs a warning. The loud failure is
+/// `daemon::resolved_endpoints`, which `stage()` calls before rendering.
 pub fn origin_patterns(config: &Config) -> Vec<String> {
+    let mut patterns = base_patterns(config);
+    // The unset-default endpoint (localhost) is not configured reach: it must
+    // not add a pattern to an explicit `origin-patterns` list.
+    if config.extension.endpoints.is_none() {
+        return patterns;
+    }
+    match daemon::resolved_endpoints(config) {
+        Ok(endpoints) => {
+            for endpoint in &endpoints {
+                if let Some(host) = endpoint.host_str()
+                    && !patterns.iter().any(|p| p == host)
+                    && !covered_by_wildcard(&patterns, host)
+                {
+                    patterns.push(host.to_string());
+                }
+            }
+        }
+        Err(err) => log::warn!("extension::manifest::origin_patterns: ignoring invalid extension.endpoints: {err:#}"),
+    }
+    patterns
+}
+
+fn base_patterns(config: &Config) -> Vec<String> {
     if let Some(explicit) = &config.extension.origin_patterns
         && !explicit.is_empty()
     {
