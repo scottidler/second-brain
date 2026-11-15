@@ -226,3 +226,24 @@ const BORG_DAEMON = Object.freeze({
 
 ### Verification
 - `otto ci` rerun after the rewrite (results in the commit that carries this entry).
+
+## Post-audit fix: timeout stops at the response
+### Design decisions
+- Per attempt, an `AbortController` plus `setTimeout(() => controller.abort(new DOMException("signal timed out", "TimeoutError")), timeoutMs)`, with `clearTimeout` in a `finally` once `fetchImpl` settles - borg/clients/extension/fallback.js:postWithFallback - `AbortSignal.timeout` stays armed after headers arrive, so popup.js `await result.response.json()` was aborted by a late body and the popup showed `Error: signal timed out` for a capture the daemon had already queued. The timeout now bounds only "no HTTP response yet", as the Goals require.
+- The abort reason keeps the `TimeoutError: signal timed out` shape - the recorded attempt string, the existing timeout test, and the popup wording are unchanged.
+
+### Deviations
+- None. API, no keepalive, classic script, no DOM all kept.
+
+### Tradeoffs
+- Manual controller and timer vs `AbortSignal.timeout` - the latter cannot be disarmed, which is the bug.
+- The vm test context now carries `AbortController`, `DOMException`, `setTimeout`, `clearTimeout` instead of `AbortSignal`.
+
+### Open questions
+- None.
+
+### Verification
+- New case "timeout stops at the response: a slow body is not aborted": fetch resolves at once, `json()` takes 150 ms against a 50 ms timeout and rejects if the signal aborts; asserts `ok: true`, json resolves, `signal.aborted === false`.
+- Break-test: with the old `AbortSignal.timeout` code restored (and `AbortSignal` in the context), `# pass 5 / # fail 1`, `not ok 5 - timeout stops at the response`; the other 5 pass. Fix restored.
+- `/usr/bin/node --test borg/tests/js/*.test.mjs`: `# tests 6 # pass 6 # fail 0`.
+- `otto extension-test`: `pass 6 fail 0`, `finished successfully`.

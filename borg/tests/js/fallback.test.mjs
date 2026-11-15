@@ -2,7 +2,7 @@
 // Run: node --test borg/tests/js/*.test.mjs   (otto extension-test). No package.json, no deps.
 //
 // fallback.js is a classic browser script that declares one global function, so
-// it is evaluated in a node:vm context carrying node's AbortSignal, and every
+// it is evaluated in a node:vm context carrying node's AbortController, DOMException and timers, and every
 // case passes a mock fetchImpl.
 
 import { test } from "node:test";
@@ -16,7 +16,7 @@ const FIRST = "http://first.example:8181";
 const SECOND = "http://second.example:8181";
 
 function loadPostWithFallback() {
-  const context = vm.createContext({ AbortSignal });
+  const context = vm.createContext({ AbortController, DOMException, setTimeout, clearTimeout });
   vm.runInContext(readFileSync(FALLBACK_JS, "utf8"), context, { filename: FALLBACK_JS });
   return context.postWithFallback;
 }
@@ -45,13 +45,10 @@ const networkError = async () => {
 };
 
 // Rejects with the signal's reason when it aborts, and never resolves otherwise,
-// the way a fetch to a dead peer hangs until AbortSignal.timeout fires.
+// the way a fetch to a dead peer hangs until the timeout fires.
 //
-// AbortSignal.timeout's timer is unref'd, so on its own it does not keep the
-// event loop alive: on Node 20/22 the loop drains first and node:test cancels
-// the case ("Promise resolution is still pending but the event loop has already
-// resolved"). A real fetch holds a socket open; the keepalive interval stands in
-// for it and is cleared the moment the abort fires.
+// The keepalive interval stands in for the open socket a real fetch holds, and is
+// cleared the moment the abort fires.
 const hang = (init) =>
   new Promise((_resolve, reject) => {
     const keepalive = setInterval(() => {}, 1000);
@@ -133,6 +130,28 @@ test("first endpoint returns 401: second is NOT called", async () => {
   assert.equal(result.endpoint, FIRST);
   assert.equal(result.response.status, 401);
   assert.deepEqual(calls.map((c) => c.url), [`${FIRST}/ingest`]);
+});
+
+test("timeout stops at the response: a slow body is not aborted", async () => {
+  let signal;
+  const slowBody = (init) => {
+    signal = init.signal;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+          setTimeout(() => resolve({ queued: true }), 150);
+        }),
+    });
+  };
+  const { fetchImpl } = mockFetch({ [`${FIRST}/ingest`]: slowBody });
+  const result = await walk(fetchImpl);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(await result.response.json(), { queued: true });
+  assert.equal(signal.aborted, false);
 });
 
 test("all endpoints reject: ok is false and attempts lists both in order", async () => {
