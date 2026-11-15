@@ -19,6 +19,7 @@ use eyre::{Result, bail, eyre};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 
 use super::SearchIndex;
+use super::revision::unhashed_row;
 use super::vector::{EmbeddingKind, encode_embedding_bytes, validate_embedding_bytes};
 use crate::schema::NoteType;
 
@@ -57,8 +58,8 @@ pub struct Assignment {
     pub topic: u32,
     /// Dot product with the centroid.
     pub cosine: f32,
-    /// The `note_embeddings.id` the topic was assigned from.
-    pub embedding_id: i64,
+    /// The `note_embeddings.vector_hash` the topic was assigned from.
+    pub vector_hash: String,
 }
 
 /// Everything one training run hands to [`SearchIndex::replace_generation`].
@@ -85,7 +86,8 @@ pub struct NewGeneration<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryVector {
     pub note_path: String,
-    pub embedding_id: i64,
+    /// The row's `note_embeddings.vector_hash`.
+    pub vector_hash: String,
     pub embedding: Vec<f32>,
 }
 
@@ -235,8 +237,9 @@ impl TopicState {
 
 impl SearchIndex {
     /// Create the topic-map tables. Called from `ensure_vec_schema`, beside
-    /// `note_embeddings`. `note_topics.embedding_id` is a recorded value, not a
-    /// foreign key: the embedding row it names is deleted on every re-embed.
+    /// `note_embeddings`. `note_topics.vector_hash` is the recorded revision
+    /// marker of the summary the topic was assigned from (see
+    /// `search::revision`), compared against the live row to find re-embeds.
     pub(super) fn ensure_topic_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS topic_state (
@@ -252,7 +255,7 @@ impl SearchIndex {
                 note_path    TEXT PRIMARY KEY REFERENCES notes(path) ON DELETE CASCADE,
                 topic        INTEGER NOT NULL REFERENCES topic_centroids(topic),
                 cosine       REAL NOT NULL,
-                embedding_id INTEGER NOT NULL,
+                vector_hash  TEXT NOT NULL,
                 assigned_at  INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_note_topics_topic ON note_topics(topic);",
@@ -419,7 +422,7 @@ impl SearchIndex {
     }
 
     /// In-scope notes with no `note_topics` row, or a row assigned from a
-    /// different `note_embeddings.id` than the one now stored, with the vector
+    /// different `note_embeddings.vector_hash` than the one now stored, with the vector
     /// to assign. Eligibility is the caller's: `exclude_types`, plus the fixed
     /// rules that `quality` is not `low` and the note is not a merge tombstone.
     /// In scope also means holding an active-model `summary` row. Ordered by
@@ -523,13 +526,13 @@ impl SearchIndex {
         let dim = self.active_embedding_dim()?;
         let (eligible, eligible_args) = eligible_filter(exclude_types);
         let unassigned_clause = if only_unassigned {
-            "AND (t.note_path IS NULL OR t.embedding_id != e.id)"
+            "AND (t.note_path IS NULL OR e.vector_hash IS NULL OR t.vector_hash != e.vector_hash)"
         } else {
             ""
         };
         let limit_clause = if limit.is_some() { "LIMIT ?" } else { "" };
         let sql = format!(
-            "SELECT n.path, e.id, e.embedding
+            "SELECT n.path, e.vector_hash, e.embedding
                FROM notes n
                JOIN note_embeddings e
                  ON e.note_path = n.path AND e.kind = ? AND e.model_version = ?
@@ -551,17 +554,18 @@ impl SearchIndex {
             .query_map(params_from_iter(args), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         raw.into_iter()
-            .map(|(note_path, embedding_id, blob)| {
+            .map(|(note_path, vector_hash, blob)| {
+                let vector_hash = vector_hash.ok_or_else(|| unhashed_row(&note_path))?;
                 validate_embedding_bytes(&blob, dim).map_err(|e| eyre!("{note_path}: {e}"))?;
                 Ok(SummaryVector {
                     note_path,
-                    embedding_id,
+                    vector_hash,
                     embedding: decode_f32(&blob),
                 })
             })
@@ -584,12 +588,12 @@ impl SearchIndex {
 
 /// Raw contents of the three topic tables, for tests in other crates:
 /// `topic_state` key/value pairs, `(topic, centroid, trained_rows)`, and
-/// `(note_path, topic, embedding_id, assigned_at)`, each ordered by key.
+/// `(note_path, topic, vector_hash, assigned_at)`, each ordered by key.
 #[cfg(any(test, feature = "test-util"))]
 pub type TopicTables = (
     Vec<(String, String)>,
     Vec<(i64, Vec<u8>, i64)>,
-    Vec<(String, i64, i64, i64)>,
+    Vec<(String, i64, String, i64)>,
 );
 
 #[cfg(any(test, feature = "test-util"))]
@@ -609,7 +613,7 @@ impl SearchIndex {
             .collect::<rusqlite::Result<_>>()?;
         let notes = self
             .conn
-            .prepare("SELECT note_path, topic, embedding_id, assigned_at FROM note_topics ORDER BY note_path")?
+            .prepare("SELECT note_path, topic, vector_hash, assigned_at FROM note_topics ORDER BY note_path")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<_>>()?;
         Ok((state, centroids, notes))
@@ -767,7 +771,7 @@ fn load_state(tx: &rusqlite::Transaction<'_>) -> Result<TopicState> {
 
 fn insert_assignments(tx: &rusqlite::Transaction<'_>, assignments: &[Assignment], assigned_at: i64) -> Result<()> {
     let mut insert = tx.prepare(
-        "INSERT OR REPLACE INTO note_topics (note_path, topic, cosine, embedding_id, assigned_at)
+        "INSERT OR REPLACE INTO note_topics (note_path, topic, cosine, vector_hash, assigned_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for a in assignments {
@@ -775,7 +779,7 @@ fn insert_assignments(tx: &rusqlite::Transaction<'_>, assignments: &[Assignment]
             a.note_path,
             a.topic as i64,
             a.cosine as f64,
-            a.embedding_id,
+            a.vector_hash,
             assigned_at
         ])?;
     }

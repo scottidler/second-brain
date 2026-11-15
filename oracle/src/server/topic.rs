@@ -51,7 +51,7 @@ fn train(index: &mut SearchIndex, k: usize, rows: &[(usize, u32, f32)]) -> i64 {
             note_path: format!("notes/{note}.md"),
             topic: *topic,
             cosine: *cosine,
-            embedding_id: *note as i64 + 1,
+            vector_hash: format!("planted-{note}"),
         })
         .collect();
     let centroids: Vec<f32> = (0..k)

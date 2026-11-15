@@ -38,7 +38,7 @@ fn trained_db() -> (tempfile::TempDir, std::path::PathBuf, SearchIndex) {
                 note_path: "notes/a.md".to_string(),
                 topic: 0,
                 cosine: 0.9,
-                embedding_id: 1,
+                vector_hash: "planted-a".to_string(),
             }],
             trained_at: TRAINED_AT,
             seed: 7,
@@ -54,7 +54,7 @@ fn trained_db() -> (tempfile::TempDir, std::path::PathBuf, SearchIndex) {
                 note_path: "notes/b.md".to_string(),
                 topic: 0,
                 cosine: 0.6,
-                embedding_id: 2,
+                vector_hash: "planted-b".to_string(),
             }],
             TRAINED_AT + 3_600,
         )

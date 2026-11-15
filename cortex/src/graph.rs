@@ -9,9 +9,11 @@
 //!
 //! Four deterministic edge kinds, all derived from data already in the index:
 //! - **semantic** — each note's top-`k` cosine neighbors over
-//!   `note_embeddings` (the primary discriminating edge). Keyed on embedding
-//!   freshness (`note_embeddings.produced_at`), NOT `notes.modified_at`, so a
-//!   note whose embedding lands after it was skipped is never stranded.
+//!   `note_embeddings` (the primary discriminating edge). Keyed on the
+//!   embedding revision marker (`note_embeddings.vector_hash` against
+//!   `edge_build_state.semantic_vector_hash`), NOT `notes.modified_at`, so a
+//!   note whose embedding lands after it was skipped is never stranded, and
+//!   NOT whole-second `produced_at`, so two re-embeds in one second both count.
 //! - **wikilink** — resolved body wikilinks (`weight = 1.0`); danglers skipped.
 //! - **shared-tag** — rarity-weighted (`Σ 1/ln(1+df_t)`) so blanket tags
 //!   contribute ~nothing; built via a tag→notes inverted index with a fan-out
@@ -265,7 +267,7 @@ pub fn build(
     // Determine which notes' edges to rebuild. Per-note staleness (mirroring
     // `stale_embedding_targets`) so an incremental pass touches only notes that
     // actually changed — content edges keyed on `modified_at`, semantic edges
-    // keyed on embedding `produced_at` (never stranded).
+    // keyed on the summary's `vector_hash` (never stranded).
     let targets: Vec<String> = if full_rebuild {
         index.clear_edges()?;
         pass.rows.iter().map(|r| r.path.clone()).collect()
@@ -313,12 +315,12 @@ pub fn build(
     Ok(stats)
 }
 
-/// Persist a note's build watermarks. A failed read of the summary watermark
-/// is an error, never "no summary embedding" (`COALESCE` already returns 0
-/// for that): a swallowed error would record 0 and skew the next pass.
+/// Persist a note's build watermarks. A failed read of the summary hash is
+/// an error, never "no summary embedding" (that is `Ok(None)`): a swallowed
+/// error would record no hash and rebuild the note on every pass.
 fn record_watermark(index: &SearchIndex, path: &str, content_built_at: i64) -> Result<()> {
-    let semantic_built_at = index.note_summary_produced_at(path)?;
-    index.record_edge_build(path, content_built_at, semantic_built_at)
+    let semantic_vector_hash = index.note_summary_vector_hash(path)?;
+    index.record_edge_build(path, content_built_at, semantic_vector_hash.as_deref())
 }
 
 /// `sb cortex graph --rebuild`: re-derive every deterministic edge for every

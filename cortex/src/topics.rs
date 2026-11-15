@@ -198,7 +198,7 @@ fn train_index(
             note_path: row.note_path.clone(),
             topic,
             cosine,
-            embedding_id: row.embedding_id,
+            vector_hash: row.vector_hash.clone(),
         })
         .collect();
 
@@ -277,7 +277,7 @@ fn assign_index_until(
                     note_path: row.note_path.clone(),
                     topic,
                     cosine,
-                    embedding_id: row.embedding_id,
+                    vector_hash: row.vector_hash.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;

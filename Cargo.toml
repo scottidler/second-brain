@@ -51,6 +51,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 serial_test = "3.4.0"
+sha2 = "0.11.0"
 shellexpand = "3.1"
 teloxide = { version = "0.17", default-features = false, features = ["macros", "ctrlc_handler", "rustls", "rustls-native-roots"] }
 tempfile = "3.27"

@@ -157,14 +157,17 @@ impl SearchIndex {
             -- Per-note incremental build watermarks. Mirrors the per-row
             -- staleness pattern `stale_embedding_targets` uses: a note is a
             -- content-edge target when `notes.modified_at > content_built_at`,
-            -- and a semantic-edge target when its newest summary embedding's
-            -- `produced_at > semantic_built_at`. Keying semantic on
-            -- `produced_at` (not `modified_at`) is what prevents stranding a
-            -- note whose embedding lands after it was skipped.
+            -- and a semantic-edge target when its active-model summary's
+            -- `note_embeddings.vector_hash` differs from (or has no)
+            -- `semantic_vector_hash`, the hash its edges were built from.
+            -- Keying semantic on the embedding (not `modified_at`) is what
+            -- prevents stranding a note whose embedding lands after it was
+            -- skipped; keying on the hash (not whole-second `produced_at`) is
+            -- what catches two re-embeds inside one second.
             CREATE TABLE IF NOT EXISTS edge_build_state (
-                note_path        TEXT PRIMARY KEY,
-                content_built_at INTEGER NOT NULL DEFAULT 0,
-                semantic_built_at INTEGER NOT NULL DEFAULT 0,
+                note_path            TEXT PRIMARY KEY,
+                content_built_at     INTEGER NOT NULL DEFAULT 0,
+                semantic_vector_hash TEXT,
                 FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE
             );
 
@@ -461,17 +464,23 @@ impl SearchIndex {
     }
 
     /// Record that `path`'s edges were just rebuilt: persist the source
-    /// timestamps that selected it so it is not reprocessed until it changes
-    /// again. `content_built_at` is the note's `modified_at`; `semantic_built_at`
-    /// is its newest summary-embedding `produced_at` (0 when unembedded).
-    pub fn record_edge_build(&self, path: &str, content_built_at: i64, semantic_built_at: i64) -> Result<()> {
+    /// markers that selected it so it is not reprocessed until it changes
+    /// again. `content_built_at` is the note's `modified_at`;
+    /// `semantic_vector_hash` is the `vector_hash` of the active-model summary
+    /// the semantic edges were built from (`None` when unembedded).
+    pub fn record_edge_build(
+        &self,
+        path: &str,
+        content_built_at: i64,
+        semantic_vector_hash: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO edge_build_state (note_path, content_built_at, semantic_built_at)
+            "INSERT INTO edge_build_state (note_path, content_built_at, semantic_vector_hash)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(note_path) DO UPDATE SET
                 content_built_at = excluded.content_built_at,
-                semantic_built_at = excluded.semantic_built_at",
-            params![path, content_built_at, semantic_built_at],
+                semantic_vector_hash = excluded.semantic_vector_hash",
+            params![path, content_built_at, semantic_vector_hash],
         )?;
         Ok(())
     }

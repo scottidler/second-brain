@@ -16,7 +16,8 @@
 
 use std::path::Path;
 
-use super::{optional_row, warn_row};
+use super::revision::unhashed_row;
+use super::{optional_row, vector_hash, warn_row};
 use eyre::Result;
 use rusqlite::{TransactionBehavior, params};
 
@@ -209,8 +210,8 @@ fn insert_batch_item(tx: &rusqlite::Transaction<'_>, item: &BatchUpsert<'_>, ver
         &format!(
             "{verb} INTO note_embeddings (
                 note_path, kind, chunk_index, text, embedding, dim,
-                model_version, produced_at, source_modified_at, recipe
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                model_version, produced_at, source_modified_at, recipe, vector_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
         ),
         params![
             item.note_path,
@@ -223,6 +224,7 @@ fn insert_batch_item(tx: &rusqlite::Transaction<'_>, item: &BatchUpsert<'_>, ver
             chrono::Utc::now().timestamp(),
             item.source_modified_at,
             item.kind.recipe(),
+            vector_hash(&bytes),
         ],
     )?;
     Ok(())
@@ -506,8 +508,8 @@ impl SearchIndex {
         self.conn.execute(
             "INSERT OR REPLACE INTO note_embeddings (
                 note_path, kind, chunk_index, text, embedding, dim,
-                model_version, produced_at, source_modified_at, recipe
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                model_version, produced_at, source_modified_at, recipe, vector_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 note_path,
                 kind.as_str(),
@@ -519,6 +521,7 @@ impl SearchIndex {
                 now,
                 source_modified_at,
                 kind.recipe(),
+                vector_hash(&bytes),
             ],
         )?;
         Ok(())
@@ -629,8 +632,8 @@ impl SearchIndex {
             tx.execute(
                 "INSERT INTO note_embeddings (
                     note_path, kind, chunk_index, text, embedding, dim,
-                    model_version, produced_at, source_modified_at, recipe
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    model_version, produced_at, source_modified_at, recipe, vector_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     note_path,
                     kind.as_str(),
@@ -642,6 +645,7 @@ impl SearchIndex {
                     now,
                     source_modified_at,
                     kind.recipe(),
+                    vector_hash(&bytes),
                 ],
             )?;
         }
@@ -1155,43 +1159,63 @@ impl SearchIndex {
         Ok((read("note_embeddings")?, read("embedding_examined")?))
     }
 
-    /// Note paths whose newest `summary` embedding (for the active model) was
-    /// produced after their semantic edges were last built —
-    /// `note_embeddings.produced_at > edge_build_state.semantic_built_at`
-    /// (no `edge_build_state` row defaults to 0). This is the **semantic-edge
-    /// incremental trigger**: it keys on `produced_at`, NOT
-    /// `notes.modified_at`, because `cortex embed` bumps `produced_at` when a
-    /// vector lands but never touches `modified_at` — so a note whose
-    /// embedding arrives after it was skipped is picked up here (no stranding).
+    /// Note paths whose active-model `summary` embedding differs from the one
+    /// their semantic edges were last built from: `note_embeddings.vector_hash`
+    /// differs from `edge_build_state.semantic_vector_hash`, or the note has
+    /// no recorded hash (no `edge_build_state` row, or built while
+    /// unembedded). This is the **semantic-edge incremental trigger**. It keys
+    /// on the embedding, NOT `notes.modified_at`, because `cortex embed`
+    /// replaces a vector without touching `modified_at`, so a note whose
+    /// embedding arrives after it was skipped is picked up here (no
+    /// stranding). It keys on the hash, NOT whole-second `produced_at`, so a
+    /// second re-embed inside one second is still a change. A summary row with
+    /// a NULL hash is an error, never "changed" or "unchanged".
     pub fn semantic_edge_targets(&self) -> Result<Vec<String>> {
         let active_model = self.active_embedding_model()?;
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT e.note_path FROM note_embeddings e
+            "SELECT e.note_path, e.vector_hash FROM note_embeddings e
              LEFT JOIN edge_build_state s ON s.note_path = e.note_path
              WHERE e.kind = ?1 AND e.model_version = ?2
-               AND e.produced_at > COALESCE(s.semantic_built_at, 0)",
+               AND (e.vector_hash IS NULL
+                    OR s.semantic_vector_hash IS NULL
+                    OR s.semantic_vector_hash != e.vector_hash)
+             ORDER BY e.note_path, e.chunk_index",
         )?;
         let rows = stmt
             .query_map(params![EmbeddingKind::Summary.as_str(), active_model], |row| {
-                row.get::<_, String>(0)
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })?
-            .filter_map(warn_row)
-            .collect();
-        Ok(rows)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut paths: Vec<String> = Vec::with_capacity(rows.len());
+        for (path, hash) in rows {
+            if hash.is_none() {
+                return Err(unhashed_row(&path));
+            }
+            if paths.last() != Some(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 
-    /// Newest `summary`-embedding `produced_at` for one note (0 when it has no
-    /// summary embedding for the active model). Persisted as the note's
-    /// `semantic_built_at` after its edges are rebuilt.
-    pub fn note_summary_produced_at(&self, note_path: &str) -> Result<i64> {
+    /// The `vector_hash` of one note's active-model `summary` embedding, or
+    /// `None` when it has none. Persisted as the note's
+    /// `edge_build_state.semantic_vector_hash` after its edges are rebuilt. A
+    /// summary row with a NULL hash is an error.
+    pub fn note_summary_vector_hash(&self, note_path: &str) -> Result<Option<String>> {
         let active_model = self.active_embedding_model()?;
-        let v: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(produced_at), 0) FROM note_embeddings
-             WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3",
+        let hash: Option<Option<String>> = optional_row(self.conn.query_row(
+            "SELECT vector_hash FROM note_embeddings
+             WHERE note_path = ?1 AND kind = ?2 AND model_version = ?3
+             ORDER BY chunk_index LIMIT 1",
             params![note_path, EmbeddingKind::Summary.as_str(), active_model],
             |row| row.get(0),
-        )?;
-        Ok(v)
+        ))?;
+        match hash {
+            None => Ok(None),
+            Some(None) => Err(unhashed_row(note_path)),
+            Some(Some(hash)) => Ok(Some(hash)),
+        }
     }
 
     /// Read the active embedding model identifier from `embedding_config`.

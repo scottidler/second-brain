@@ -95,10 +95,10 @@ fn semantic_edge_not_stranded_when_embedding_lands_after_skip() {
     let a_owned_before = index.count_edges(Some("semantic")).expect("count");
 
     // Embedding for `a` lands LATER, WITHOUT bumping notes.modified_at.
-    // (upsert_embedding sets produced_at = now; modified_at stays 100.)
+    // (upsert_embedding writes a new vector_hash; modified_at stays 100.)
     embed(&index, &m, "notes/a.md", "alpha topic", 100);
 
-    // Second pass: incremental. Keyed on produced_at, `a` is now a semantic
+    // Second pass: incremental. Keyed on the summary vector_hash, `a` is now a semantic
     // target and gets its edges — not stranded.
     let s2 = build(&mut index, &cfg(), false, &StopHandle::never()).expect("build2");
     assert!(!s2.full_rebuild, "second run is incremental");

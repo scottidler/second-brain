@@ -369,6 +369,9 @@ pub use topic::{
 
 mod graph;
 
+mod revision;
+pub use revision::vector_hash;
+
 mod offsets;
 pub use offsets::KindOffsets;
 

@@ -10,7 +10,7 @@ description = "Shared library crate for Obsidian vault types, frontmatter, and u
 # the WARN capture); enabled by dev-dependencies, never in a release build.
 test-util = ["dep:socket2"]
 schemars = ["dep:schemars"]
-search = ["dep:rusqlite"]
+search = ["dep:rusqlite", "dep:sha2"]
 watcher = ["dep:notify", "dep:tokio"]
 # One reqwest client constructor (`vault::http`) and the borg-daemon client
 # (`vault::daemon::client`); borg and oracle enable it.
@@ -58,6 +58,7 @@ serde = { workspace = true }
 tokio = { workspace = true, optional = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+sha2 = { workspace = true, optional = true }
 shellexpand = { workspace = true }
 unicode-normalization = { workspace = true }
 walkdir = { workspace = true }

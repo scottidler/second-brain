@@ -119,6 +119,10 @@ impl super::SearchIndex {
         #[cfg(any(feature = "vec-candle", feature = "vec-onnx"))]
         self.ensure_vec_schema()?;
 
+        // After the vec schema: the edge-state backfill reads the active pin
+        // and the summary hashes, both of which the vec schema settles first.
+        self.migrate_vector_hash()?;
+
         Ok(())
     }
 
@@ -155,6 +159,10 @@ impl super::SearchIndex {
                 produced_at INTEGER NOT NULL,
                 source_modified_at INTEGER NOT NULL,
                 recipe INTEGER NOT NULL DEFAULT 1,
+                -- `vault::search::vector_hash` of `embedding`, set by every writer.
+                -- Nullable because `ALTER ADD COLUMN` on an older DB cannot be
+                -- NOT NULL; `migrate_vector_hash` fills any NULL on open.
+                vector_hash TEXT,
                 FOREIGN KEY (note_path) REFERENCES notes(path) ON DELETE CASCADE,
                 UNIQUE (note_path, kind, chunk_index, model_version)
             );",

@@ -159,6 +159,45 @@ fn assign_reassigns_a_re_embedded_note_without_moving_centroids() {
     assert_eq!(tables(&index).1, centroids_before, "centroids are frozen");
 }
 
+/// The audit's must-fix (probe 20): `note_embeddings.id` is `INTEGER PRIMARY
+/// KEY` without `AUTOINCREMENT` and the summary swap deletes before it
+/// inserts, so the note holding the max rowid gets its id back on a re-embed.
+/// The id predicate (`t.embedding_id != e.id`) therefore missed it; the
+/// `vector_hash` predicate does not.
+#[test]
+fn assign_reassigns_the_re_embedded_note_holding_the_max_embedding_id() {
+    let mut index = fixture();
+    let topics = topics_config(3);
+    add_embedded(&mut index, "notes/last.md", "article", &blob_vector(0, 4343));
+    train_index(&mut index, &topics, None, None, 5_000).expect("train");
+    let axis0_topic = topic_of(&index, "notes/a0-0.md").expect("assigned");
+    let axis2_topic = topic_of(&index, "notes/a2-0.md").expect("assigned");
+    assert_eq!(topic_of(&index, "notes/last.md"), Some(axis0_topic));
+
+    let ids = index.test_embedding_ids().expect("ids");
+    let (max_path, max_id) = ids.last().cloned().expect("rows");
+    assert_eq!(
+        max_path, "notes/last.md",
+        "the fixture's max rowid is the in-scope note"
+    );
+
+    embed(&mut index, "notes/last.md", &blob_vector(2, 4344));
+    let ids = index.test_embedding_ids().expect("ids");
+    assert_eq!(
+        ids.last().cloned(),
+        Some(("notes/last.md".to_string(), max_id)),
+        "the re-embed reused the max id, which is what the id predicate could not see"
+    );
+
+    let report = assign_index(&mut index, &topics, 6_000).expect("assign");
+    assert_eq!(report.assigned_this_run, 1);
+    assert_eq!(
+        topic_of(&index, "notes/last.md"),
+        Some(axis2_topic),
+        "moved to the new region"
+    );
+}
+
 #[test]
 fn assign_removes_rows_for_notes_that_left_scope() {
     let mut index = fixture();

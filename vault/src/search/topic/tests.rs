@@ -32,15 +32,15 @@ fn embed(index: &mut SearchIndex, path: &str, v: [f32; 4]) {
         .expect("embed");
 }
 
-fn embedding_id(index: &SearchIndex, path: &str) -> i64 {
+fn stored_hash(index: &SearchIndex, path: &str) -> String {
     index
         .conn
         .query_row(
-            "SELECT id FROM note_embeddings WHERE note_path = ?1",
+            "SELECT vector_hash FROM note_embeddings WHERE note_path = ?1",
             params![path],
             |r| r.get(0),
         )
-        .expect("id")
+        .expect("vector_hash")
 }
 
 fn assignments(index: &SearchIndex, topics: &[u32]) -> Vec<Assignment> {
@@ -50,7 +50,7 @@ fn assignments(index: &SearchIndex, topics: &[u32]) -> Vec<Assignment> {
         .map(|(i, topic)| {
             let path = format!("notes/{i}.md");
             Assignment {
-                embedding_id: embedding_id(index, &path),
+                vector_hash: stored_hash(index, &path),
                 note_path: path,
                 topic: *topic,
                 cosine: 0.9,
@@ -98,7 +98,7 @@ fn train(index: &mut SearchIndex, topics: &[u32], trained_at: i64) -> i64 {
 type Dump = (
     Vec<(String, String)>,
     Vec<(i64, Vec<u8>, i64)>,
-    Vec<(String, i64, i64, i64)>,
+    Vec<(String, i64, String, i64)>,
 );
 
 fn dump(index: &SearchIndex) -> Dump {
@@ -120,7 +120,7 @@ fn dump(index: &SearchIndex) -> Dump {
         .unwrap();
     let notes = index
         .conn
-        .prepare("SELECT note_path, topic, embedding_id, assigned_at FROM note_topics ORDER BY note_path")
+        .prepare("SELECT note_path, topic, vector_hash, assigned_at FROM note_topics ORDER BY note_path")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()
@@ -402,7 +402,7 @@ fn unassigned_lists_in_scope_notes_without_a_current_topic() {
         ["notes/0.md", "notes/1.md", "notes/2.md"]
     );
     assert_eq!(rows[1].embedding, vec![1.0, 1.0, 0.0, 0.0]);
-    assert_eq!(rows[1].embedding_id, embedding_id(&index, "notes/1.md"));
+    assert_eq!(rows[1].vector_hash, stored_hash(&index, "notes/1.md"));
 
     train(&mut index, &[0, 0], 5_000);
     let rows = index.unassigned(&[], 100).expect("after train");
@@ -411,7 +411,7 @@ fn unassigned_lists_in_scope_notes_without_a_current_topic() {
         ["notes/2.md"]
     );
 
-    // A re-embed changes note_embeddings.id, so the note is unassigned again.
+    // A re-embed with a new vector changes its vector_hash, so the note is unassigned again.
     embed(&mut index, "notes/0.md", [0.0, 1.0, 0.0, 0.0]);
     let rows = index.unassigned(&[], 100).expect("after re-embed");
     assert_eq!(
@@ -644,7 +644,7 @@ fn peek_topics_reports_counts_and_the_since_train_cosine() {
         .expect("note");
     embed(&mut index, "notes/late.md", [0.0, 1.0, 0.0, 0.0]);
     let late = Assignment {
-        embedding_id: embedding_id(&index, "notes/late.md"),
+        vector_hash: stored_hash(&index, "notes/late.md"),
         note_path: "notes/late.md".to_string(),
         topic: 1,
         cosine: 0.5,
