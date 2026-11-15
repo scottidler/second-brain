@@ -1,0 +1,174 @@
+# Implementation Notes: Extension Endpoint Fallback
+
+Design doc: `docs/plan/2026-11-14-extension-endpoint-fallback.md`
+
+## Phase 0: Prove Firefox on lappy reaches the MagicDNS name
+
+### Design decisions
+- Ran from ripr over ssh instead of by hand in a tab: `/opt/firefox/firefox --headless --no-remote --profile /tmp/claude/p0ff1 --screenshot ... http://ripr.example.ts.net:8181/health` on ltl-7007, with the profile dir seeded by a copy of the daily profile's `prefs.js` (`8r3vpj3l.default-release`, which carries the `doh-rollout.*` prefs, no explicit `network.trr.mode`). The live daily profile was locked by the running Firefox.
+- Result: rc=0; the screenshot shows Firefox's JSON viewer with `status: "ok"`, `service: "obsidian-borg"`, `version: "v0.22.0"`. No DNS error page, no `https://` redirect.
+
+### Deviations
+- The spike used a copied `prefs.js` in a throwaway headless profile, not the running daily profile. It exercises the same DoH prefs and Firefox's own resolver; it does not carry the daily profile's runtime DoH-rollout heuristics state. Acceptance Criterion 3 (live capture via the tailnet name) is the end-to-end check on the daily profile.
+
+### Tradeoffs
+- None.
+
+### Open questions
+- None. No `network.trr.excluded-domains` step is needed in the Rollout Plan.
+
+## Phase 1: Config and manifest
+
+### Design decisions
+- `resolved_endpoints` returns `Vec<Url>` and a separate `endpoint_base(&Url) -> String` does the trailing-`/` strip (`borg/src/extension/daemon.rs`): `Url` always serializes a bare origin with `/`, so the stripped form is a rendering step that Phase 2's `daemon.js` and the popup's `endpoint + "/ingest"` both need in one place.
+- Unset `extension.endpoints` adds no origin pattern (early return in `origin_patterns`) (`borg/src/extension/manifest.rs`): the default `localhost` endpoint would otherwise be appended to an explicit `origin-patterns` list and break `explicit_origin_patterns_override_defaults`. Pinned by `unset_endpoints_leave_explicit_origin_patterns_untouched`.
+- Previous body of `origin_patterns` moved unchanged into `base_patterns`; the endpoint merge layers on top.
+- Duplicate hosts across endpoints add one pattern; an exact match against an explicit pattern adds none.
+
+### Deviations
+- `origin_patterns` and `build_manifest` stay infallible, so an invalid `extension.endpoints` is warned and ignored there, not an error. The loud failure is `resolved_endpoints`, which Phase 2's `stage()` must call before rendering. Same effect at the correct seam: making them `Result` would churn ~17 existing tests and the `sb` `extension show` caller for no Phase 1 benefit.
+
+### Tradeoffs
+- Infallible manifest functions plus a loud validator at the stage seam vs `Result` through `build_manifest`: smaller diff now. Cost: `sb borg extension show` (`sb/src/cli/borg/extension.rs`, calls `build_manifest` directly) silently omits bad endpoints until it validates too.
+
+### Open questions
+- Should Phase 2 also make `sb borg extension show` call `resolved_endpoints`, so a bad config errors there instead of rendering a manifest without the endpoint host?
+
+## Phase 2: Stage writes daemon.js
+
+### Design decisions
+- `render_daemon_js(config) -> Result<String>` calls both validators, then emits the file with `serde_json` (`borg/src/extension/daemon.rs`): one function for `stage()` and for Phase 3's hash, and the place a bad `extension.*` config becomes a loud error. `stage()` renders it first, before creating any directory or copying any file, so a bad config stages nothing (pinned by `stage_fails_on_invalid_endpoints_before_writing`).
+- `sb borg extension show` (manifest branch) calls `render_daemon_js` first and errors on a bad config (`sb/src/cli/borg/extension.rs`). Gap-fill per the orchestrator decision on Phase 1's open question and the doc's "fail loudly" validation rule. `show --schema` is config-independent and unchanged.
+- `fallback.js` is a one-line comment stub in `borg/clients/extension/`, added to `static_files`; `popup.html` and `options.html` load `daemon.js`, `fallback.js`, then their own script.
+- `daemon.js` uses a `format!` template for the fixed shape, but both values come from `serde_json::to_string` (compact arrays, so the file reads `["a","b"]`, not `["a", "b"]`).
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Compact `serde_json::to_string` vs hand-spaced arrays to match the Data Model sample byte for byte: the sample is illustrative and the file is generated; compact output keeps emission purely serde.
+
+### Open questions
+- None.
+
+### Verification (success criterion)
+`cargo run -p sb -- borg --config <scratch>/borg.yml extension stage --to <scratch>/stage` with the Data Model `extension:` block (live `~/.config/sb/borg.yml` untouched). Staged files: `.amo-upload-uuid daemon.js fallback.js icons ingest-schema.json manifest.json options.css options.html options.js popup.css popup.html popup.js`. Observed `daemon.js`:
+
+```js
+// Generated by `sb borg extension stage` from borg.yml extension.*. Do not edit.
+const BORG_DAEMON = Object.freeze({
+  endpoints: ["http://ripr.example.ts.net:8181","http://ripr.lan:8181"],
+  attemptTimeoutMs: 3000,
+});
+```
+
+`host_permissions`: `http://localhost/*`, `http://*.lan/*`, `http://*.local/*`, `http://ripr.example.ts.net/*`. `extension show` with `endpoints: []` fails with `Error: extension.endpoints is empty; list at least one endpoint or remove the key`.
+
+## Phase 3: Config-hash sidecar on sign
+
+### Design decisions
+- `render_manifest(version, config) -> Result<String>` extracted from `stage()` (`borg/src/extension.rs`) and used by both `stage()` and `baked_config_hash`, so the hash covers exactly the manifest text that ships.
+- `baked_config_hash` (`borg/src/extension/daemon.rs`) renders the manifest at version `""` (the blanked `version` field) plus `render_daemon_js`, and hashes both with SHA-256, each part length-prefixed so the two cannot blur together. Pinned by `hash_input_manifest_has_blank_version`.
+- `ConfigMismatch { version, detail }` (`borg/src/extension/sign.rs`) is a typed error; its message is `extension v<X> <detail>; bump the version to re-sign` for both the changed-hash and the missing-sidecar case.
+- The hash is computed at the top of `sign::run`, before the reuse check, so an invalid `extension.*` config fails loudly on both paths. The sidecar is written after `stage()` succeeds and before the `web-ext` call.
+- Exit 3: `sb borg extension install` (`sb/src/cli/borg/extension.rs`) downcasts the error to `ConfigMismatch`, prints it, and returns `ExitWith(3)` (the existing typed-exit mechanism in `sb/src/error.rs`). `sb borg extension sign` is unchanged: it propagates the error as exit 1.
+- `.otto.yml` deploy: `sb borg extension install ... && EXT_RC=0 || EXT_RC=$?` then a 0 / 3 / other branch. The `&& ||` form is deliberate: the task already relies on `set -e` semantics (see its trap comment), and a bare failing command would exit the deploy for every non-zero code, not just 3.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Length-prefixed concatenation vs hashing the plain concatenation: costs two lines, removes any ambiguity about where the manifest ends.
+- Only `install` maps to exit 3, as the doc says; a direct `sign` of a reused version exits 1 with the same message.
+
+### Open questions
+- None.
+
+### Verification
+- Reuse path with changed `extension.endpoints` against a temp artifacts dir with a dummy `obsidian-borg-9.9.9.xpi`: `reuse_with_changed_endpoints_is_config_mismatch` asserts a `ConfigMismatch` whose text contains `bump the version to re-sign`. Missing sidecar: `reuse_with_missing_sidecar_is_config_mismatch`. Matching sidecar reuses: `reuse_with_matching_sidecar_returns_the_xpi`.
+- Break-test: changed the compare to `if false && recorded.trim() != current_hash`. Observed: `reuse_with_changed_endpoints_is_config_mismatch ... FAILED` (panicked at the `unwrap_err()` on `run`, which returned `Ok`), `test result: FAILED. 9 passed; 1 failed`. Reverted. (The missing-sidecar test still passes under this mutation by design: that branch is a separate check.)
+- `.otto.yml` exit-3 branch: ran the extracted snippet under `set -e` with a stubbed `sb` returning 0, 1, 3. Output: 0 -> "Extension refresh: handled", continues; 1 -> the non-fatal warning, continues; 3 -> the bump message, script exits 3. `otto deploy` not run.
+
+## Phase 4: Fallback walk and its tests
+
+### Design decisions
+- `postWithFallback` (`borg/clients/extension/fallback.js`) is the API Design signature verbatim: a `for...of` over `endpoints`, `onAttempt(endpoint)` before each fetch, `AbortSignal.timeout(timeoutMs)` per attempt, return on any resolved fetch, `{ endpoint, error: err.name + ": " + err.message }` on any rejection. The header comment restates the no-keepalive ban so the file that now owns the fetch carries it.
+- `popup.js`: `getConfig()` replaced by `getAuthToken()`, which reads only `authToken`; the endpoints and timeout come from `BORG_DAEMON`. `hostOf(endpoint)` (`new URL(endpoint).hostname`) produces every host shown in the status text. The outer `try/catch` stays for the one remaining throw site, `response.json()` on an unparseable body, worded `Error: <message>` as before.
+- Total-failure text joins `<hostname>: <error>` pairs with `; ` after `No response from `, per API Design, so it never says "unreachable".
+- Test harness (`borg/tests/js/fallback.test.mjs`): `vm.createContext({ AbortSignal })` with node's own `AbortSignal`, `vm.runInContext` on the source file, then `context.postWithFallback`. The mock fetch is scripted per URL and records every call, so "second NOT called" is an assertion on the call list. The timeout mock (`hang`) only ever rejects with `init.signal.reason` on `abort`. The first case also asserts `onAttempt` order, `method: "POST"` and no `keepalive` key on the init.
+- `cargo test` ignores `borg/tests/js/`: cargo only builds `tests/*.rs` and `tests/<dir>/main.rs`, so the directory needs no exclusion.
+- `popup_js_must_not_use_fetch_keepalive` loops over `popup.js` and `fallback.js` and names the offending file in the panic. Bite check: adding `keepalive: true,` to the fallback.js fetch made it fail with `fallback.js re-introduced keepalive ...`; reverted.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- The all-reject case compares `Array.from(result.attempts, (a) => a.endpoint)`, not `result.attempts.map(...)`: arrays built inside the vm context carry that realm's `Array.prototype`, and `assert.deepStrictEqual` rejected the otherwise identical array (`Values have same structure but are not reference-equal`). Normalizing in the test vs running fallback.js outside a vm: the doc specifies the vm load, and it is what keeps the file a classic script with no export.
+- The all-reject case mixes one `TypeError` and one timeout, so it also pins both error formats (`TypeError: ...` exactly, `TimeoutError: ` prefix).
+
+### Open questions
+- Phase 5's success criterion (`rg -n '\bendpoint\b' borg/clients/extension/*.js` returns exactly one line) cannot hold as written: the API Design return shape `{ ok: true, endpoint, response }` and `attempts: [{ endpoint, error }]` and `onAttempt(endpoint)` put the word in fallback.js (10 lines) and in popup.js's reads of `result.endpoint` / `a.endpoint` (7 lines). After this phase the command returns 21 lines across the three files. Phase 5 needs the criterion scoped to `chrome.storage` reads (for example `rg -n 'storage.*endpoint|"endpoint"' borg/clients/extension/*.js`) or restricted to `options.js`.
+
+### Verification
+- `otto extension-test`: 5 passed, 0 failed (`first endpoint rejects with TypeError`, `first endpoint times out` ~50ms, `returns 500`, `returns 401`, `all endpoints reject`). `otto ci` green with `extension-test` in `ci`'s `before`.
+- Break-test: replaced the catch body with `throw err;`. Observed:
+  ```
+  ✖ first endpoint rejects with TypeError: second is called and named
+  ✖ first endpoint times out: second is called
+  ✔ first endpoint returns 500: second is NOT called, result carries the 500
+  ✔ first endpoint returns 401: second is NOT called
+  ✖ all endpoints reject: ok is false and attempts lists both in order
+  ℹ pass 2
+  ℹ fail 3
+  ```
+  Reverted; 5 pass again.
+- `.github/workflows/ci.yml` not run here (GitHub-only); the step is the same `node --test borg/tests/js/` command, with `nodejs` added to the trixie `apt-get install` line.
+
+## Orchestrator: Phase 5 criterion amendment (before Phase 5)
+
+### Deviations
+- Phase 5 success criterion amended in the design doc (doc defect, not a code fit). The original `rg -n '\bendpoint\b' borg/clients/extension/*.js` returns exactly one line contradicts API Design: `postWithFallback`'s return shape and `onAttempt(endpoint)` put the bare word in `fallback.js` and `popup.js` by spec. Evidence after `4b18f56`: `rg -c '\bendpoint\b'` gives `popup.js:7`, `fallback.js:10`, `options.js:4`. New criterion: `rg -n "[\"']endpoint[\"']" borg/clients/extension/*.js` returns exactly the `chrome.storage.local.remove("endpoint")` line; observed after `4b18f56`: `options.js:2` and `options.js:6`.
+
+## Phase 5: Options page
+### Design decisions
+- `options.html`: the endpoint input is now an `<ol id="endpoints">` plus a hint line naming `extension.endpoints` in `~/.config/sb/borg.yml`; token input kept. The id is `endpoints` so the amended criterion holds. `options.css` gained a `.hint` rule.
+- `options.js`: renders `BORG_DAEMON.endpoints` as `<li>` items via `textContent`; Save writes `authToken` then `chrome.storage.local.remove("endpoint")`; the permission check and URL parsing are gone.
+- `staged_scripts_never_read_the_endpoint_storage_key` (`borg/tests/stage_produces_valid_extension_dir.rs`) replaces `staged_options_js_builds_the_origin_from_hostname_not_host`: scans staged popup.js, options.js and fallback.js for a quoted `"endpoint"`/`'endpoint'` and allows only the `chrome.storage.local.remove("endpoint")` line.
+- `borg/clients/AGENTS.md` options sentence updated to match.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- Quoted-string scan vs a regex on `storage.*get`: the quoted scan matches the amended criterion exactly and also catches `.get("endpoint")`, array form, and `.set({"endpoint":...})`.
+
+### Open questions
+- None.
+
+### Verification
+- Break-test: restored `get(["endpoint", "authToken"])` in options.js; test failed with `options.js uses the "endpoint" storage key outside the cleanup remove()`. Reverted.
+- `rg -n "[\"']endpoint[\"']" borg/clients/extension/*.js` output:
+  ```
+  borg/clients/extension/options.js:17:    await chrome.storage.local.remove("endpoint");
+  ```
+
+## Phase 6: Docs
+### Design decisions
+- `borg/clients/AGENTS.md` gained an "Extension endpoint fallback" section (endpoint list from `borg.yml`, generated `daemon.js`, `postWithFallback` rules, manifest merge, `ConfigMismatch` exit 3, JS tests in `borg/tests/js/`) and the reworded anti-pattern. It names files and symbols only, no line numbers, counts or version pins.
+- `config/templates/borg.yml.example`: the `extension:` block is fully commented (the Data Model block, plus a note that a change without a bump is an error), placed before `log-level`, so an operator opts in.
+- `borg/AGENTS.md`: the extension lifecycle line lists `daemon` among the modules and says what `daemon.rs` owns.
+- Final-phase extras: Phase 1 notes had three U+2014 dashes, replaced with colon/parens (punctuation only); design doc `Status:` set to `Implemented`; doc and notes committed with this phase.
+
+### Deviations
+- None.
+
+### Tradeoffs
+- A dedicated section in `clients/AGENTS.md` vs bullets folded into the `extension/` client entry: the entry is already one dense paragraph, a section reads better.
+
+### Open questions
+- None.
+
+### Verification
+- `rg -n 'extension.endpoints' config/templates/borg.yml.example borg/clients/AGENTS.md borg/AGENTS.md` returned lines in all three files (`borg.yml.example` via the commented block, `borg/AGENTS.md:55`, `borg/clients/AGENTS.md:11,31,42`).
+- `rg -n 'Don.t hardcode the daemon endpoint' borg/clients/AGENTS.md` returned no lines (rc=1).
+- A ripgrep count of U+2014 across `docs/plan/` returned nothing.

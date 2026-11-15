@@ -419,5 +419,18 @@ ingest:
   # --clipboard is never a bulk.
   bulk-threshold: 5
 
+# Firefox capture extension. Read on the host that signs the extension; the
+# values are baked into the signed .xpi at stage time. Changing any of them
+# without a version bump is an error (`sb borg extension install` exits 3).
+# extension:
+#   # Ordered. The popup tries each in turn; it moves on only when no HTTP
+#   # response came back (DNS, connect, timeout). Unset -> [http://localhost:8181].
+#   endpoints:
+#     - http://ripr.example.ts.net:8181
+#     - http://ripr.lan:8181
+#   # Per-attempt ceiling. Unset -> 3000.
+#   attempt-timeout-ms: 3000
+#   # origin-patterns: unchanged; endpoint hostnames are added on top of it.
+
 # Log level: trace | debug | info | warn | error
 log-level: info
