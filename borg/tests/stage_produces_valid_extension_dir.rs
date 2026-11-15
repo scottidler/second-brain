@@ -54,6 +54,8 @@ fn stage_materialises_manifest_schema_and_static_assets() {
         "popup.html",
         "popup.js",
         "popup.css",
+        "fallback.js",
+        "daemon.js",
         "options.html",
         "options.js",
         "options.css",
@@ -95,4 +97,77 @@ fn staged_options_js_builds_the_origin_from_hostname_not_host() {
         !options_js.contains("${url.host}"),
         "options.js uses url.host, which includes the port and makes Save refuse http://desk.lan:8181"
     );
+}
+
+fn endpoint_config() -> Config {
+    let mut config = Config::default();
+    config.extension.endpoints = Some(vec![
+        "http://ripr.example.ts.net:8181".to_string(),
+        "http://ripr.lan:8181".to_string(),
+    ]);
+    config
+}
+
+#[test]
+fn staged_daemon_js_lists_endpoints_in_config_order_and_hosts_are_permitted() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    extension::stage(tempdir.path(), "0.0.0-test", &endpoint_config()).expect("stage");
+    let daemon_js = std::fs::read_to_string(tempdir.path().join("daemon.js")).expect("read daemon.js");
+    let tailnet = daemon_js
+        .find("http://ripr.example.ts.net:8181")
+        .expect("tailnet endpoint");
+    let lan = daemon_js.find("http://ripr.lan:8181").expect("lan endpoint");
+    assert!(tailnet < lan, "endpoints must keep config order:\n{daemon_js}");
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tempdir.path().join("manifest.json")).unwrap()).unwrap();
+    let permissions: Vec<&str> = manifest["host_permissions"]
+        .as_array()
+        .expect("host_permissions")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for host in ["ripr.example.ts.net", "ripr.lan"] {
+        let covered = permissions.iter().any(|p| {
+            let pattern_host = p.trim_start_matches("http://").trim_end_matches("/*");
+            pattern_host == host
+                || pattern_host
+                    .strip_prefix("*.")
+                    .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
+        });
+        assert!(covered, "{host} not covered by host_permissions {permissions:?}");
+    }
+}
+
+#[test]
+fn stage_fails_on_invalid_endpoints_before_writing() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    let mut config = Config::default();
+    config.extension.endpoints = Some(vec!["https://ripr.lan:8181".to_string()]);
+    let err = extension::stage(tempdir.path(), "0.0.0-test", &config)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("http"), "{err}");
+    assert!(
+        !tempdir.path().join("manifest.json").exists(),
+        "nothing may be staged on a bad config"
+    );
+}
+
+#[test]
+fn staged_html_loads_daemon_and_fallback_before_own_script() {
+    let tempdir = tempfile::TempDir::new().expect("create tempdir");
+    extension::stage(tempdir.path(), "0.0.0-test", &Config::default()).expect("stage");
+    for (html, own) in [("popup.html", "popup.js"), ("options.html", "options.js")] {
+        let body = std::fs::read_to_string(tempdir.path().join(html)).expect("read html");
+        let at = |name: &str| {
+            body.find(&format!("src=\"{name}\""))
+                .unwrap_or_else(|| panic!("{html} does not load {name}"))
+        };
+        assert!(
+            at("daemon.js") < at("fallback.js"),
+            "{html}: daemon.js before fallback.js"
+        );
+        assert!(at("fallback.js") < at(own), "{html}: fallback.js before {own}");
+    }
 }

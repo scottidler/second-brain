@@ -41,6 +41,7 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
         target_dir.display(),
         version
     );
+    let daemon_js = daemon::render_daemon_js(config)?;
     let source_dir = repo_root()?;
     let source_ext_dir = extension_dir(&source_dir);
     if !source_ext_dir.exists() {
@@ -52,6 +53,7 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
         "popup.html",
         "popup.js",
         "popup.css",
+        "fallback.js",
         "options.html",
         "options.js",
         "options.css",
@@ -69,6 +71,8 @@ pub fn stage(target_dir: &Path, version: &str, config: &Config) -> Result<StageR
     let manifest_content =
         serde_json::to_string_pretty(&manifest::build_manifest(version, config)).context("serialize manifest")? + "\n";
     std::fs::write(target_dir.join("manifest.json"), manifest_content).context("write manifest.json")?;
+
+    std::fs::write(target_dir.join("daemon.js"), daemon_js).context("write daemon.js")?;
 
     let schema_content = serde_json::to_string_pretty(&schema::build_schema()?).context("serialize schema")? + "\n";
     std::fs::write(target_dir.join("ingest-schema.json"), schema_content).context("write ingest-schema.json")?;

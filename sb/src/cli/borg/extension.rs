@@ -130,6 +130,7 @@ pub fn run(cli: ExtensionCli, config: Config) -> Result<()> {
                 serde_json::to_string_pretty(&extension::schema::build_schema()?)
                     .context("serialize schema for stdout")?
             } else {
+                extension::daemon::render_daemon_js(&config)?;
                 serde_json::to_string_pretty(&extension::manifest::build_manifest(version, &config))
                     .context("serialize manifest for stdout")?
             };

@@ -106,3 +106,31 @@ fn one_bad_entry_fails_the_whole_list() {
     let config = with_endpoints(&["http://ripr.lan:8181", "https://ripr.example"]);
     assert!(resolved_endpoints(&config).is_err());
 }
+
+#[test]
+fn render_daemon_js_lists_endpoints_in_order_with_timeout() {
+    let mut config = with_endpoints(&["http://ripr.example.ts.net:8181/", "http://ripr.lan:8181"]);
+    config.extension.attempt_timeout_ms = Some(1500);
+    let js = render_daemon_js(&config).unwrap();
+    assert!(
+        js.contains(r#"endpoints: ["http://ripr.example.ts.net:8181","http://ripr.lan:8181"],"#),
+        "{js}"
+    );
+    assert!(js.contains("attemptTimeoutMs: 1500,"), "{js}");
+}
+
+#[test]
+fn render_daemon_js_defaults_when_unset() {
+    let js = render_daemon_js(&Config::default()).unwrap();
+    assert!(js.contains(r#"endpoints: ["http://localhost:8181"],"#), "{js}");
+    assert!(js.contains("attemptTimeoutMs: 3000,"), "{js}");
+}
+
+#[test]
+fn render_daemon_js_rejects_bad_config() {
+    assert!(render_daemon_js(&with_endpoints(&[])).is_err());
+    assert!(render_daemon_js(&with_endpoints(&["https://ripr.lan"])).is_err());
+    let mut config = Config::default();
+    config.extension.attempt_timeout_ms = Some(0);
+    assert!(render_daemon_js(&config).is_err());
+}
