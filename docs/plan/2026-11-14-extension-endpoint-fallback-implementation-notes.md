@@ -217,3 +217,12 @@ const BORG_DAEMON = Object.freeze({
   ```
   rc=0, one or more lines per file. `rg -n 'Don.t hardcode the daemon endpoint' borg/clients/AGENTS.md`: no lines, rc=1.
 - Phase 1 `-p` form at HEAD: `cargo test -p borg extension::` -> `error[E0433]: cannot find 'search' in 'vault'`, `could not compile 'borg' (lib test)`. The v0.22.0 failure is the audit's observation, not rerun here.
+
+## Orchestrator: tailnet name scrubbed before the first push
+
+### Deviations
+- Scott chose option A: the real tailnet name is replaced by the placeholder `example.ts.net` in every file. Because all seven implementation commits carried it and none were pushed, the range `origin/main..HEAD` was rewritten with `git filter-branch --tree-filter` (substitution only), rather than patched in a new commit that would still publish the name in history. Verified: `git grep -c` for the real name returns 0 hits in each rewritten commit, and the diff against the pre-rewrite tip is 32 substituted lines across 7 files, nothing else.
+- The design doc's Background, Resolved Decisions and Alternatives now say why: the name is an identifier, not a secret, but cannot be renamed and a push cannot be undone. Earlier notes sections that name the host now show the placeholder; the observations they record ran against the real name.
+
+### Verification
+- `otto ci` rerun after the rewrite (results in the commit that carries this entry).

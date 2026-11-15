@@ -16,7 +16,8 @@ The Firefox capture extension POSTs to one daemon address. Away from home that a
 - Borg ingests over HTTP (`POST /ingest`, `borg/src/routes.rs` `ingest`), Telegram, Signal, ntfy (built, not configured on ripr) and Discord (off).
 - The extension is the HTTP client. `borg/clients/extension/popup.js` `capture()` reads ONE `endpoint` string from `chrome.storage.local`, defaults it to `http://localhost:8181` (hard-coded in both `popup.js` and `options.js`), and POSTs once. No timeout, no retry.
 - A fresh install never learns the daemon address. The force-install policy (`borg/src/extension/install.rs` `build_policy_entry`) carries install fields only, so every non-daemon host types the endpoint into the options page by hand (`docs/design/2026-06-07-extension-installer-post-snap-cleanup.md`).
-- ripr, lappy (ltl-7007) and the Pixel are on one tailnet, MagicDNS on, suffix `example.ts.net`. The daemon binds `0.0.0.0:8181`.
+- ripr, lappy (ltl-7007) and the Pixel are on one tailnet, MagicDNS on. The daemon binds `0.0.0.0:8181`.
+- `example.ts.net` throughout this doc and the repo is a placeholder for the real tailnet name. The measurements below ran against the real name; the real list lives only in the signing host's `borg.yml`.
 - Measured 2026-11-14:
   - `curl http://ripr.example.ts.net:8181/health` -> `200` from ripr and from lappy
   - `ts.net` and `example.ts.net` are not HSTS-preloaded (hstspreload.org status `unknown`), so `http://` is not force-upgraded
@@ -263,7 +264,8 @@ Rules:
 ## Resolved Decisions
 
 - 2026-11-14, Scott: Tailscale is the primary route, LAN HTTP the fallback.
-- 2026-11-14, Scott (option A, after panel round 1 found AMO's one-signature-per-version rule): the endpoint list lives in the signing host's `borg.yml`; sign enforces it with a config-hash sidecar. Rejected: list committed in the public repo (tailnet name goes public, addresses become source); options-page list in storage (hand config on every install).
+- 2026-11-14, Scott (option A, after panel round 1 found AMO's one-signature-per-version rule): the endpoint list lives in the signing host's `borg.yml`; sign enforces it with a config-hash sidecar. Rejected: list committed in the public repo (puts the tailnet identity in a public repo, addresses become source); options-page list in storage (hand config on every install).
+- 2026-11-15, Scott (option A, after the implementation audit found the tailnet name in 7 unpushed files): the repo carries the placeholder `example.ts.net`, never the real tailnet name. The name is an identifier, not a secret (it grants no access, and Tailscale calls it pseudonymous), but it cannot be renamed and a push cannot be undone, so the public repo stays free of it. The unpushed commits were rewritten before the first push, not patched forward.
 - Panel round 2 dispositions (sidecar only):
   - folded: hash the rendered `manifest.json` + `daemon.js` (covers `server.host`); sidecar named by version and written before upload; missing-sidecar cases restated correctly; mismatch exits 3 and fails `otto deploy`; first-publisher-wins wording plus the AMO hint; copied-`.xpi` rule; sidecar acceptance criterion; ripr rollout step corrected
   - no action: `locate_versioned_xpi` uses `name.contains(version)` (`0.22.0` matches `10.22.0`) and reads "found 2" as "none". Neither happens with three-part bumps from one line of versions; pre-existing, not changed by this doc.
@@ -300,7 +302,7 @@ Rules:
 ### Endpoint list committed in the repo
 - **Description:** one list in source, identical for every host.
 - **Pros:** no per-host config; no sign-host coupling.
-- **Cons:** the repo is public, so the tailnet name goes public; addresses become source, not config.
+- **Cons:** the repo is public, so it would carry the tailnet identity (an identifier, not a secret, but not renameable); addresses become source, not config.
 - **Why not chosen:** Scott chose the signing-host config (2026-11-14).
 
 ### Deliver the list through Firefox policy (`3rdparty` managed storage)
