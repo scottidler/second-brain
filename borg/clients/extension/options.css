@@ -4,3 +4,4 @@ input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; b
 button { margin-top: 12px; padding: 8px 16px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
 button:hover { background: #f0f0f0; }
 .msg { margin-top: 8px; color: #2E7D32; }
+.hint { color: #555; font-size: 12px; }

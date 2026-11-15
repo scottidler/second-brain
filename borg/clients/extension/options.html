@@ -5,8 +5,9 @@
 </head>
 <body>
   <h3>obsidian-borg Settings</h3>
-  <label for="endpoint">Daemon endpoint</label>
-  <input id="endpoint" type="text" placeholder="http://localhost:8181">
+  <label>Daemon endpoints (tried in order)</label>
+  <ol id="endpoints"></ol>
+  <p class="hint">Change these with <code>extension.endpoints</code> in <code>~/.config/sb/borg.yml</code>, then re-sign and reinstall the extension.</p>
   <label for="auth-token">Auth token (optional)</label>
   <input id="auth-token" type="password" placeholder="leave blank if the daemon has no auth-token">
   <button id="save">Save</button>

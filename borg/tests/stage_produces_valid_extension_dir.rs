@@ -85,23 +85,26 @@ fn stage_materialises_manifest_schema_and_static_assets() {
     );
 }
 
-/// F23 guard: `url.host` includes the port, so the permission origin became
-/// `http://desk.lan:8181/*` and Save refused a ported endpoint. The origin must be built
-/// from `url.hostname`. There is no JS harness for the extension, so this pins the staged
-/// source instead.
+/// The endpoint list is baked in at stage time, so no script may read the legacy `endpoint`
+/// storage key. The one allowed mention is the options page deleting the stale value.
 #[test]
-fn staged_options_js_builds_the_origin_from_hostname_not_host() {
+fn staged_scripts_never_read_the_endpoint_storage_key() {
     let tempdir = tempfile::TempDir::new().expect("create tempdir");
     extension::stage(tempdir.path(), "0.0.0-test", &Config::default()).expect("stage extension into tempdir");
-    let options_js = std::fs::read_to_string(tempdir.path().join("options.js")).expect("read staged options.js");
-    assert!(
-        options_js.contains("${url.hostname}"),
-        "options.js must build the permission origin from url.hostname"
-    );
-    assert!(
-        !options_js.contains("${url.host}"),
-        "options.js uses url.host, which includes the port and makes Save refuse http://desk.lan:8181"
-    );
+    for name in ["popup.js", "options.js", "fallback.js"] {
+        let source = std::fs::read_to_string(tempdir.path().join(name)).expect("read staged script");
+        for quoted in ["\"endpoint\"", "'endpoint'"] {
+            for (index, _) in source.match_indices(quoted) {
+                let line = source[..index].rsplit('\n').next().unwrap_or("");
+                let line_end = source[index..].find('\n').map_or(source.len(), |n| index + n);
+                let full_line = format!("{line}{}", &source[index..line_end]);
+                assert!(
+                    full_line.contains("chrome.storage.local.remove(\"endpoint\")"),
+                    "{name} uses the {quoted} storage key outside the cleanup remove(): {full_line}"
+                );
+            }
+        }
+    }
 }
 
 fn endpoint_config() -> Config {
