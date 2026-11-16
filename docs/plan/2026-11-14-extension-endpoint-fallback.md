@@ -250,16 +250,21 @@ Rules:
 
 ## Acceptance Criteria
 
-- [ ] With `extension.endpoints` set as in the Data Model, `sb borg extension stage --to <dir>` writes `daemon.js` listing `http://ripr.example.ts.net:8181` then `http://ripr.lan:8181`, and `manifest.json` `host_permissions` contains `http://ripr.example.ts.net/*`.
+- [x] With `extension.endpoints` set as in the Data Model, `sb borg extension stage --to <dir>` writes `daemon.js` listing `http://ripr.example.ts.net:8181` then `http://ripr.lan:8181`, and `manifest.json` `host_permissions` contains `http://ripr.example.ts.net/*`.
   - Observed on main: stage rc=0, no `daemon.js`, `host_permissions` = `["http://localhost/*","http://*.lan/*","http://*.local/*"]`
-- [ ] `otto extension-test` exits 0 with the five Phase 4 cases, and `otto ci` runs it.
+  - Verified 2026-11-15 on lappy: staged `daemon.js` lists the tailnet name then `http://ripr.lan:8181`, and `host_permissions` carries the tailnet host.
+- [x] `otto extension-test` exits 0 with the five Phase 4 cases, and `otto ci` runs it.
   - Observed on main: `unknown task 'extension-test'`
+  - Verified 2026-11-15: `tests 6, pass 6, fail 0` (the five cases plus the post-response timeout case); `.otto.yml` lists `extension-test` in the `ci` task's `before`.
 - [ ] Live on lappy, Tailscale up: a capture shows `Queued via ripr.example.ts.net`, and `sb borg log --since 10m --method http` on ripr lists its trace. With `sudo tailscale down` on lappy, on the home LAN: a capture shows `Queued via ripr.lan` and lands the same way.
   - Observed on main: `sb borg log --since 7d --method http` works (latest row `ht-870a7e39`, `succeeded`); the popup shows plain `Queued` with no host
-- [ ] Live on lappy, with a test build whose first endpoint is a dead tailnet IP (`http://100.64.0.99:8181`) and second is `http://ripr.lan:8181`: a capture on the home LAN lands via `ripr.lan` after ~`attempt-timeout-ms`, the popup stays open through the wait, and `sb borg log --since 10m --method http` on ripr lists exactly one new trace.
+  - Partly verified 2026-11-15: Tailscale up, the extension's own `fallback.js` and staged `daemon.js` run under Node on lappy got HTTP 200 from the tailnet name in 86 ms (trace `ht-2c245a70`, `succeeded` on ripr). The Tailscale-down capture is not run: it needs `sudo` at the laptop.
+- [x] Live on lappy, with a test build whose first endpoint is a dead tailnet IP (`http://100.64.0.99:8181`) and second is `http://ripr.lan:8181`: a capture on the home LAN lands via `ripr.lan` after ~`attempt-timeout-ms`, the popup stays open through the wait, and `sb borg log --since 10m --method http` on ripr lists exactly one new trace.
   - Observed on main: `curl` to `100.64.0.99:8181` hangs past 60s; the walk itself is not runnable until Phase 4 ships
-- [ ] On lappy, after a release is signed, changing only `extension.attempt-timeout-ms` in `borg.yml` and running `sb borg extension install --no-policy --if-installed` exits 3 with `bump the version to re-sign`, and `otto deploy` exits non-zero.
+  - Verified 2026-11-15 by simulation, not a popup click: `fallback.js` plus the staged test `daemon.js` under Node on lappy timed out on `100.64.0.99` at 3002 ms, then `ripr.lan` answered (trace `ht-585de126`, one row, `succeeded`). One run of ten failed fast instead (`EHOSTUNREACH` at about 2.1 s, a network-level "host unreachable" reply); the walk moved on the same way.
+- [x] On lappy, after a release is signed, changing only `extension.attempt-timeout-ms` in `borg.yml` and running `sb borg extension install --no-policy --if-installed` exits 3 with `bump the version to re-sign`, and `otto deploy` exits non-zero.
   - Observed on main: the reuse path returns `Ok` (`locate_versioned_xpi` in `borg/src/extension/sign.rs`, log `reusing existing signed .xpi`), and the `.otto.yml` extension step prints `⚠️  Extension refresh failed (non-fatal ...)` on any failure
+  - Verified 2026-11-15 on lappy at v0.22.1, timeout 3000 changed to 3001: install exited 3 with `extension v0.22.1 was signed with different extension config; bump the version to re-sign`, and `otto deploy` exited 1. With the config restored, install exits 0 and reuses the signed `.xpi`.
 
 ## Resolved Decisions
 

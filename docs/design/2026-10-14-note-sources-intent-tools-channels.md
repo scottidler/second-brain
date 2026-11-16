@@ -406,6 +406,7 @@ Within each part, deterministic work comes first and prompt work last. The eval 
 - **2026-10-14: The channel search network call lives in borg, behind a daemon route, and oracle calls that route.** This follows the `ingest_queue` -> `GET /queue` precedent (`oracle/src/queue.rs:1,50-56`). The architect seat called the precedent invented; the staff seat and the code refute that.
 - **2026-10-14: Persist `channel_handle`, not only `channel_id`.** The `/channel/UC.../search` form returned 0 entries in a test on ripr, while `/@handle/search` works.
 - **2026-10-14: The popup uses a textarea plus a Capture button, and an empty note is a bare capture.** The popup needs a submit step once it takes input.
+  - **Superseded 2026-11-15:** this was never Scott's decision. The design research marked it "Scott's call" and no one asked him. He does not want a popup note field, ever. Since v0.22.3 (`537641e`) the popup captures on open again, and `popup_captures_on_open_with_no_input_step` in `borg/tests/stage_produces_valid_extension_dir.rs` fails if an input step comes back. `--note` on `sb borg ingest` is unaffected.
 - **2026-10-14: `Tool` drops the `kind` field.** No consumer reads it (panel round 1 defer item; dropping it is cheaper than deferring).
 - **2026-10-14: The eval harness (Phase 9) lands before the prompt phases (10, 11)**, so the prompts are measured from their first commit (panel round 1).
 
