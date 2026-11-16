@@ -43,27 +43,11 @@ function fail(status, message) {
   });
 }
 
-// Pure body builder: `note` is left out when empty after trimming, so an empty
-// textarea is a bare capture. Its test is the Rust contract
-// borg/tests/extension_body_matches_ingest_request.rs plus the stage check.
-function buildBody(url, rawNote) {
-  const body = { url };
-  const note = (rawNote || "").trim();
-  if (note) {
-    body.note = note;
-  }
-  return body;
-}
-
 async function capture() {
   const status = document.getElementById("status");
-  const noteField = document.getElementById("note");
-  const button = document.getElementById("capture");
-  button.disabled = true;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url) {                  // guard only on missing URL; do NOT filter by scheme
     status.textContent = "No active tab URL";
-    button.disabled = false;
     return;
   }
   const authToken = await getAuthToken();
@@ -77,7 +61,7 @@ async function capture() {
       timeoutMs: BORG_DAEMON.attemptTimeoutMs,
       path: "/ingest",
       headers,
-      body: JSON.stringify(buildBody(tab.url, noteField.value)),
+      body: JSON.stringify({ url: tab.url }),
       onAttempt: (endpoint) => {
         status.textContent = `Trying ${hostOf(endpoint)}...`;
       },
@@ -85,13 +69,11 @@ async function capture() {
     if (!result.ok) {                      // no endpoint answered; after a timeout delivery is unknown
       const detail = result.attempts.map((a) => `${hostOf(a.endpoint)}: ${a.error}`).join("; ");
       fail(status, `No response from ${detail}`);
-      button.disabled = false;
       return;
     }
     const host = hostOf(result.endpoint);
     if (!result.response.ok) {             // fetch does not reject on 4xx/5xx
       fail(status, `Daemon error: HTTP ${result.response.status} (${host})`);
-      button.disabled = false;
       return;
     }
     await result.response.json();
@@ -99,18 +81,9 @@ async function capture() {
     setTimeout(() => window.close(), 400);
   } catch (err) {
     fail(status, `Error: ${err.message}`);  // e.g. an unparseable response body
-    button.disabled = false;
   }
 }
 
-// The popup no longer posts on open: Enter in the textarea or the Capture
-// button submits, and Shift+Enter inserts a newline.
-document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("capture").addEventListener("click", capture);
-  document.getElementById("note").addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      capture();
-    }
-  });
-});
+// One click captures: the popup posts the moment it opens. No input, no
+// submit step (stage_produces_valid_extension_dir.rs guards this).
+document.addEventListener("DOMContentLoaded", capture);

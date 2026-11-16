@@ -162,6 +162,25 @@ fn stage_fails_on_invalid_endpoints_before_writing() {
     );
 }
 
+/// Regression guard: the toolbar click is a one-click capture. v0.17.0 (c1f1632) added a
+/// note textarea and a Capture button, so the popup stopped posting on open and every
+/// capture took a second keypress. Scott does not want that, ever. If this fails, someone
+/// put an input step back in the popup - take it out.
+#[test]
+fn popup_captures_on_open_with_no_input_step() {
+    let repo_root = extension::repo_root().expect("locate repo root");
+    let dir = extension_dir(&repo_root);
+    let html = std::fs::read_to_string(dir.join("popup.html")).expect("read popup.html");
+    for tag in ["<textarea", "<input", "<button", "<form"] {
+        assert!(!html.contains(tag), "popup.html has `{tag}`: the popup must capture on open");
+    }
+    let js = std::fs::read_to_string(dir.join("popup.js")).expect("read popup.js");
+    assert!(
+        js.contains(r#"document.addEventListener("DOMContentLoaded", capture);"#),
+        "popup.js must call capture() on DOMContentLoaded"
+    );
+}
+
 #[test]
 fn staged_html_loads_daemon_and_fallback_before_own_script() {
     let tempdir = tempfile::TempDir::new().expect("create tempdir");
