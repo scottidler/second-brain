@@ -172,7 +172,10 @@ fn popup_captures_on_open_with_no_input_step() {
     let dir = extension_dir(&repo_root);
     let html = std::fs::read_to_string(dir.join("popup.html")).expect("read popup.html");
     for tag in ["<textarea", "<input", "<button", "<form"] {
-        assert!(!html.contains(tag), "popup.html has `{tag}`: the popup must capture on open");
+        assert!(
+            !html.contains(tag),
+            "popup.html has `{tag}`: the popup must capture on open"
+        );
     }
     let js = std::fs::read_to_string(dir.join("popup.js")).expect("read popup.js");
     assert!(
